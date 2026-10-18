@@ -33,7 +33,9 @@ _SENSITIVE_KEY_PARTS = ("token", "secret", "password", "authorization", "api_key
 _PII_KEY_PARTS = ("first_name", "last_name", "full_name", "email", "mobile", "phone",
                   "address", "street", "postal", "zip", "latitude", "longitude",
                   "national", "district", "block", "building")
-_PII_KEYS = {"name", "city", "location"}
+# ip / user agent identify the customer's device (source_details on real orders). Exact
+# keys only: "ip" as a substring would mask "shipping", "description", "zip"...
+_PII_KEYS = {"name", "city", "location", "ip", "user-agent", "user_agent", "useragent"}
 # Free text the customer types (order notes, gift messages) routinely carries a phone
 # number or an address: masked as a substring so customer_note / notes are caught too.
 _FREE_TEXT_KEY_PARTS = ("note", "comment", "message", "gift")
@@ -417,6 +419,8 @@ def needs_variant_fetch(product):
 def _sensitive(key):
     key = str(key).lower()
     return (key in _PII_KEYS
+            # client_ip / remote_ip / ip_addr, without the "ip" substring trap (shipping)
+            or key.endswith(("_ip", "-ip")) or key.startswith(("ip_", "ip-"))
             or any(part in key for part in _SENSITIVE_KEY_PARTS)
             or any(part in key for part in _PII_KEY_PARTS)
             or any(part in key for part in _FREE_TEXT_KEY_PARTS)
@@ -814,7 +818,7 @@ def build_lines(order, items, price_digits=PRICE_DIGITS):
     Returns {"products": [{"sku", "name", "quantity", "price_unit", "line_id"}],
              "extras": [{"kind": "shipping"|"cod"|"discount", "name", "price_unit"}],
              "extras_basis": "gross" | "net" | "none" | "unreconciled",
-             "expected_total", "salla_total", "tolerance"}
+             "expected_total", "salla_total", "tolerance", "vat_rate", "cod_not_charged"}
     price_unit is always NET (before VAT), rounded to `price_digits` like Odoo stores
     it: the KSA sales tax is price-excluded, so Odoo adds 15 % on top and the total must
     come back to Salla's (9.99 gross -> 8.6869565 net; x 3 -> 26.06 + 3.91 = 29.97).
@@ -826,7 +830,13 @@ def build_lines(order, items, price_digits=PRICE_DIGITS):
     Shipping / COD / discount: Salla does not say whether these amounts include VAT, so
     both readings are tried against Salla's own total and the one that reconciles wins
     ("gross" = VAT-inclusive, divided by 1 + VAT). Neither -> "unreconciled", gross is
-    assumed and the caller's total check flags the order."""
+    assumed and the caller's total check flags the order.
+    COD not charged: Salla can send amounts.cash_on_delivery and still leave it out of
+    the total (real order 2026-10-18: sub_total 427.76 x 1.15 = total 491.92, COD 10
+    nowhere), while a dashboard order did include it. So the same two readings are also
+    tried WITHOUT the COD line; the closest reading wins, a reading that charges COD wins
+    a tie. "cod_not_charged" = the COD amount dropped that way (0.0 otherwise), for the
+    caller's chatter note. With nothing else left, extras_basis is "none"."""
     vat = order.get("vat_rate")
     vat = DEFAULT_VAT_RATE if vat is None else vat
     products = [{
@@ -847,23 +857,33 @@ def build_lines(order, items, price_digits=PRICE_DIGITS):
     for disc in discounts:
         raw_extras.append(("discount", disc["title"], -abs(disc["amount"])))
 
-    def plan(basis):
+    def plan(basis, with_cod=True):
         div = (1 + vat / 100.0) if basis == "gross" else 1.0
         return [{"kind": k, "name": n, "price_unit": _round(amount / div, price_digits),
                  "quantity": 1}
-                for k, n, amount in raw_extras]
+                for k, n, amount in raw_extras if with_cod or k != "cod"]
 
-    candidates = {"gross": plan("gross"), "net": plan("net")}
+    # Preference order = tie order: charging the COD the payload names is the default.
+    readings = [("gross", True), ("net", True)]
+    if order.get("cod"):
+        readings += [("gross", False), ("net", False)]
+    candidates = {r: plan(*r) for r in readings}
     salla_total = order.get("total")
-    tol = total_tolerance(products + candidates["gross"])
-    basis = "none" if not raw_extras else "unreconciled"
+    tol = total_tolerance(products + candidates[("gross", True)])
+    basis, chosen = ("none" if not raw_extras else "unreconciled"), ("gross", True)
     if raw_extras and salla_total is not None:
-        diffs = {b: abs(expected_total(products + ex, vat, price_digits) - salla_total)
-                 for b, ex in candidates.items()}
-        best = min(("gross", "net"), key=lambda b: diffs[b])   # gross wins a tie
+        # _r2: float noise must not break the tie order between equal readings.
+        diffs = {r: _r2(abs(expected_total(products + candidates[r], vat, price_digits)
+                            - salla_total))
+                 for r in readings}
+        best = min(readings, key=lambda r: diffs[r])   # min keeps the first of a tie
         if diffs[best] <= tol:
-            basis = best
-    extras = candidates["net" if basis == "net" else "gross"]
+            chosen = best
+            basis = best[0]
+    extras = candidates[chosen]
+    cod_dropped = 0.0 if chosen[1] else order["cod"]
+    if not extras and basis != "unreconciled":
+        basis = "none"
     for extra in extras:
         extra.pop("quantity")
     return {
@@ -875,7 +895,22 @@ def build_lines(order, items, price_digits=PRICE_DIGITS):
         "salla_total": salla_total,
         "tolerance": tol,
         "vat_rate": vat,
+        "cod_not_charged": cod_dropped,
     }
+
+
+def fmt_money(value):
+    """An amount for a chatter note or log line: 2 decimals ("370.09", not the float
+    370.09000000000003), half away from zero like the currency; "?" when unknown."""
+    if value is None or isinstance(value, bool):
+        return "?"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "?"
+    if not math.isfinite(number):
+        return "?"
+    return "%.2f" % (_r2(number) + 0.0)   # + 0.0: -0.0 prints "0.00", not "-0.00"
 
 
 def total_check(odoo_total, salla_total, tolerance):

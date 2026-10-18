@@ -182,6 +182,17 @@ class SaleOrder(models.Model):
                              order["id"])
                 return False
             raise
+        if plan.get("cod_not_charged"):
+            # Not an alert: the total reconciled, nothing to fix. Visible for the audit
+            # of why a COD order carries no COD line.
+            _logger.info("Salla order %s: COD fee %s not in Salla's total, no COD line",
+                         order["id"], mapping.fmt_money(plan["cod_not_charged"]))
+            so.message_post(body=_(
+                "Salla: the order carries a cash-on-delivery fee of %s, but Salla's total "
+                "does not include it, so no COD line was added. Check with the courier "
+                "whether the fee is collected on delivery.") % mapping.fmt_money(
+                    plan["cod_not_charged"]),
+                subtype_xmlid="mail.mt_note")
         so._salla_reconcile_total(plan)
         # Before the confirmation on purpose: confirming reserves stock, and then every
         # order would read as short of its own quantity (Trendyol Phase 5).
@@ -215,8 +226,9 @@ class SaleOrder(models.Model):
                 "Salla: the order carries VAT %(s)s%% but Odoo applies %(o)s%% (Odoo total "
                 "%(ot)s vs Salla total %(st)s). The order was NOT confirmed: check the tax "
                 "settings of the Salla store and correct the order before confirming it.") % {
-                    "s": plan["vat_rate"], "o": odoo_vat, "ot": self.amount_total,
-                    "st": plan["salla_total"]})
+                    "s": plan["vat_rate"], "o": odoo_vat,
+                    "ot": mapping.fmt_money(self.amount_total),
+                    "st": mapping.fmt_money(plan["salla_total"])})
             return False
         if verdict == "adjust":
             adjust_diff = diff
@@ -234,7 +246,8 @@ class SaleOrder(models.Model):
                 self.message_post(body=_(
                     "Salla: rounding adjustment of %(diff)s added so the total equals what "
                     "the customer paid on Salla (%(total)s).") % {
-                        "diff": adjust_diff, "total": plan["salla_total"]},
+                        "diff": mapping.fmt_money(adjust_diff),
+                        "total": mapping.fmt_money(plan["salla_total"])},
                     subtype_xmlid="mail.mt_note")
                 return True
             verdict = "mismatch"
@@ -245,7 +258,9 @@ class SaleOrder(models.Model):
             reason = _("Salla's total could not be read from the order")
         else:
             reason = _("Odoo total %(odoo)s vs Salla total %(salla)s (difference %(diff)s)") % {
-                "odoo": self.amount_total, "salla": plan["salla_total"], "diff": diff}
+                "odoo": mapping.fmt_money(self.amount_total),
+                "salla": mapping.fmt_money(plan["salla_total"]),
+                "diff": mapping.fmt_money(diff)}
         _logger.warning("Salla order %s (%s): total does not match, left as quotation. %s. "
                         "Extras read as %s.", self.salla_order_id, self.name, reason,
                         plan["extras_basis"])
@@ -352,13 +367,14 @@ class SaleOrder(models.Model):
         if mapping.total_check(self.amount_total, total_before, 0)[0] != "ok":
             self.salla_total_mismatch = True
             _logger.warning("Salla order %s (%s): total changed during confirmation "
-                            "(%s -> %s)", self.salla_order_id, self.name, total_before,
-                            self.amount_total)
+                            "(%s -> %s)", self.salla_order_id, self.name,
+                            mapping.fmt_money(total_before), mapping.fmt_money(self.amount_total))
             self._salla_alert(_(
                 "Salla: the total changed during confirmation (%(a)s -> %(b)s), most likely "
                 "an automatic promotion added a line. The customer paid %(c)s on Salla: "
-                "remove the extra line.") % {"a": total_before, "b": self.amount_total,
-                                              "c": self.salla_total})
+                "remove the extra line.") % {"a": mapping.fmt_money(total_before),
+                                              "b": mapping.fmt_money(self.amount_total),
+                                              "c": mapping.fmt_money(self.salla_total)})
         return True
 
     def _salla_apply_status(self, status):

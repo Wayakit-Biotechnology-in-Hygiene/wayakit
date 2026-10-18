@@ -1354,6 +1354,175 @@ def test_redact_order_notes():
     assert out["id"] == 900000101 and out["reference_id"] == 70000101
 
 
+# --- F2a fix round 1 (staging findings 2026-10-18) ---------------------------------
+
+def test_redact_ip_and_user_agent():
+    """Real payload: source_details.ip and source_details["user-agent"] were logged in
+    clear. "ip" is an EXACT key match: as a substring it would mask shipping,
+    shipping_cost, description, recipient... (all contain "ip")."""
+    order = _order(491.92, shipping=25.0, cod=10.0,
+                   source="api",
+                   source_details={"type": "api", "value": None, "device": "desktop",
+                                   "user-agent": "FakeAgent/1.0 (test)",
+                                   "ip": "203.0.113.7"},           # TEST-NET-3, fake
+                   description="fake order description",
+                   tracking=[{"IP": "198.51.100.9", "user_agent": "FakeAgent/2.0",
+                              "User-Agent": "FakeAgent/3.0", "step": 2}])
+    out = mapping.redact(order)
+    sd = out["source_details"]
+    assert sd["ip"] == "***" and sd["user-agent"] == "***"
+    assert out["tracking"][0]["IP"] == "***"                         # case-insensitive
+    assert out["tracking"][0]["user_agent"] == "***"
+    assert out["tracking"][0]["User-Agent"] == "***"
+    dump = json.dumps(out)
+    for leaked in ("203.0.113.7", "198.51.100.9", "FakeAgent"):
+        assert leaked not in dump, leaked
+    # neighbours of the exact "ip" key stay readable
+    assert sd["type"] == "api" and sd["device"] == "desktop" and sd["value"] is None
+    assert out["tracking"][0]["step"] == 2
+    assert out["source"] == "api"
+    assert out["description"] == "fake order description"
+    assert out["amounts"]["shipping_cost"] == {"amount": 25.0, "currency": "SAR"}
+    assert out["amounts"]["cash_on_delivery"] == {"amount": 10.0, "currency": "SAR"}
+    keep = {"shipping": {"company": "Fake Courier", "shipping_cost": 25,
+                         "ship_to_type": "pickup"},
+            "shipping_company": "Fake Courier", "shipment_id": 5,
+            "description": "d", "recipient_count": 1, "membership_tier": "gold",
+            "zip_code_id": None, "ipsum": "x", "skip": True}
+    redacted = mapping.redact(keep)
+    redacted.pop("zip_code_id")       # "zip" is a PII substring by design (postal code)
+    keep.pop("zip_code_id")
+    assert redacted == keep, redacted
+    # ip as a prefix/suffix word: client_ip, remote_ip, ip_addr, ip-address, X-Real-IP
+    ipish = {"client_ip": "192.0.2.1", "remote_ip": "192.0.2.2", "ip_addr": "192.0.2.3",
+             "ip-address": "192.0.2.4", "X-Real-IP": "192.0.2.5", "Customer_IP": "192.0.2.6"}
+    assert set(mapping.redact(ipish).values()) == {"***"}, mapping.redact(ipish)
+    assert "192.0.2" not in json.dumps(mapping.redact({"src": [ipish]}))
+    # ...but not every word that merely starts/ends with the letters "ip"
+    letters = {"ipsum": 1, "skip": 2, "tip": 3, "recipient": 4, "ship_to": 5, "ipv": 6}
+    assert mapping.redact(letters) == letters, mapping.redact(letters)
+    # previously masked keys still masked (no regression from the new rule)
+    prev = mapping.redact({"receipt": "r", "shipping_address": "a", "email": "e",
+                           "access_token": "FAKE"})
+    assert set(prev.values()) == {"***"}, prev
+    assert order["source_details"]["ip"] == "203.0.113.7"             # input untouched
+
+
+def _real_cod_items():
+    # 3 x 100.00 + 4 x 31.94 = 427.76 net, the sub_total of the real order 504361123
+    # (fake SKUs/ids). x 1.15 per line: 345.00 + 146.92 = 491.92.
+    return [_item(6001, "FP-TEST-00001", 3, 100.0), _item(6002, "FP-TEST-00002", 4, 31.94)]
+
+
+def test_cod_not_charged_dropped():
+    """Staging finding: amounts.cash_on_delivery 10 but total 491.92 = sub_total x 1.15,
+    COD nowhere. Before the fix a COD line (8.6956522 net -> 10.01) made Odoo 501.93 and
+    the order 'unreconciled'. Now the COD line is dropped and reported."""
+    order = _order(491.92, shipping=0, cod=10.0, discounts=[])
+    order["amounts"]["sub_total"] = _amt(427.76)
+    order["amounts"]["tax"] = {"percent": "15.00", "amount": _amt(64.16)}
+    plan = _plan(order, _real_cod_items())
+    assert [p["quantity"] for p in plan["products"]] == [3, 4]
+    assert [p["price_unit"] for p in plan["products"]] == [100.0, 31.94]   # per unit
+    assert [e for e in plan["extras"] if e["kind"] == "cod"] == []
+    assert plan["extras"] == []
+    assert plan["cod_not_charged"] == 10.0
+    assert plan["extras_basis"] == "none"
+    assert plan["expected_total"] == 491.92
+    assert mapping.total_check(plan["expected_total"], 491.92, plan["tolerance"]) == ("ok", 0.0)
+
+
+def test_cod_charged_same_items_keeps_line():
+    """Same goods, but Salla DOES charge the 10.00 COD (total 501.92): the COD line stays,
+    nothing is reported dropped, the 0.01 per-line rounding is absorbed as before."""
+    plan = _plan(_order(501.92, cod=10.0), _real_cod_items())
+    assert [(e["kind"], e["price_unit"]) for e in plan["extras"]] == [("cod", 8.6956522)]
+    assert plan["cod_not_charged"] == 0.0
+    assert plan["extras_basis"] == "gross"
+    assert plan["expected_total"] == 501.93
+    assert mapping.total_check(plan["expected_total"], 501.92, plan["tolerance"]) == ("adjust", -0.01)
+
+
+def test_cod_charged_vat_zero_dashboard_order():
+    """Manual dashboard order with VAT 0: 3 x 106.94 = 320.82 + COD 1.00 = 321.82.
+    With VAT 0 gross == net, so only the 'with COD' readings reconcile: COD kept."""
+    order = _order(321.82, cod=1.0)
+    order["amounts"]["tax"] = {"percent": "0.00", "amount": _amt(0)}
+    norm = mapping.normalize_order(order)
+    assert norm["vat_rate"] == 0.0
+    lines, problems = mapping.normalize_items([_item(6003, "FP-TEST-00003", 3, 106.94)])
+    assert problems == []
+    plan = mapping.build_lines(norm, lines)
+    assert [(e["kind"], e["price_unit"]) for e in plan["extras"]] == [("cod", 1.0)]
+    assert plan["cod_not_charged"] == 0.0
+    assert plan["expected_total"] == 321.82
+    # and the same order without the COD in Salla's total drops it
+    order2 = _order(320.82, cod=1.0)
+    order2["amounts"]["tax"] = {"percent": "0.00", "amount": _amt(0)}
+    plan2 = mapping.build_lines(mapping.normalize_order(order2), lines)
+    assert plan2["extras"] == [] and plan2["cod_not_charged"] == 1.0
+    assert plan2["expected_total"] == 320.82
+
+
+def test_cod_not_charged_with_coupon_and_shipping():
+    """COD dropped while shipping and a non-zero coupon are still charged (gross)."""
+    items = [_item(5001, "FP-TEST-00001", 3, 20.0), _item(5002, "FP-TEST-00002", 4, 12.5)]
+    # goods 126.50 gross - coupon 25.30 + shipping 23.00 = 124.20; COD 11.50 not charged
+    plan = _plan(_order(124.2, shipping=23.0, cod=11.5,
+                        discounts=[{"title": "TEST20", "discount": 25.3}]), items)
+    kinds = sorted((e["kind"], e["price_unit"]) for e in plan["extras"])
+    assert kinds == [("discount", -22.0), ("shipping", 20.0)]
+    assert plan["cod_not_charged"] == 11.5
+    assert plan["extras_basis"] == "gross"
+    assert mapping.total_check(plan["expected_total"], 124.2, plan["tolerance"]) == ("ok", 0.0)
+    # the same order with the COD charged still takes all three extras
+    plan = _plan(_order(135.7, shipping=23.0, cod=11.5,
+                        discounts=[{"title": "TEST20", "discount": 25.3}]), items)
+    assert sorted(e["kind"] for e in plan["extras"]) == ["cod", "discount", "shipping"]
+    assert plan["cod_not_charged"] == 0.0
+
+
+def test_cod_not_charged_net_shipping():
+    """Shipping read as NET (20 net -> 23.00 with VAT) and COD not charged."""
+    plan = _plan(_order(514.92, shipping=20.0, cod=10.0), _real_cod_items())
+    assert [(e["kind"], e["price_unit"]) for e in plan["extras"]] == [("shipping", 20.0)]
+    assert plan["extras_basis"] == "net"
+    assert plan["cod_not_charged"] == 10.0
+    assert plan["expected_total"] == 514.92
+
+
+def test_cod_tiny_fee_charged_wins_tie_or_closest():
+    """A 0.01 COD fee: both readings sit within the rounding tolerance; the closest wins
+    and, on an exact tie, the reading that CHARGES the COD (the payload's default)."""
+    items = [_item(6004, "FP-TEST-00004", 3, 10.0)]          # 34.50 gross
+    plan = _plan(_order(34.51, cod=0.01), items)              # COD charged: exact
+    assert [e["kind"] for e in plan["extras"]] == ["cod"]
+    assert plan["cod_not_charged"] == 0.0
+    plan = _plan(_order(34.5, cod=0.01), items)               # gross 0.01 -> net 0.0087 -> 0.01 line
+    # dropped reading is exact (34.50), charged one is 34.51: closest = dropped
+    assert plan["extras"] == [] and plan["cod_not_charged"] == 0.01
+
+
+def test_no_cod_field_reports_zero():
+    plan = _plan(_order(103.5), [_item(6005, "FP-TEST-00005", 3, 30.0)])
+    assert plan["cod_not_charged"] == 0.0 and plan["extras_basis"] == "none"
+    assert plan["expected_total"] == 103.5
+
+
+def test_fmt_money():
+    assert mapping.fmt_money(370.09000000000003) == "370.09"
+    assert mapping.fmt_money(321.82) == "321.82"
+    assert mapping.fmt_money(10) == "10.00"
+    assert mapping.fmt_money("12.5") == "12.50"
+    assert mapping.fmt_money(2.675) == "2.68"                 # half away from zero
+    assert mapping.fmt_money(-2.675) == "-2.68"
+    assert mapping.fmt_money(-0.001) == "0.00"                 # never "-0.00"
+    assert mapping.fmt_money(-0.01) == "-0.01"
+    assert mapping.fmt_money(0) == "0.00"
+    for bad in (None, True, False, "abc", "", float("nan"), float("inf"), [], {}):
+        assert mapping.fmt_money(bad) == "?", bad
+
+
 if __name__ == "__main__":
     for fn in [test_signature_valid, test_signature_wrong_secret,
                test_signature_tampered_one_byte, test_signature_missing_or_empty_header,
@@ -1405,7 +1574,15 @@ if __name__ == "__main__":
                test_price_digits_7_rounding, test_extras_at_7_digits_hundred_net,
                test_rounding_adjust_salla_net_two_decimals,
                test_offsetting_shipping_and_coupon_tie, test_large_order_real_fee_not_absorbed,
-               test_redact_payment_data]:
+               test_redact_payment_data,
+               # F2a fix round 1
+               test_redact_ip_and_user_agent,
+               test_cod_not_charged_dropped, test_cod_charged_same_items_keeps_line,
+               test_cod_charged_vat_zero_dashboard_order,
+               test_cod_not_charged_with_coupon_and_shipping,
+               test_cod_not_charged_net_shipping,
+               test_cod_tiny_fee_charged_wins_tie_or_closest,
+               test_no_cod_field_reports_zero, test_fmt_money]:
         fn()
         print(fn.__name__, "OK")
     print("all passed")

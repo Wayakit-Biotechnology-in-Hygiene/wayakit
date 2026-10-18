@@ -177,7 +177,7 @@ Prepare in the demo store:
     - **B**: **two** refresh lines, at least ~3 s apart (serialized by the lock), the second using the refresh token the first one just saved. Both `ok`; final fingerprint differs from "before". Neither `raised`.
     - Afterwards **Test Connection** is green. A red 401 / "Reinstall the app" here means a spent refresh token was resent: **bug, report it** (and the app must be reinstalled on the demo store).
     - `raised UserError … kept the token refresh lock for over 18 s` is acceptable only if Salla's token endpoint was slower than ~15 s; note it.
-25. A second 401 right after a refresh must show the red `Salla rejected the token even after a refresh (401). Reinstall the app on the store.`, not loop (only observable if Salla really rejects the fresh token; do not force it).
+25. A second 401 right after a refresh must show the red `Salla answered 401 on <path> even with a freshly refreshed token. Either the app lacks the scope this endpoint needs ... or the store revoked the app (reinstall it).`, not loop (step 72 reproduces it on purpose with a missing scope) (only observable if Salla really rejects the fresh token; do not force it).
 
 ## F. Rate limiting (429)
 
@@ -369,3 +369,53 @@ For every order below, write down from the Salla dashboard: order id, reference,
     - **A real rate other than 15 (`0`, `5`)**: the order is **imported** as a **quotation**, `salla_total_mismatch` ticked, log WARNING *Salla VAT 0% vs Odoo 15%, left as quotation*, and the internal note to the notify users *Salla: the order carries VAT 0% but Odoo applies 15% (Odoo total X vs Salla total Y). The order was NOT confirmed: check the tax settings of the Salla store and correct the order before confirming it.* No rounding line is added. It must **not** stay in the queue as an `error` row, not be retried every 25 min, and not end `failed`.
     - **A fraction (`0.15`) or an out-of-range value (`45`)**: `vat_rate()` reads it as 15 %, the log has only the WARNING *unexpected tax percent in the payload, using 15%*, and the order is **imported normally** (totals reconcile, confirmed if its status allows). These two cannot be produced from the store settings; they are covered by `test_vat_rate` / `test_normalize_order_vat_suspect_and_default`. Only check it if a real payload ever shows such a value.
     Delete the test quotation afterwards.
+
+## N. F2a fix round 1 (staging findings 2026-10-18)
+
+66. **Status webhook BEFORE created + missing SKU: the queue run does not crash, the rows stay pending, the other orders of the batch are imported.** This is the exact staging crash (`MissingError: salla.order.queue(<id>,) deleted` in `_queue_bookkeeping`, which rolled back the whole batch and left the queue undrained). Needs: one Salla order with an SKU not in Odoo (`MISS_ID`, e.g. **3 x P3**, case 7) and one normal order not yet in Odoo (`GOOD_ID`, **3 x P1**, placed with the webhook URL dead as in step 50, or its queue row deleted before the cron ran). Then in the shell, two rows for `MISS_ID` with the **status** row first (the real order of arrival), plus `GOOD_ID`:
+    ```python
+    MISS_ID, GOOD_ID = "<missing-sku order id>", "<normal order id>"
+    B = env["salla.backend"].browse(BID)
+    B._enqueue_order(MISS_ID, "order.status.updated")
+    B._enqueue_order(MISS_ID, "order.created")
+    B._enqueue_order(GOOD_ID, "order.created")
+    env.cr.commit()
+    queue()                                   # 2 rows MISS_ID + 1 row GOOD_ID, all pending
+    B.with_user(1)._process_order_queue()     # must return counters, NO traceback
+    env.cr.commit()
+    queue()
+    orders(GOOD_ID), orders(MISS_ID)
+    ```
+    Expected: the call returns e.g. `{'missing_sku': 1, 'created': 1}` with no exception; `queue()` shows **exactly one** row for `MISS_ID`, state `pending`, `attempts` **not** increased (a missing SKU never counts as an attempt), `last_error` naming the missing SKU, `last_try` set; **no** row left for `GOOD_ID`; `orders(GOOD_ID)` has **one** order, `orders(MISS_ID)` is `[]`. Run `B.with_user(1)._process_order_queue()` again at once: `MISS_ID` is **not** retried (not due for 25 min), nothing changes. Then press **Retry** on the `MISS_ID` row and run Process Order Queue: still exactly one row, still pending, no traceback.
+67. **Same with an error outcome (attempts read before the duplicate is deleted).** Two fake rows for one id that the API cannot read, the **newer** one carrying the higher count (so reading only the kept row after the unlink would lose it):
+    ```python
+    B._enqueue_order("FAKE-DUP-1", "order.status.updated")
+    B._enqueue_order("FAKE-DUP-1", "order.created")
+    Q = env["salla.order.queue"].search([("salla_order_id", "=", "FAKE-DUP-1")], order="id")
+    Q[-1].attempts = 3
+    env.cr.commit()
+    keep_id = Q[0].id
+    B.with_user(1)._process_order_queue(); env.cr.commit()
+    [(q.id, q.state, q.attempts) for q in env["salla.order.queue"].search(
+        [("salla_order_id", "=", "FAKE-DUP-1")])]
+    ```
+    No traceback; exactly **one** row left, id == `keep_id` (the lowest), state `pending`, `attempts` = **4** (max of the group, 3, + 1). `attempts` = 1 means the count was read from the kept row only: report it to the dev. Delete it afterwards (`env["salla.order.queue"].search([("salla_order_id","=","FAKE-DUP-1")]).unlink(); env.cr.commit()`).
+68. **A bookkeeping failure costs only its own order.** Staging shell only (the patch lives in this shell process and is gone when it exits). Queue `MISS_ID` (or a `FAKE-` id) and `GOOD_ID`-style normal order again (a new **3 x P2** order with its queue row in place), then make the bookkeeping raise for one order:
+    ```python
+    cls = type(env["salla.backend"])
+    orig = cls._queue_bookkeeping
+    def boom(self, order_id, group, outcome, detail):
+        if order_id == MISS_ID:
+            raise RuntimeError("forced bookkeeping failure (test)")
+        return orig(self, order_id, group, outcome, detail)
+    cls._queue_bookkeeping = boom
+    B._enqueue_order(MISS_ID, "manual"); B._enqueue_order("<new 3 x P2 order id>", "manual")
+    env.cr.commit()
+    B.with_user(1)._process_order_queue(); env.cr.commit()
+    cls._queue_bookkeeping = orig
+    ```
+    Expected: no traceback out of `_process_order_queue`; the log has a **WARNING** *Salla order `MISS_ID`: queue bookkeeping failed (outcome missing_sku), rows left as they were; retried next run* with the `RuntimeError: forced bookkeeping failure (test)` traceback under it; the 3 x P2 order **is imported** and its queue row is gone; `MISS_ID`'s rows are unchanged (still pending). Then run Process Order Queue normally: back to step 66's end state.
+69. **COD fee present but not charged by Salla (real case: API-created order).** `create_order([("FP-ACC-00004", 3)], payment="cod", cod_fee=10, branch_id=BR)` with `tests/staging_api_orders.py`. Write down Salla's `sub_total`, `cash_on_delivery`, `tax` and `total`: in the staging finding the total was `sub_total x 1.15` (COD **not** included). Expected in Odoo: **no** COD line, `amount_total` == Salla total (no `salla_total_mismatch`, confirmed since COD + under_review), and an internal note in the chatter saying the COD fee was **dropped** because Salla did not charge it (with the fee amount, 2 decimals). Counterpart: a **dashboard** order with a COD fee that Salla **does** include in the total (step 45) still gets its COD line, and **no** "dropped" note.
+70. **Customer IP and user agent masked.** With **Log Full Webhook Payloads** on, place one order and look at the dump: `source_details.ip` and `source_details["user-agent"]` (and `user_agent`, if present) are `"***"`; `amounts.shipping_cost`, `shipping` keys that are not PII, `description` and the item `sku`/`quantity` stay readable. Turn log_payloads off again.
+71. **Amounts in notes have 2 decimals.** In every Salla chatter note/log line with money from steps 46, 57, 65 and 69 (total mismatch, rounding adjustment, COD dropped, VAT), amounts read like `370.09`, never `370.09000000000003`.
+72. **401 for a missing scope: the message names it.** `show_branches()` from `tests/staging_api_orders.py` (the app has no `branches.read` scope). Expected: one forced refresh (log), then the error *Salla answered 401 on /branches even with a freshly refreshed token. Either the app lacks the scope this endpoint needs (add it to the app in the Salla Partners Portal, then reinstall the app on the store), or the store revoked the app (reinstall it).* Exactly **one** refresh for the call (no loop, no second refresh in the log). Test Connection right after is still **green** (the refresh did not break the token).

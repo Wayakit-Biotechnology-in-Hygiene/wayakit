@@ -519,9 +519,13 @@ class SallaBackend(models.Model):
 
             if resp.status_code == 401:
                 if refreshed:
+                    # Salla also answers 401 (not 403) for an endpoint outside the app's
+                    # scopes (GET /branches without branches.read, staging 2026-10-18).
                     raise UserError(_(
-                        "Salla rejected the token even after a refresh (401). Reinstall the "
-                        "app on the store."))
+                        "Salla answered 401 on %s even with a freshly refreshed token. "
+                        "Either the app lacks the scope this endpoint needs (add it to the "
+                        "app in the Salla Partners Portal, then reinstall the app on the "
+                        "store), or the store revoked the app (reinstall it).") % path)
                 # One refresh per call, then the loop retries; no recursion into _request.
                 token = self._refresh_token(stale_access_token=token, force=True)["access_token"]
                 refreshed = True
@@ -944,15 +948,17 @@ class SallaBackend(models.Model):
             outcome, _created, detail = self._sync_order_safe(order_id)
             counters[outcome] = counters.get(outcome, 0) + 1
             try:
-                # Own savepoint: a Retry clicked on this order's failed row while the cron
-                # runs makes this unlink/write hit a SerializationFailure; that must cost
-                # only this bookkeeping (redone next run), never the orders already
-                # imported in this batch.
+                # Own savepoint, any exception: a failure here (a Retry clicked on this
+                # order's row mid-run -> SerializationFailure, a row deleted meanwhile ->
+                # MissingError, a bug) must cost only this order's bookkeeping, redone
+                # next run. Letting it reach the cron's savepoint rolled back EVERY order
+                # of the batch and the queue never drained (staging 2026-10-18).
                 with self.env.cr.savepoint():
                     self._queue_bookkeeping(order_id, group, outcome, detail)
-            except pg_errors.SerializationFailure:
-                _logger.warning("Salla order %s: queue rows changed concurrently, "
-                                "bookkeeping skipped; retried next run", order_id)
+            except Exception:
+                _logger.warning("Salla order %s: queue bookkeeping failed (outcome %s), "
+                                "rows left as they were; retried next run", order_id,
+                                outcome, exc_info=True)
         if len(groups) == limit:
             # Batch full of DUE orders: more may be waiting. Processed ones are no longer
             # due, so this cannot loop on the same rows.
@@ -967,15 +973,20 @@ class SallaBackend(models.Model):
         if outcome in ("created", "known", "not_importable"):
             # not_importable (payment_pending/cancelled): a later status webhook queues
             # it again, and the reconcile cursor holds recent pending ones. Old failed
-            # rows of the order are moot now too.
-            (group | Queue.search([("backend_id", "=", self.id),
-                                   ("salla_order_id", "=", order_id),
-                                   ("state", "=", "failed")])).unlink()
+            # rows of the order are moot now too. exists(): a row deleted meanwhile
+            # (another run, a manual delete) is skipped instead of failing here.
+            (group.exists() | Queue.search([("backend_id", "=", self.id),
+                                            ("salla_order_id", "=", order_id),
+                                            ("state", "=", "failed")])).unlink()
             return
-        # One row carries the order's retry state; duplicates read with it go.
+        # One row carries the order's retry state; duplicates read with it go. Read
+        # everything BEFORE the unlink: reading a deleted record raises MissingError.
+        group = group.exists()
+        if not group:
+            return
+        attempts = max(group.mapped("attempts") or [0])
         keep = group.sorted("id")[0]
         (group - keep).unlink()
-        attempts = max(group.mapped("attempts"))
         vals = {"last_try": fields.Datetime.now(), "last_error": detail or outcome}
         if outcome == "error":
             # A missing SKU never fails the row: it waits until the product exists.
