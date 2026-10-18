@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 from datetime import timedelta
@@ -5,7 +6,7 @@ from datetime import timedelta
 import requests
 from psycopg2 import errors as pg_errors
 
-from odoo import api, fields, models, _
+from odoo import api, fields, models, SUPERUSER_ID, _
 from odoo.exceptions import AccessError, UserError, ValidationError
 
 from . import mapping
@@ -45,6 +46,24 @@ SYSTEM_WRITE_FIELDS = ("store_id", "client_id", "token_expires_at")
 # Columns the dedicated token cursor may write. Column names are interpolated into the
 # UPDATE from THIS tuple only, never from caller input.
 TOKEN_COLUMNS = ("access_token", "refresh_token", "token_expires_at", "token_scope", "store_id")
+
+# --- F2a orders ---
+# First reconcile run (empty cursor) looks this far back.
+DEFAULT_LOOKBACK_DAYS = 3
+# The list filter is a calendar date in Riyadh time and Salla's clock/zone are
+# unverified: re-read well before the cursor. Re-reading is free (salla_order_id unique).
+WINDOW_OVERLAP = timedelta(hours=6)
+MAX_ORDER_PAGES = 50          # 3 000 orders per window, far above Wayakit's volume
+MAX_ITEM_PAGES = 10
+QUEUE_BATCH = 30              # per queue run; the cron re-triggers itself when full
+QUEUE_MAX_ATTEMPTS = 10       # errors only; a missing SKU never fails the row
+# A row that did not import is retried after this, not on every trigger. Just under
+# the 30 min cron interval so the interval run picks it up.
+QUEUE_RETRY_AFTER = timedelta(minutes=25)
+CURSOR_STALE_AFTER = timedelta(days=3)
+# Default website for Salla orders: the KSA website (id 2 in production). Orders carry
+# it for reporting and the B2C flows; see salla_connector/CLAUDE.md for what it triggers.
+KSA_WEBSITE_ID = 2
 
 
 class SallaBackend(models.Model):
@@ -118,6 +137,67 @@ class SallaBackend(models.Model):
              "credentials and customer data masked. Turn on only to check field names "
              "against the first real payloads, then off again.",
     )
+
+    # --- F2a: orders ---
+    website_id = fields.Many2one(
+        "website", string="Website", default=lambda self: self._default_website(),
+        domain="[('company_id', '=', company_id)]",
+        help="Set on every imported order (B2C channel reporting). WARNING: a website "
+             "with a WhatsApp confirmation template sends it on confirmation.")
+    pricelist_id = fields.Many2one(
+        "product.pricelist", string="Pricelist",
+        default=lambda self: self._default_pricelist(),
+        domain="[('company_id', 'in', [company_id, False])]",
+        help="Only fixes the order currency (must be SAR): line prices come from Salla "
+             "and every line carries discount 0.")
+    salesperson_id = fields.Many2one("res.users", string="Salesperson",
+                                     help="Empty = imported orders have no salesperson.")
+    notify_user_ids = fields.Many2many(
+        "res.users", "salla_backend_notify_user_rel", "backend_id", "user_id",
+        string="Notify on New Order",
+        help="Pinged (Discuss inbox) on every imported order with ordered vs available "
+             "stock, and on every Salla problem with it (total mismatch, failed "
+             "confirmation, cancellation). Empty = silent.")
+    shipping_product_id = fields.Many2one(
+        "product.product", domain="[('company_id', 'in', [company_id, False])]",
+        string="Shipping Product",
+        help="Line for Salla's shipping cost. Must carry the 15% sales tax.")
+    cod_product_id = fields.Many2one(
+        "product.product", domain="[('company_id', 'in', [company_id, False])]",
+        string="COD Fee Product",
+        help="Line for Salla's cash-on-delivery fee. Must carry the 15% sales tax.")
+    discount_product_id = fields.Many2one(
+        "product.product", domain="[('company_id', 'in', [company_id, False])]",
+        string="Discount Product",
+        help="Line for coupons/offers (negative price) and for the rounding adjustment. "
+             "Must carry the 15% sales tax.")
+    auto_confirm = fields.Boolean(
+        default=True,
+        help="Confirm imported orders whose Salla status means paid. Off = everything "
+             "lands as a quotation (the kill switch if confirmation misbehaves).")
+    last_order_sync = fields.Datetime(
+        string="Orders Synced Until", copy=False,
+        help="UTC reconcile cursor. Held at the oldest order that could not be imported "
+             "(missing SKU, error, recent payment_pending). Editable: it is the recovery "
+             "lever when orders fall behind the window.")
+    order_queue_count = fields.Integer(compute="_compute_order_queue_count")
+
+    def _compute_order_queue_count(self):
+        Queue = self.env["salla.order.queue"]
+        for backend in self:
+            backend.order_queue_count = Queue.search_count([("backend_id", "=", backend.id)])
+
+    @api.model
+    def _default_website(self):
+        website = self.env["website"].browse(KSA_WEBSITE_ID).exists()
+        return website if website.company_id == self.env.company else self.env["website"]
+
+    @api.model
+    def _default_pricelist(self):
+        company = self.env.company
+        return self.env["product.pricelist"].search(
+            [("currency_id", "=", company.currency_id.id),
+             ("company_id", "in", [company.id, False])], limit=1)
 
     @api.model
     def _default_webhook_url(self):
@@ -509,7 +589,37 @@ class SallaBackend(models.Model):
             _logger.warning("Salla backend %s: %s received, tokens cleared. The app has to "
                             "be reinstalled on store %s.", self.name, event, self.store_id)
             return "revoked"
+        if event in mapping.ORDER_EVENTS:
+            order_id = mapping.webhook_order_id(payload)
+            if not order_id:
+                _logger.warning("Salla backend %s: %s without a readable order id; payload "
+                                "keys: %s", self.name, event, mapping.payload_keys(payload))
+                return "ignored:no-order-id"
+            self._enqueue_order(order_id, event)
+            return "queued"
         return "ignored:%s" % (event or "?")
+
+    def _enqueue_order(self, order_id, event):
+        """Queue a Salla order id for the import cron and wake it up. No API call and no
+        write on salla_backend here (webhook rules above _set_token_cache).
+
+        Append-only: a plain INSERT, one row per delivery, no unique key. It can never
+        conflict with, or wait on, the cron working on the same order — the cron only
+        deletes the row ids it read, so a webhook arriving mid-processing survives as a
+        new due row and is processed on the next run (which this call triggers)."""
+        self.ensure_one()
+        order_id = mapping.clean_id(order_id)
+        if not order_id:
+            return False
+        self.env.cr.execute("""
+            INSERT INTO salla_order_queue
+                (backend_id, salla_order_id, event, state, attempts,
+                 create_uid, write_uid, create_date, write_date)
+            VALUES (%s, %s, %s, 'pending', 0, %s, %s,
+                    now() at time zone 'UTC', now() at time zone 'UTC')
+        """, (self.id, order_id, event or "manual", self.env.uid, self.env.uid))
+        self.env.ref("salla_connector.ir_cron_salla_order_queue").sudo()._trigger()
+        return True
 
     # ------------------------------------------------------------------ actions
     def _notify(self, message, warning=False, title=None):
@@ -609,3 +719,377 @@ class SallaBackend(models.Model):
             len(missing), total, "\n".join(missing[:20]) + ("\n…" if len(missing) > 20 else ""))
             if missing else _("All %s Salla SKUs match an active Odoo product.") % total)
         return self._notify(msg, warning=bool(missing), title=_("Salla Product Check"))
+
+    # ------------------------------------------------------------------ orders (F2a)
+    # Transaction rules (see above _set_token_cache): nothing here writes the
+    # salla_backend row through the ORM. The reconcile cursor is written by
+    # _save_order_cursor AFTER the orders commit, on its own cursor.
+    def _log_payload(self, kind, ref, data):
+        """Full body only with log_payloads on (credentials and PII masked), else the key
+        structure: the first real orders are the only way to validate mapping.py."""
+        if self.sudo().log_payloads:
+            _logger.info("Salla %s %s: %s", kind, ref, json.dumps(mapping.redact(data)))
+        else:
+            _logger.debug("Salla %s %s, keys: %s", kind, ref, mapping.payload_keys(data))
+
+    def _list_pages(self, path, params, max_pages):
+        """All `data` items of a paginated GET -> (items, complete). complete=False when
+        the listing stopped early (page cap, an API ignoring `page`): the caller must not
+        advance a cursor past what it did not see."""
+        items, page = [], 1
+        for _i in range(max_pages):
+            res = self._request("GET", path, params=dict(params, page=page, per_page=PER_PAGE))
+            batch = res.get("data") if isinstance(res, dict) else None
+            if not isinstance(batch, list) or not batch:
+                return items, True
+            pagination = res.get("pagination")
+            served = mapping.current_page(pagination)
+            if served is not None and served != page:
+                _logger.warning("Salla backend %s: asked %s page %s, got %s; stopped.",
+                                self.name, path, page, served)
+                return items, False
+            items += [i for i in batch if isinstance(i, dict)]
+            page = mapping.next_page(pagination)
+            if not page:
+                return items, True
+        _logger.warning("Salla backend %s: %s stopped at the %s-page cap", self.name, path,
+                        max_pages)
+        return items, False
+
+    def _fetch_order(self, order_id):
+        res = self._request("GET", "/orders/%s" % order_id)
+        data = res.get("data") if isinstance(res, dict) else None
+        if isinstance(data, dict):
+            self._log_payload("order", order_id, data)
+        return data if isinstance(data, dict) else None
+
+    def _fetch_order_items(self, order_id):
+        """Order Items endpoint (the "expanded" order format is gone since 2026-09-01).
+        -> (items, complete)."""
+        items, complete = self._list_pages(mapping.ORDER_ITEMS_PATH, {"order_id": order_id},
+                                           MAX_ITEM_PAGES)
+        self._log_payload("order items", order_id, items)
+        return items, complete
+
+    def _order_config_problem(self, order, plan=None):
+        """Why this backend cannot build the order, or "" — checked before anything is
+        created, so a misconfiguration holds the order instead of importing it wrong."""
+        if not self.warehouse_id or self.warehouse_id.company_id != self.company_id:
+            return "warehouse missing or not in the backend's company"
+        if not self.pricelist_id:
+            return "no pricelist on the backend"
+        if self.website_id and self.website_id.company_id != self.company_id:
+            return "website belongs to another company"
+        currency = order.get("currency")
+        if currency and currency != self.pricelist_id.currency_id.name:
+            return "order currency %s but pricelist currency %s" % (
+                currency, self.pricelist_id.currency_id.name)
+        if plan:
+            needed = {e["kind"] for e in plan["extras"]}
+            if plan["extras"] or plan["salla_total"] is not None:
+                needed.add("discount")   # also carries the rounding adjustment
+            names = {"shipping": "shipping_product_id", "cod": "cod_product_id",
+                     "discount": "discount_product_id"}
+            missing = [names[k] for k in sorted(needed) if not self[names[k]]]
+            if missing:
+                return "backend has no %s" % ", ".join(missing)
+            foreign = [names[k] for k in sorted(needed) if self[names[k]].company_id
+                       and self[names[k]].company_id != self.company_id]
+            if foreign:
+                return "%s belongs to another company" % ", ".join(foreign)
+            for key in sorted(needed):
+                # Odoo's rate, never the payload's: a payload saying 0 % (VAT off on the
+                # demo store, exempt, misread field) must not turn every order into a
+                # config error. That disagreement goes down the total-mismatch path.
+                problem = self._extra_product_problem(self[names[key]], plan["odoo_vat_rate"])
+                if problem:
+                    return "%s: %s" % (names[key], problem)
+        return ""
+
+    def _extra_product_problem(self, product, vat_rate):
+        """Shipping/COD/discount/rounding lines are built on these products. A storable
+        one would create stock moves for a fee; one without the price-excluded VAT of the
+        order would break "Odoo total == Salla total" on every order that uses it."""
+        if product.type != "service":
+            return "must be a service product"
+        taxes = product.taxes_id.filtered(lambda t: t.company_id == self.company_id)
+        if not taxes.filtered(lambda t: t.amount_type == "percent" and not t.price_include
+                              and abs(t.amount - vat_rate) < 0.001):
+            return "needs a %g%% sales tax (not included in price) for %s" % (
+                vat_rate, self.company_id.name)
+        return ""
+
+    def _sync_order(self, order_id, summary=None):
+        """Import or refresh ONE Salla order. -> (outcome, created_at, detail)
+
+        outcome: "created" | "known" (already in Odoo, status refreshed) |
+        "not_importable" | "missing_sku" | "error" (API/config/data problem, retried).
+        `summary` = the order as the list endpoint returned it: enough to refresh a known
+        order without one more API call. Creation always reads the full order."""
+        self.ensure_one()
+        SaleOrder = self.env["sale.order"].with_company(self.company_id)
+        existing = SaleOrder._salla_find(order_id)
+        if summary is not None:
+            norm = mapping.normalize_order(summary) or {}
+            if existing:
+                existing._salla_apply_status(norm.get("status"))
+                return "known", norm.get("created_at"), ""
+            # payment_pending/cancelled in the listing: no detail call every 30 min.
+            if norm.get("status") and not mapping.should_import(norm["status"]):
+                return "not_importable", norm.get("created_at"), norm["status"]
+        raw = self._fetch_order(order_id)
+        order = mapping.normalize_order(raw)
+        if not order:
+            return "error", None, "order %s not readable from the API" % order_id
+        if existing:
+            existing._salla_apply_status(order["status"])
+            return "known", order["created_at"], ""
+        if not mapping.should_import(order["status"]):
+            return "not_importable", order["created_at"], order["status"]
+        problem = self._order_config_problem(order)
+        if problem:
+            return "error", order["created_at"], problem
+        raw_items, complete = self._fetch_order_items(order_id)
+        lines, problems = mapping.normalize_items(raw_items)
+        if not complete:
+            problems.append("item listing incomplete")
+        if not lines and not problems:
+            problems.append("no items")
+        if problems:
+            return "error", order["created_at"], "; ".join(problems)[:300]
+        products = SaleOrder._salla_match_products(self, [l["sku"] for l in lines])
+        missing = mapping.missing_skus(lines, products.keys())
+        if missing:
+            # Whole order skipped, never half an order. Retried until the SKU exists.
+            _logger.warning("Salla order %s (%s) skipped: SKU(s) not in Odoo %s",
+                            order["reference"], order_id, missing)
+            return "missing_sku", order["created_at"], ", ".join(missing)
+        for sku, product in products.items():
+            if not product.active:
+                _logger.warning("Salla order %s: product %s is archived in Odoo",
+                                order["reference"], sku)
+        if order["vat_suspect"]:
+            _logger.warning("Salla order %s: unexpected tax percent in the payload, using "
+                            "%s%%", order["reference"], order["vat_rate"]
+                            if order["vat_rate"] is not None else mapping.DEFAULT_VAT_RATE)
+        # Odoo stores unit prices with this precision (7 on prod): predict with the same.
+        digits = self.env["decimal.precision"].precision_get("Product Price")
+        plan = mapping.build_lines(order, lines, price_digits=digits)
+        # The rate Odoo's KSA sales tax applies (15 %); _salla_reconcile_total flags an
+        # order whose payload rate disagrees, and rounding lines are sized with it.
+        plan["odoo_vat_rate"] = mapping.DEFAULT_VAT_RATE
+        problem = self._order_config_problem(order, plan)
+        if problem:
+            return "error", order["created_at"], problem
+        so = SaleOrder._create_from_salla(self, order, plan, products)
+        if not so:
+            # Lost the race against the other path (webhook queue vs reconcile). Under
+            # REPEATABLE READ the winner's row may be invisible to this snapshot: then it
+            # owns the order and its status, nothing to do here.
+            winner = SaleOrder._salla_find(order_id)
+            if winner:
+                winner._salla_apply_status(order["status"])
+            return "known", order["created_at"], ""
+        _logger.info("Salla order %s (%s) imported as %s, state %s", order["reference"],
+                     order_id, so.name, so.state)
+        return "created", order["created_at"], ""
+
+    def _sync_order_safe(self, order_id, summary=None):
+        """_sync_order in a savepoint: one bad order never takes the batch down with it."""
+        try:
+            with self.env.cr.savepoint():
+                result = self._sync_order(order_id, summary=summary)
+        except Exception as e:
+            _logger.exception("Salla backend %s: order %s failed", self.name, order_id)
+            return "error", None, ("%s: %s" % (type(e).__name__, e))[:300]
+        if result[0] == "error":
+            _logger.warning("Salla backend %s: order %s not imported: %s", self.name,
+                            order_id, result[2])
+        return result
+
+    # --- queue (webhook path) ---
+    @api.model
+    def cron_process_order_queue(self):
+        for backend in self.search([("active", "=", True)]):
+            try:
+                with self.env.cr.savepoint():
+                    backend._process_order_queue()
+            except Exception as e:  # never let one backend kill the cron
+                _logger.exception("Salla order queue failed for backend %s: %s",
+                                  backend.name, e)
+
+    def _process_order_queue(self, limit=QUEUE_BATCH):
+        """Process up to `limit` ORDERS (not rows) that are due, each once.
+
+        Due = never tried, or last tried more than QUEUE_RETRY_AFTER ago: a pile of
+        missing-SKU rows is retried at most every ~25 min instead of looping the cron.
+        Only the row ids read here are deleted or updated; rows inserted meanwhile (a
+        status webhook during processing) stay due and are processed next run."""
+        self.ensure_one()
+        Queue = self.env["salla.order.queue"]
+        now = fields.Datetime.now()
+        rows = Queue.search([
+            ("backend_id", "=", self.id), ("state", "=", "pending"),
+            "|", ("last_try", "=", False), ("last_try", "<", now - QUEUE_RETRY_AFTER)],
+            # ponytail: the 5x read cap can split an order's rows across runs; the rest
+            # are simply processed next run (imports are idempotent).
+            order="last_try asc nulls first, id", limit=limit * 5)
+        groups = {}
+        for row in rows:
+            if row.salla_order_id in groups or len(groups) < limit:
+                groups.setdefault(row.salla_order_id, Queue)
+                groups[row.salla_order_id] |= row
+        counters = {}
+        for order_id, group in groups.items():
+            outcome, _created, detail = self._sync_order_safe(order_id)
+            counters[outcome] = counters.get(outcome, 0) + 1
+            try:
+                # Own savepoint: a Retry clicked on this order's failed row while the cron
+                # runs makes this unlink/write hit a SerializationFailure; that must cost
+                # only this bookkeeping (redone next run), never the orders already
+                # imported in this batch.
+                with self.env.cr.savepoint():
+                    self._queue_bookkeeping(order_id, group, outcome, detail)
+            except pg_errors.SerializationFailure:
+                _logger.warning("Salla order %s: queue rows changed concurrently, "
+                                "bookkeeping skipped; retried next run", order_id)
+        if len(groups) == limit:
+            # Batch full of DUE orders: more may be waiting. Processed ones are no longer
+            # due, so this cannot loop on the same rows.
+            self.env.ref("salla_connector.ir_cron_salla_order_queue").sudo()._trigger()
+        if groups:
+            _logger.info("Salla backend %s: order queue -> %s", self.name, counters)
+        return counters
+
+    def _queue_bookkeeping(self, order_id, group, outcome, detail):
+        """Delete or update the queue rows `group` (read for `order_id`) after a sync."""
+        Queue = self.env["salla.order.queue"]
+        if outcome in ("created", "known", "not_importable"):
+            # not_importable (payment_pending/cancelled): a later status webhook queues
+            # it again, and the reconcile cursor holds recent pending ones. Old failed
+            # rows of the order are moot now too.
+            (group | Queue.search([("backend_id", "=", self.id),
+                                   ("salla_order_id", "=", order_id),
+                                   ("state", "=", "failed")])).unlink()
+            return
+        # One row carries the order's retry state; duplicates read with it go.
+        keep = group.sorted("id")[0]
+        (group - keep).unlink()
+        attempts = max(group.mapped("attempts"))
+        vals = {"last_try": fields.Datetime.now(), "last_error": detail or outcome}
+        if outcome == "error":
+            # A missing SKU never fails the row: it waits until the product exists.
+            vals["attempts"] = attempts + 1
+            if vals["attempts"] >= QUEUE_MAX_ATTEMPTS:
+                vals["state"] = "failed"
+                _logger.warning("Salla order %s: gave up after %s attempts: %s",
+                                order_id, vals["attempts"], detail)
+        keep.write(vals)
+
+    def _check_order_manager(self):
+        # The view hides the buttons, but any object method is callable over RPC.
+        if not self.env.user.has_group("sales_team.group_sale_manager"):
+            raise AccessError(_("Only a sales manager can run the Salla order import."))
+
+    def action_process_order_queue(self):
+        self.ensure_one()
+        self._check_order_manager()
+        # OdooBot, like the cron: same authorship whoever clicks.
+        counters = self.with_user(SUPERUSER_ID)._process_order_queue()
+        return self._notify(_("Order queue processed: %s") % (counters or _("nothing due")))
+
+    def action_view_order_queue(self):
+        self.ensure_one()
+        return {
+            "type": "ir.actions.act_window",
+            "name": _("Salla Order Queue"),
+            "res_model": "salla.order.queue",
+            "view_mode": "tree,form",
+            "domain": [("backend_id", "=", self.id)],
+            "context": {"default_backend_id": self.id},
+        }
+
+    # --- reconcile (cron path: catches every webhook Salla gave up on) ---
+    @api.model
+    def cron_reconcile_orders(self):
+        for backend in self.search([("active", "=", True)]):
+            try:
+                with self.env.cr.savepoint():
+                    backend._reconcile_orders()
+            except Exception as e:  # never let one backend kill the cron
+                _logger.exception("Salla order reconcile failed for backend %s: %s",
+                                  backend.name, e)
+
+    def _reconcile_orders(self):
+        """List the orders of [cursor - overlap, now] and import what Odoo lacks.
+
+        The cursor is HELD at the oldest order that still needs work (missing SKU, any
+        error, payment_pending younger than PENDING_HOLD_DAYS): advancing past an order
+        Salla never touches again loses it for good (Trendyol lesson). It is written only
+        after this transaction commits, so a rollback never skips orders."""
+        self.ensure_one()
+        now = fields.Datetime.now()
+        start = self.last_order_sync or now - timedelta(days=DEFAULT_LOOKBACK_DAYS)
+        params = {mapping.ORDER_LIST_FROM_PARAM: mapping.to_salla_date(start - WINDOW_OVERLAP),
+                  # +1 day: if Salla's to_date is exclusive, today's orders would never
+                  # be listed while the cursor moves to now.
+                  mapping.ORDER_LIST_TO_PARAM: mapping.to_salla_date(now + timedelta(days=1))}
+        summaries, complete = self._list_pages("/orders", params, MAX_ORDER_PAGES)
+        counters, holds, skus = {}, [], set()
+        for summary in summaries:
+            order_id = mapping.clean_id(summary.get("id"))
+            if not order_id:
+                continue
+            outcome, created, detail = self._sync_order_safe(order_id, summary=summary)
+            counters[outcome] = counters.get(outcome, 0) + 1
+            created = created or (mapping.normalize_order(summary) or {}).get("created_at")
+            if outcome in ("missing_sku", "error"):
+                holds.append(created)
+                if outcome == "missing_sku":
+                    skus.update(detail.split(", "))
+            elif outcome == "not_importable" and mapping.holds_cursor(detail, created, now):
+                holds.append(created)
+        cursor = mapping.next_cursor(now, holds) if complete else None
+        if cursor:
+            self._save_order_cursor(cursor)
+        effective = cursor or start
+        if effective < now - CURSOR_STALE_AFTER:
+            _logger.warning("Salla backend %s: order cursor held at %s, more than %s days "
+                            "behind (missing SKU? error? see the order queue and log)",
+                            self.name, effective, CURSOR_STALE_AFTER.days)
+        _logger.info("Salla backend %s: reconcile %s -> %s (%s listed); cursor %s",
+                     self.name, params, counters, len(summaries),
+                     "-> %s after commit" % cursor if cursor else "held at %s" % start)
+        return {"counters": counters, "listed": len(summaries), "cursor": cursor,
+                "window": "%s → %s" % (start, now), "missing_skus": sorted(skus)}
+
+    def _save_order_cursor(self, value):
+        """Write last_order_sync on a fresh cursor once the current transaction has
+        committed (postcommit), i.e. once the orders it covers are durable. Never through
+        the ORM in the sync transaction: the row lock would make a token refresh's NOWAIT
+        fail (or a SerializationFailure) for the rest of the run."""
+        self.ensure_one()
+        backend_id, registry, name = self.id, self.env.registry, self.name
+
+        @self.env.cr.postcommit.add
+        def _write_cursor():
+            try:
+                with registry.cursor() as cr:
+                    cr.execute("SET LOCAL lock_timeout = %s", (WRITE_LOCK_TIMEOUT,))
+                    cr.execute("UPDATE salla_backend SET last_order_sync = %s WHERE id = %s",
+                               (value, backend_id))
+            except Exception:
+                # Harmless: the next run re-reads the same window (imports are idempotent).
+                _logger.warning("Salla backend %s: order cursor not saved, next run "
+                                "re-reads the window", name, exc_info=True)
+
+    def action_import_orders(self):
+        self.ensure_one()
+        self._check_order_manager()
+        res = self.with_user(SUPERUSER_ID)._reconcile_orders()
+        msg = _("Window %(window)s UTC — %(listed)s order(s) listed: %(c)s. Cursor: %(cur)s.") % {
+            "window": res["window"], "listed": res["listed"], "c": res["counters"] or "-",
+            "cur": res["cursor"] or _("held")}
+        if res["missing_skus"]:
+            msg += _(" No product.product has default_code: %s") % ", ".join(res["missing_skus"])
+        return self._notify(msg, warning=bool(res["missing_skus"]) or not res["cursor"])

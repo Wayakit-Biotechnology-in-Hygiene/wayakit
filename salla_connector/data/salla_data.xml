@@ -1,0 +1,12 @@
+<odoo>
+    <!-- noupdate: ops may rename it; an upgrade must not overwrite that. -->
+    <data noupdate="1">
+        <!-- Customer of a Salla order that carries no customer id (guest checkout), so
+             such orders share one contact instead of creating one per order. -->
+        <record id="partner_salla_guest" model="res.partner">
+            <field name="name">Salla Guest Customer</field>
+            <field name="country_id" ref="base.sa"/>
+            <field name="customer_rank">1</field>
+        </record>
+    </data>
+</odoo>

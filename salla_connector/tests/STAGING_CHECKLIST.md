@@ -1,4 +1,4 @@
-# salla_connector F1: staging checklist (odoo.sh `mainTest` build)
+# salla_connector: staging checklist (odoo.sh `mainTest` build): F1 (A-I) and F2a (J-L)
 
 Manual run by a human on the odoo.sh staging build. There is no local Odoo.
 Run the standalone suite first: `python3 salla_connector/tests/test_mapping.py` must end in `all passed`.
@@ -235,3 +235,137 @@ These four are API calls that only a real Odoo 17 can confirm. A wrong one shows
 33. Cloudflare Skip rule for `/sl/webhook` on `ksasystem.wayakit.com` exists **before** the prod URL is set in the app, **without** a method filter (see CLAUDE.md §11, Trendyol).
 34. Create the prod backend and **type the prod Store ID by hand BEFORE installing the app on the real store and BEFORE pointing the app's webhook URL at prod**. The app's webhook secret is shared by the demo and real stores, and an `app.store.authorize` may bind the first **unbound** backend: if the prod backend is still unbound when the demo store re-authorizes, the demo tokens land on it. Once both backends are bound, an authorize can only reach the backend whose Store ID matches exactly (`test_pick_backend`).
 35. Prod gets its own app installation and a fresh secret where possible; stage tokens never go to prod. An uninstall/revoke from the **demo** store must never touch a backend bound to another store: revoke only acts on an **exact** store match, never falls back to an unbound backend and never acts without a merchant (`pick_backend`, covered by `test_pick_backend_revoke`). Repeat step 32's "foreign merchant" curl against prod once both backends exist: prod tokens unchanged.
+
+---
+
+# salla_connector F2a: orders Salla -> Odoo (no payments, minimal customer)
+
+Version `17.0.2.0.0`. Out of scope: payment registration, and the full customer
+(phone/email dedup, national short address) = F2b. Run the standalone suite first, then
+sections A-B above on the **new** build. F1 steps C-I only need repeating if F1 code changed.
+
+How F2a works, in one line per piece (names from the code; check them in the UI):
+- Webhook `order.created` / `order.updated` / `order.status.updated` -> one row in
+  **`salla.order.queue`** (append-only: one row **per delivery**, no unique key, so
+  duplicate rows for one order are expected and harmless) + `_trigger()` of the queue
+  cron **"Salla: Process Order Queue"** (`ir_cron_salla_order_queue`), answer `ok:queued`.
+  The webhook never calls Salla's API. Backend buttons: **Process Order Queue** and the
+  **Queued Orders** smart button (the queue list = the to-do list).
+- Queue cron: fetches the order + its items (Order Items endpoint), creates the
+  `sale.order`, **deletes** the rows it read for that order (grouped by order, each order
+  once per run). A missing SKU keeps one row `pending`; it is due again only **25 min**
+  after its last try (button **Retry** on the row makes it due at once); repeated errors
+  turn it `failed`. A row inserted while the cron works on that order survives and is
+  processed on the next run.
+- **"Salla: Reconcile Orders"** (every 30 min, button **Import Orders Now**): lists orders from `Orders Synced Until`
+  (`last_order_sync`, UTC) minus a 6 h overlap, imports what is missing, and **holds** the
+  cursor at the oldest order it could not import.
+- `sale.order.salla_order_id` is SQL-unique (`sale_order_salla_order_uniq`).
+
+## J. Rebuild preparation (every push to `mainTest` = a new build with a clean prod DB copy)
+
+36. Build green; `salla_connector` installs/upgrades to **17.0.2.0.0** with no errors in the build log.
+37. Redo F1 steps 4-8 on this build: create the backend (company **KSA, id 1**, warehouse **WH**), type the demo Store ID by hand, **update the Webhook URL in the Partners Portal** to this build's `$WEBHOOK_URL` (the build number changed), **reinstall the app on the demo store**, Test Connection green.
+38. Backend, F2a fields: **Website** = the KSA website (id **2**), **Pricelist** in SAR, **Shipping Product**, **COD Fee Product** and **Discount Product** set, each of **Product Type = Service** with Customer Taxes = the **15 % sales tax, price-excluded** (Included in Price unchecked on the tax; a price-included tax would make every extra line 15 % short), **Notify on New Order** = your own user (empty = silent, only a WARNING), **Auto Confirm** on. Leave **Log Full Webhook Payloads** on only for steps 40-41, then off. A missing Shipping/COD/Discount product or pricelist does not import a wrong order: the queue row keeps `last_error` *backend has no shipping_product_id* (etc.) until it is set; check that once by leaving the COD product empty for step 45, then set it and press **Retry** on the queue row (Process Order Queue alone does not retry it before 25 min).
+39. Scheduled Actions: **"Salla: Process Order Queue"** and **"Salla: Reconcile Orders"** exist, active, every **30 minutes**, code `model.cron_process_order_queue()` / `model.cron_reconcile_orders()`, next to "Salla: Refresh Tokens". The backend form shows the **Queued Orders** smart button. Sales > Orders: filters **Salla Orders** and **Salla Total Mismatch** exist.
+
+Extra shell helpers (after the F1 ones). They print ids, states and amounts only:
+```python
+def orders(salla_id):   # every Odoo order for one Salla order id: must be 0 or 1
+    with reg.cursor() as cr:
+        e = api.Environment(cr, SUPERUSER_ID, {})
+        rs = e["sale.order"].with_context(active_test=False).search(
+            [("salla_order_id", "=", str(salla_id))])
+        return [(o.id, o.name, o.state, o.amount_untaxed, o.amount_tax, o.amount_total,
+                 o.salla_total, o.salla_total_mismatch, o.salla_status) for o in rs]
+def lines(salla_id):
+    o = env["sale.order"].search([("salla_order_id", "=", str(salla_id))])
+    return [(l.product_id.default_code, l.product_uom_qty, l.price_unit, l.discount,
+             l.tax_id.mapped("amount"), l.price_subtotal, l.price_total, l.salla_line_id)
+            for l in o.order_line]
+def queue():
+    with reg.cursor() as cr:
+        e = api.Environment(cr, SUPERUSER_ID, {})
+        return [(q.salla_order_id, q.event, q.state, q.attempts, q.last_error)
+                for q in e["salla.order.queue"].search([])]
+def cursor():
+    return current_backend_field("last_order_sync")
+def current_backend_field(name):
+    with reg.cursor() as cr:
+        return api.Environment(cr, SUPERUSER_ID, {})["salla.backend"].browse(BID)[name]
+```
+Never paste the customer name, phone or address of a demo order into the ticket: only Salla order ids, amounts and SKUs.
+
+**Demo store preparation** (fake data only, demo store `461067869`): products whose SKU equals an existing Odoo `default_code` (P1, P2, both active), one whose SKU matches an **archived** Odoo product (P4), one SKU that does **not** exist in Odoo (P3, e.g. `FP-TEST-99999`), a **20 %** coupon (`TEST20`), a paid shipping option with a known fee, free shipping (option or threshold), and Cash on Delivery enabled **with a COD fee**. Write down whether the demo store shows prices **including** VAT 15 % (Settings > Taxes): it decides what "unit price" means in step 41. **Never test with quantity 1** and never a coupon of 0.
+
+For every order below, write down from the Salla dashboard: order id, reference, status, each line's qty and unit price, discount, shipping, COD fee, VAT and **total**. The Odoo `amount_total` must equal that Salla total to the halala (0.01 SAR), possibly through a "Rounding adjustment (Salla total)" line.
+
+## K. Import, amounts and lines (the 7 mandatory cases)
+
+40. **Webhook path, fast answer.** Place an order in the demo store. The `order.created` webhook answers **200 `ok:queued` in well under 1 s** (controller log line; the Portal's webhook log shows the delivery). The controller does **not** call Salla's API: the log shows the order queued, and the import lines come from the queue cron a few seconds later (`queue()` is empty again afterwards). With log_payloads on, the body is logged with `"first_name": "***"`, `"email": "***"`, `"mobile": "***"` and any `notes`/`note`/`gift_message` as `"***"`. Compare the real field names with `mapping.py` (`normalize_order`, `normalize_items`, `webhook_order_id`, `order_status`, `salla_date`) and write every mismatch in the ticket: this is the "validate against a real payload" step. Turn log_payloads off after the first 2-3 orders.
+41. **Case 1 - 3 units of one product.** Order **3 x P1**. `lines()`: one product line, qty **3**, `price_unit` = Salla **unit** price net of VAT (unit / 1.15 if the store shows VAT-inclusive prices), **not** the line total and not 3x it; `discount` 0; tax 15. `amount_total` == Salla total. Also: `salla_order_id`, `salla_reference`, `salla_status`, `salla_total` filled; company **KSA (1)**; warehouse **WH**; website **id 2**; `x_studio_channel` = `B2C` if that Studio field exists on this DB (if it does not, no error). Customer: a partner with the Salla customer's name, country **Saudi Arabia**, `salla_customer_id` set, **no phone, no email, no address**.
+42. **Case 2 - coupon 20 %.** Order **2 x P1 + 3 x P2** with coupon `TEST20`. Product lines at their full unit price (net, `discount` 0), plus **one separate discount line** (Discount Product, negative, = 20 % of the eligible goods net of VAT, taxed 15 %). `amount_total` == Salla total. The coupon is not folded into `price_unit` and not counted twice (order-level and item-level discount are the same money).
+43. **Case 3a - paid shipping.** Order **3 x P1** with the paid option. A shipping line (Shipping Product) whose VAT-inclusive total equals Salla's shipping fee; `amount_total` == Salla total. Note in the ticket which reading the log says won (`Extras read as gross/net` appears only on a mismatch; otherwise compare the line with the Salla VAT breakdown).
+44. **Case 3b - free shipping.** Order **3 x P1** with free shipping: **no** shipping line; `amount_total` == Salla total.
+45. **Case 4 - COD.** Order **4 x P2** with Cash on Delivery: a **COD line** (COD Fee Product) whose VAT-inclusive total equals Salla's COD fee, plus the shipping line if any; `amount_total` == Salla total (a 0.01 "Rounding adjustment (Salla total)" line is acceptable and expected for some fees: `mapping.py` predicts a 10.00 COD fee as 8.6956522 net -> subtotal 8.70 + VAT 1.31 = **10.01**; write down what Odoo really shows on the COD line, 10.01 or 10.00, because it decides whether that rounding line is right). No payment registered (out of scope). A COD order in **under_review** is **confirmed** (COD accepted = prepare it); see step 63 for the bank-transfer counterpart.
+46. **Total mismatch policy.** If Odoo cannot reach Salla's total within rounding: the order **exists** (never lost), stays a **quotation**, `salla_total_mismatch` is ticked, the chatter has an internal note *"Salla: the total does not match — Odoo total X vs Salla total Y (difference Z) ..."* that reaches the notify users, and the log a WARNING. To see it on purpose: give the Shipping Product **no tax** (staging only), import an order with paid shipping, then restore the tax. Fix the lines, then confirm by hand: confirmation works. **Abandoned cart check:** the flagged quotation carries website 2 and a customer, so while it sits as a draft it must not be picked up as an abandoned cart: it must not appear under Website > eCommerce > Abandoned Carts, and no "you left items in your cart" email is queued for it (Settings > Technical > Emails). Report it to the lead if it does.
+47. **Case 5 - resend the same signed webhook: no second order.** Use the Salla order id of step 41 (`ORDER_ID`). Resend `order.created` twice with the same bytes and signature, then an `order.updated`, then an `order.status.updated` carrying an **older** timestamp and an older status (out of order):
+    ```sh
+    export ORDER_ID="<salla order id from step 41>"
+    B='{"event":"order.created","merchant":'"$STORE_ID"',"created_at":"2026-10-18 10:00:00","data":{"id":'"$ORDER_ID"'}}'
+    S=$(sig "$B"); post "$B" "$S"; post "$B" "$S"          # same bytes, same signature, twice
+    B2='{"event":"order.updated","merchant":'"$STORE_ID"',"created_at":"2026-10-18 10:00:05","data":{"id":'"$ORDER_ID"'}}'
+    post "$B2" "$(sig "$B2")"
+    B3='{"event":"order.status.updated","merchant":'"$STORE_ID"',"created_at":"2026-10-18 09:00:00","data":{"id":1,"order":{"id":'"$ORDER_ID"'},"status":{"slug":"payment_pending"}}}'
+    post "$B3" "$(sig "$B3")"                              # older, arrives last; data.id is NOT the order id
+    ```
+    Each answers **200** fast. After the queue cron ran: `orders(ORDER_ID)` returns **exactly one** order (same name as in step 41), no second "New Salla order" notice, `salla_status` is the **current** Salla status (re-read from the API, not the stale `payment_pending` of B3), the order is **not** cancelled or un-confirmed, and after the run no **pending** row is left for `ORDER_ID` in `queue()` (several rows may exist **while** waiting: one per delivery, by design). Log: already imported, no traceback.
+48. **Concurrent identical webhooks: no 500.** Fire the same signed body 5 times **in parallel** (plain INSERTs, one row each, nothing to conflict on):
+    ```sh
+    for i in 1 2 3 4 5; do post "$B" "$S" & done; wait
+    ```
+    Every answer **200**, none 500, no `IntegrityError`/`duplicate key` traceback in the log. Up to 5 queue rows for that order while it waits (expected); after the queue run they are **all** gone and there is still exactly **one** order.
+49. **Race webhook vs cron, and the SQL constraint itself.** Place a new order (**3 x P2**) and, within a few seconds of the webhook, run the reconcile cron manually (Run Manually). Exactly **one** order. If both workers collided, the log of the loser has an Odoo **ERROR `bad query`** line for the `sale_order` INSERT (`duplicate key value violates unique constraint "sale_order_salla_order_uniq"`) followed by the INFO `imported concurrently by another worker`: that ERROR is **expected** (Odoo logs the failed query before the savepoint catches it). Check that this line carries **no PII** (no customer name, phone or email in the logged parameters) and that nothing else failed: no 500, no `processing failed`, no second order. Then in the shell (rolls back, creates nothing):
+    ```python
+    import psycopg2
+    o = env["sale.order"].search([("salla_order_id", "!=", False)], limit=1)
+    try:
+        with env.cr.savepoint():
+            o.copy({"salla_order_id": o.salla_order_id}); env.cr.flush()
+        print("NOT BLOCKED: duplicate salla_order_id accepted")
+    except psycopg2.IntegrityError as e:
+        print("UNIQUE OK", e.diag.constraint_name)    # sale_order_salla_order_uniq
+    env.cr.rollback()
+    ```
+50. **Case 6 - lost webhook: the cron imports it.** Simulate Salla giving up after its 3 retries: in the Partners Portal set the webhook URL to a dead path for a moment (e.g. `$WEBHOOK_URL-off`), place an order of **3 x P1 + 2 x P2**, put the real `$WEBHOOK_URL` back. No Odoo order and no queue row (`orders(<id>)` = `[]`, `queue()` = `[]`). Press **Import Orders Now** on the backend (or Run Manually on "Salla: Reconcile Orders", or wait <= 30 min): the order is imported with the checks of step 41; the log has the run breakdown and the new cursor. Run it again at once: **nothing** created (all already imported). Variant without the Portal: place the order, then delete its queue row in the shell **before** the queue cron runs (`env["salla.order.queue"].search([("salla_order_id","=","<id>")]).unlink(); env.cr.commit()`), then run the reconcile cron.
+51. **Case 7 - unknown SKU: whole order skipped, cursor held, imported later.** Note `cursor()`. Order **2 x P1 + 3 x P3** (`FP-TEST-99999`, not in Odoo). After the queue cron: **no** Odoo order, not even a partial one (`orders(<id>)` = `[]`); the queue row stays **`pending`** with a `last_error` naming `FP-TEST-99999`; log WARNING. Press **Import Orders Now**: the notification is a **warning** listing `FP-TEST-99999`, its *Cursor:* is that order's creation time (UTC), not now; still no order; after the commit `cursor()` is **not** past that order's creation time (held). Now create a product with `default_code` `FP-TEST-99999` (Sales tax 15 %) **on staging only** (it disappears with the next build) and press **Retry** on its queue row (Process Order Queue alone waits the 25 min): the order is imported with **both** lines, the queue row is gone, and the next reconcile run moves `cursor()` forward.
+52. **Archived product still matches.** Order **3 x P4** (SKU of an **archived** Odoo product): imported, the line uses the archived product, no "missing SKU". If an active and an archived product share the same `default_code`, the **active** one is used.
+53. **Archived partner reused, not duplicated.** Archive the partner created in step 41 (Contacts > Archive), then place a second order with the **same** Salla customer (**3 x P1**): the new order uses the **same, archived** partner (same id; `env["res.partner"].with_context(active_test=False).search_count([("salla_customer_id","=","<ref>")])` == **1**). Any name/country typed by hand on it is not overwritten. Unarchive it afterwards. An order with **no** Salla customer id goes to the shared guest contact (`salla_connector.partner_salla_guest`), never one contact per order.
+54. **Order Items endpoint.** In the log of steps 41/42 the import fetched the items for the order (one extra GET per order), not an `expanded` order. Line count and quantities in Odoo == the Salla dashboard.
+55. **Status filter.** An order left in **payment_pending** (bank transfer, not paid): not imported (no order), and it holds the cursor for up to 7 days. Mark it paid in Salla: the status webhook (or the next reconcile run) imports it and confirms it. A **cancelled** order is never imported; cancelling an **already imported** order posts one internal note *"Salla: the order is now "canceled"..."* and changes nothing else (resend its status webhook: no second note).
+
+## L. Confirmation, notice and side effects
+
+56. **New-order notice.** For each imported order, the notify users get one Inbox message *New Salla order ...* with **product - ordered - available**; a line ordering more than P1's free stock in WH shows *must be manufactured* and the order says *stock is short*. Shipping/COD/discount lines are not listed.
+57. **Safe confirmation.** Paid statuses end in state **sale**. Force a confirm failure on staging only (e.g. a temporary automated action on `sale.order` that raises on state = sale, or as the dev suggests), import an order: it **exists**, stays a **quotation** (the savepoint rolled the confirmation back), and the chatter says *automatic confirmation failed ... (nothing was lost)*. The note must match the **real** state: never "left as quotation" on a confirmed order. Remove the forcing rule. **Auto Confirm** off: everything lands as a quotation.
+58. **WhatsApp / automations on confirm (Mafer, UI).** Before the first import on each build: Settings > Technical > WhatsApp Templates, template **«Sale Order»**, and Settings > Technical > Automation Rules, **automation 1**: write down the model, trigger and **domain** (does it filter on website, team, partner phone, state?). Then, for every confirmed order of section K, check the chatter and the WhatsApp channel list: what was sent and to whom. Expected: **nothing sent and no error**, because the F2a partner has no phone. Anything sent, queued or failing goes to the lead **before** anything is disabled (do not switch off templates or rules yourself). Also check no customer email went out (Settings > Technical > Emails, filter on the order).
+59. **Logs are clean.** Search the build log for the demo customer's name, phone and email: they appear only inside a log_payloads dump, masked as `***`. No token and no secret anywhere.
+60. Turn **Log Full Webhook Payloads** off again.
+
+## M. F2a round 2 (review findings)
+
+61. **Missing-SKU pile does not loop the cron.** Create **at least 31** demo orders (each **3 x P3**, unknown SKU), or insert fake queue rows in the shell on staging only:
+    ```python
+    B = env["salla.backend"].browse(BID)
+    for i in range(31):
+        B._enqueue_order("FAKE-%05d" % i, "manual")
+    env.cr.commit()
+    ```
+    (fake ids: each one ends as `error` *order not readable from the API*, which also retries; real P3 orders end as `missing_sku`.) Press **Process Order Queue** once, then watch Scheduled Actions > "Salla: Process Order Queue" (*Last Execution Date*) and the log for 5 minutes: at most **one** extra triggered run (the batch of 30 was full), then **quiet**; no run every few seconds, no line `order queue -> ...` repeating for the same rows. Each row's `last_try` is set, and the rows are retried again only **~25 min** later (next cron run after that). The fake rows end `failed` after 10 attempts; delete them afterwards (`env["salla.order.queue"].search([("salla_order_id","=like","FAKE-%")]).unlink(); env.cr.commit()`).
+62. **Webhook in the middle of processing.** Order **3 x P1** with a slow import (e.g. right after step 61's batch, so the queue cron is busy), and change its status in Salla while the queue cron runs. The status webhook answers **200** at once (no waiting on the cron), adds a **new** row, and that row is processed on the **next** run (triggered automatically): the order ends with the **latest** Salla status, one order, no pending row left.
+63. **under_review: bank transfer vs COD.** Two orders of **3 x P2**, both left in **under_review**: one paid by **bank transfer** (receipt uploaded, not yet approved by the merchant) and one **COD**. Bank transfer: imported as a **quotation**, no delivery created, with the internal note *Salla: status "under_review" with payment method "<method>": not confirmed until paid. The order was left as a quotation; confirm it by hand once the payment is verified.* Check that `<method>` is the **real** method of the payload (e.g. `bank`, as shown in the log_payloads dump of that order), not `unknown`: that confirms the payment-method field name in `mapping.order_payment_method`. `unknown` here means the field is misread, and then COD orders would not confirm either: report it to the dev. COD: **confirmed**, delivery created. Approve the bank transfer in Salla (status moves to in_progress / processing): the order is then confirmed by the status webhook or the next reconcile run.
+64. **Loyalty / coupons on the customer and guest partner (Mafer, UI).** After the confirmed orders of section K, open the Salla customer partner and the **Salla Guest Customer**: no Odoo loyalty points, eWallet credit or gift-card/coupon programs were credited or consumed by these imports (Sales > Products > Discount & Loyalty: the program histories show no lines for these orders), and no reward line was added to any Salla order on confirmation (otherwise step 57's "total changed during confirmation" note appears). The Salla coupon `TEST20` must exist only as the discount line, never as an Odoo coupon code. Anything credited goes to the lead.
+65. **VAT rate in the payload is not 15 %.** In the demo store, temporarily set the VAT to **0 %** (Settings > Taxes, or a tax-exempt product/customer) and place an order of **3 x P1**; restore 15 % right after. With log_payloads on, confirm the order's `tax.percent` (if Salla still sends 15, note it and skip). Expected, by case:
+    - **A real rate other than 15 (`0`, `5`)**: the order is **imported** as a **quotation**, `salla_total_mismatch` ticked, log WARNING *Salla VAT 0% vs Odoo 15%, left as quotation*, and the internal note to the notify users *Salla: the order carries VAT 0% but Odoo applies 15% (Odoo total X vs Salla total Y). The order was NOT confirmed: check the tax settings of the Salla store and correct the order before confirming it.* No rounding line is added. It must **not** stay in the queue as an `error` row, not be retried every 25 min, and not end `failed`.
+    - **A fraction (`0.15`) or an out-of-range value (`45`)**: `vat_rate()` reads it as 15 %, the log has only the WARNING *unexpected tax percent in the payload, using 15%*, and the order is **imported normally** (totals reconcile, confirmed if its status allows). These two cannot be produced from the store settings; they are covered by `test_vat_rate` / `test_normalize_order_vat_suspect_and_default`. Only check it if a real payload ever shows such a value.
+    Delete the test quotation afterwards.

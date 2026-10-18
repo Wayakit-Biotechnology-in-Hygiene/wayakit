@@ -1,0 +1,59 @@
+<odoo>
+    <data>
+        <record id="salla_order_queue_tree" model="ir.ui.view">
+            <field name="name">salla.order.queue.tree</field>
+            <field name="model">salla.order.queue</field>
+            <field name="arch" type="xml">
+                <!-- Rows disappear once imported: what is listed still needs work. -->
+                <tree create="false" decoration-danger="state == 'failed'">
+                    <field name="backend_id"/>
+                    <field name="salla_order_id"/>
+                    <field name="event"/>
+                    <field name="state"/>
+                    <field name="attempts"/>
+                    <field name="last_try"/>
+                    <field name="last_error"/>
+                    <field name="create_date" string="Queued"/>
+                    <button name="action_retry" type="object" string="Retry" icon="fa-refresh"
+                            groups="sales_team.group_sale_manager"/>
+                </tree>
+            </field>
+        </record>
+
+        <record id="salla_order_queue_form" model="ir.ui.view">
+            <field name="name">salla.order.queue.form</field>
+            <field name="model">salla.order.queue</field>
+            <field name="arch" type="xml">
+                <form create="false">
+                    <header>
+                        <button name="action_retry" type="object" string="Retry"
+                                groups="sales_team.group_sale_manager"/>
+                        <field name="state" widget="statusbar"/>
+                    </header>
+                    <sheet>
+                        <group>
+                            <field name="backend_id" readonly="1"/>
+                            <field name="salla_order_id" readonly="1"/>
+                            <field name="event"/>
+                            <field name="attempts"/>
+                            <field name="last_try"/>
+                            <field name="last_error"/>
+                        </group>
+                    </sheet>
+                </form>
+            </field>
+        </record>
+
+        <record id="salla_order_queue_action" model="ir.actions.act_window">
+            <field name="name">Salla Order Queue</field>
+            <field name="res_model">salla.order.queue</field>
+            <field name="view_mode">tree,form</field>
+        </record>
+
+        <menuitem id="menu_salla_order_queue"
+                  name="Salla Order Queue"
+                  parent="sale.menu_sale_config"
+                  action="salla_order_queue_action"
+                  sequence="92"/>
+    </data>
+</odoo>

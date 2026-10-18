@@ -34,6 +34,12 @@ _PII_KEY_PARTS = ("first_name", "last_name", "full_name", "email", "mobile", "ph
                   "address", "street", "postal", "zip", "latitude", "longitude",
                   "national", "district", "block", "building")
 _PII_KEYS = {"name", "city", "location"}
+# Free text the customer types (order notes, gift messages) routinely carries a phone
+# number or an address: masked as a substring so customer_note / notes are caught too.
+_FREE_TEXT_KEY_PARTS = ("note", "comment", "message", "gift")
+# Payment/attachment data: bank transfer receipts, IBANs, avatar and signed file URLs
+# (a signed URL is a credential to the file it points at).
+_PAYMENT_KEY_PARTS = ("receipt", "avatar", "iban", "account", "url")
 
 # OAuth credentials (client_secret, refresh token, Bearer) are only ever sent to these.
 # A backend pointed anywhere else would hand them to whoever runs that host.
@@ -412,7 +418,9 @@ def _sensitive(key):
     key = str(key).lower()
     return (key in _PII_KEYS
             or any(part in key for part in _SENSITIVE_KEY_PARTS)
-            or any(part in key for part in _PII_KEY_PARTS))
+            or any(part in key for part in _PII_KEY_PARTS)
+            or any(part in key for part in _FREE_TEXT_KEY_PARTS)
+            or any(part in key for part in _PAYMENT_KEY_PARTS))
 
 
 def redact(payload):
@@ -443,3 +451,513 @@ def payload_keys(payload, prefix="", depth=4):
             base = prefix[:-1] + "[]." if prefix.endswith(".") else prefix
             out.update(payload_keys(first, base, depth - 1))
     return sorted(out)
+
+
+# ================================================================== F2a: orders
+# EVERY field name in this section comes from docs.salla.dev and is UNVERIFIED against a
+# real payload: validate against the first real order (log_payloads on) and fix the
+# names here, once. Each reader takes a list of candidate paths, first hit wins.
+
+ORDER_EVENTS = {"order.created", "order.updated", "order.status.updated"}
+STATUS_EVENT = "order.status.updated"
+
+# Status slugs (status.slug). Validate against a real payload: a store can rename
+# statuses ("customized"), the slug is what should stay stable.
+# Not imported: nothing has been paid (payment_pending) or the order is dead.
+NOT_IMPORTABLE_STATUSES = {"payment_pending", "canceled", "cancelled", "restored",
+                           "restoring", "refunded", "deleted"}
+# Imported AND confirmed: the order is paid (or COD accepted) and must be prepared.
+CONFIRMABLE_STATUSES = {"in_progress", "processing", "completed",
+                        "shipped", "delivering", "delivered", "ready_for_pickup"}
+# "Under review": Salla holds it for the merchant to accept. For a prepaid method it is
+# not proof of payment (bank transfer receipts sit here), so it is confirmed only for
+# cash on delivery, where nothing is paid upfront anyway. Lead's call, Mafer may change it.
+REVIEW_STATUSES = {"under_review"}
+# Payment method slugs meaning cash on delivery. VALIDATE AGAINST A REAL PAYLOAD: both the
+# field (payment_method) and the slug are taken from the docs.
+COD_PAYMENT_METHODS = {"cod", "cash_on_delivery"}
+# On an order we already have: posted once as a "needs manual handling" notice, never
+# automated (same call as Trendyol Phase 3).
+CANCEL_STATUSES = {"canceled", "cancelled", "restored", "restoring", "refunded"}
+# Unknown slug (a custom status, or the field misread): imported as a quotation, never
+# confirmed, so a human looks at it. Losing it would be worse.
+
+# payment_pending orders hold the reconcile cursor so the cron still sees them once paid
+# (bank transfer) even if the status webhook is lost; abandoned ones stop holding after:
+PENDING_HOLD_DAYS = 7
+# Salla's order dates are Riyadh time when they carry no zone (UTC+3, no DST).
+SALLA_UTC_OFFSET = timedelta(hours=3)
+DEFAULT_VAT_RATE = 15.0
+
+# Paths for the items endpoint and list filters (unverified, see docs "List Order Items"
+# and "List Orders"). The "expanded" order format was removed on 2026-09-01.
+ORDER_ITEMS_PATH = "/orders/items"
+ORDER_LIST_FROM_PARAM = "from_date"
+ORDER_LIST_TO_PARAM = "to_date"
+
+
+def clean_id(value):
+    """An id as a string, "" when absent — including the literal "None"/"null" a
+    str(None) somewhere upstream produces (Trendyol's "None" package id collapsed every
+    order onto one dedup key)."""
+    found = text(value)
+    return "" if found.lower() in ("none", "null", "undefined", "nan") else found
+
+
+def _canon_status(value):
+    return text(value).lower().replace("-", "_").replace(" ", "_")
+
+
+def _dig(obj, path):
+    """obj["a"]["b"]... for a dotted path, None as soon as a step is missing."""
+    for key in path.split("."):
+        if not isinstance(obj, dict):
+            return None
+        obj = obj.get(key)
+    return obj
+
+
+def _first(obj, *paths):
+    """Value of the first path that holds something other than None/""."""
+    for path in paths:
+        value = _dig(obj, path)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def money(value):
+    """A Salla amount as a float, or None. Accepts 12.5, "12.50", "1,250.00" and the
+    {"amount": ..., "currency": ...} object Salla uses for most money fields."""
+    if isinstance(value, dict):
+        value = value.get("amount")
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        value = value.replace(",", "").strip()
+        if not value:
+            return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _currency(value):
+    return text(value.get("currency")).upper() if isinstance(value, dict) else ""
+
+
+def salla_date(value):
+    """Salla date -> naive UTC datetime, or None.
+
+    Shapes seen in the docs: "2026-10-18 15:30:00", ISO with offset/Z, and
+    {"date": "2026-10-18 15:30:00.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"}.
+    A date without an offset is Riyadh time (UTC+3): Salla is a KSA platform and the
+    docs show Asia/Riyadh. Reading it as UTC would shift the cursor window 3 h."""
+    zone = ""
+    if isinstance(value, dict):
+        zone = text(value.get("timezone"))
+        value = value.get("date")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip().replace("T", " ", 1)
+    if raw[-1:] in ("Z", "z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        when = datetime.fromisoformat(raw)
+    except ValueError:
+        # fromisoformat before 3.11 rejects 6-digit microseconds in some layouts; the
+        # seconds are all the cursor needs.
+        try:
+            when = datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+    if when.tzinfo is not None:
+        return when.astimezone(timezone.utc).replace(tzinfo=None)
+    if zone.upper() in ("UTC", "Z", "GMT", "+00:00"):
+        return when
+    return when - SALLA_UTC_OFFSET
+
+
+def to_salla_date(when):
+    """Naive UTC datetime -> the Riyadh calendar date ("YYYY-MM-DD") for list filters."""
+    return (when + SALLA_UTC_OFFSET).strftime("%Y-%m-%d")
+
+
+# ------------------------------------------------------------------ status
+def order_status(order):
+    """Canonical status slug of an order (or of a status webhook's data), "" if absent.
+    status may be {"slug": ...}, a bare string, or nested under order.status."""
+    if not isinstance(order, dict):
+        return ""
+    status = order.get("status")
+    if isinstance(status, dict):
+        return _canon_status(status.get("slug") or _dig(status, "customized.slug"))
+    if status:
+        return _canon_status(status)
+    return _canon_status(_first(order, "order.status.slug", "status_slug"))
+
+
+def should_import(status):
+    """False for unpaid / dead orders. An unknown or empty status IS imported (as a
+    quotation, see should_confirm): never lose a paid order to a status we can't read."""
+    return _canon_status(status) not in NOT_IMPORTABLE_STATUSES
+
+
+def is_cod(payment_method):
+    return _canon_status(payment_method) in COD_PAYMENT_METHODS
+
+
+def should_confirm(status, payment_method=""):
+    """True only for a status known to mean "paid (or COD accepted), prepare it".
+    under_review counts only with a cash-on-delivery payment method."""
+    status = _canon_status(status)
+    if status in CONFIRMABLE_STATUSES:
+        return True
+    return status in REVIEW_STATUSES and is_cod(payment_method)
+
+
+def vat_rate(value):
+    """(rate in %, suspicious) from Salla's tax.percent.
+
+    15 / "15.00" -> (15.0, False). A fraction (0 < x < 1, e.g. 0.15) -> x * 100,
+    flagged. Missing -> (None, False): build_lines then uses DEFAULT_VAT_RATE. Anything
+    outside 0..30 % (no Saudi rate is) -> (None, True): the caller logs a WARNING."""
+    rate = money(value)
+    if rate is None:
+        return None, value not in (None, "")
+    if 0 < rate < 1:
+        return rate * 100.0, True
+    if 0 <= rate <= 30:
+        return rate, False
+    return None, True
+
+
+def is_cancel_status(status):
+    return _canon_status(status) in CANCEL_STATUSES
+
+
+def webhook_order_id(payload):
+    """Salla order id a webhook is about, as a string, "" if absent.
+
+    order.created/updated: data IS the order (data.id). order.status.updated: data may
+    be the status change itself, whose own `id` is NOT the order id, so the order
+    reference (data.order.id / data.order_id) is tried first for that event."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+        return ""
+    data = payload["data"]
+    paths = ("order.id", "order_id", "id") if event_name(payload) == STATUS_EVENT \
+        else ("id", "order.id", "order_id")
+    for path in paths:
+        found = clean_id(_dig(data, path))
+        if found:
+            return found
+    return ""
+
+
+# ------------------------------------------------------------------ order
+def normalize_order(order):
+    """The fields the import needs from an order detail (GET /orders/{id} `data`).
+
+    {"id", "reference", "status", "created_at" (naive UTC), "currency", "total",
+     "vat_rate", "shipping", "cod", "discounts": [{"title", "amount"}],
+     "customer": {"ref", "name"}}
+    Money is as Salla sends it (VAT-inclusive or not is decided by build_lines).
+    None for a non-dict or an order without id."""
+    if not isinstance(order, dict):
+        return None
+    oid = clean_id(order.get("id"))
+    if not oid:
+        return None
+    total_raw = _first(order, "amounts.total", "total")
+    vat, vat_suspect = vat_rate(_first(order, "amounts.tax.percent", "tax.percent"))
+    discounts = []
+    for entry in _first(order, "amounts.discounts", "discounts") or []:
+        if not isinstance(entry, dict):
+            continue
+        amount = money(_first(entry, "discount", "amount", "value"))
+        if amount:
+            discounts.append({
+                "title": text(_first(entry, "title", "name", "code")) or "Discount",
+                "amount": abs(amount),
+            })
+    return {
+        "id": oid,
+        "reference": text(_first(order, "reference_id", "reference")) or oid,
+        "status": order_status(order),
+        "created_at": salla_date(_first(order, "date", "created_at")),
+        "currency": (text(order.get("currency")).upper() or _currency(total_raw)
+                     or _currency(_dig(order, "amounts.sub_total"))),
+        "total": money(total_raw),
+        "vat_rate": vat,
+        "vat_suspect": vat_suspect,
+        "shipping": money(_first(order, "amounts.shipping_cost", "shipping_cost")) or 0.0,
+        "cod": money(_first(order, "amounts.cash_on_delivery", "cash_on_delivery")) or 0.0,
+        "discounts": discounts,
+        "customer": order_customer(order),
+        "payment_method": order_payment_method(order),
+    }
+
+
+def order_payment_method(order):
+    """Canonical payment method slug, "" if absent. VALIDATE AGAINST A REAL PAYLOAD:
+    docs show a bare string ("cod", "bank", "credit_card"); an object is accepted too."""
+    value = order.get("payment_method") if isinstance(order, dict) else None
+    if isinstance(value, dict):
+        value = value.get("slug") or value.get("name")
+    if not value and isinstance(order, dict):
+        value = _dig(order, "payment.method")
+    return _canon_status(value)
+
+
+def order_customer(order):
+    """{"ref": Salla customer id, "name": display name} — F2a uses nothing else.
+    The name is PII: never log it."""
+    cust = order.get("customer") if isinstance(order, dict) else None
+    if not isinstance(cust, dict):
+        return {"ref": "", "name": ""}
+    name = " ".join(p for p in (text(cust.get("first_name")), text(cust.get("last_name"))) if p)
+    name = " ".join((name or text(cust.get("full_name")) or text(cust.get("name"))).split())
+    return {"ref": clean_id(cust.get("id")), "name": name}
+
+
+def normalize_items(items):
+    """Order Items endpoint `data` -> (lines, problems).
+
+    lines: [{"line_id", "sku", "name", "quantity", "unit_net", "discount"}]
+      unit_net = amounts.price_without_tax, read as the PER-UNIT price before VAT (the
+      Trendyol lineUnitPrice trap: validate with quantity > 1). discount = the line's
+      total_discount (a line total, not per unit), 0.0 when absent.
+    problems: human-readable reasons the order cannot be built (no price, bad quantity).
+    An empty SKU is NOT a problem here: it is reported by missing_skus() like any SKU
+    Odoo does not know."""
+    lines, problems = [], []
+    for idx, item in enumerate(items if isinstance(items, list) else []):
+        if not isinstance(item, dict):
+            continue
+        ref = clean_id(item.get("id")) or "#%s" % (idx + 1)
+        qty = money(item.get("quantity"))
+        if qty is None or qty <= 0:
+            problems.append("item %s: quantity %r" % (ref, item.get("quantity")))
+            continue
+        unit = money(_first(item, "amounts.price_without_tax", "price_without_tax"))
+        if unit is None:
+            # Never import at price 0 (Trendyol S02056): hold the order instead.
+            problems.append("item %s: no price_without_tax" % ref)
+            continue
+        lines.append({
+            "line_id": clean_id(item.get("id")),
+            "sku": text(_first(item, "sku", "product.sku", "variant.sku")),
+            "name": text(item.get("name")),
+            "quantity": qty,
+            "unit_net": unit,
+            "discount": abs(money(_first(item, "amounts.total_discount", "total_discount")) or 0.0),
+        })
+    return lines, problems
+
+
+def missing_skus(lines, known_skus):
+    """SKUs of `lines` not in `known_skus` (sorted, unique; "" shown as "(empty SKU)").
+    Any of them means the WHOLE order is skipped — never half an order."""
+    known = set(known_skus or ())
+    out = {line["sku"] or "(empty SKU)" for line in lines if not line["sku"] or line["sku"] not in known}
+    return sorted(out)
+
+
+# ------------------------------------------------------------------ amounts
+# Decimal precision "Product Price" on the production DB (checked 2026-10-18): unit
+# prices are stored with 7 decimals, the currency (SAR) rounds to 2. The backend passes
+# the live value; this default is only for callers without an Odoo env.
+PRICE_DIGITS = 7
+
+
+def _round(value, digits):
+    """Round half away from zero, like Odoo's float_round (Python's round is banker's
+    rounding on binary floats: round(2.675, 2) == 2.67)."""
+    factor = 10 ** digits
+    sign = -1 if value < 0 else 1
+    return sign * math.floor(abs(value) * factor + 0.5 + 1e-9) / factor
+
+
+def _r2(value):
+    return _round(value, 2)
+
+
+def expected_total(lines, vat_rate, price_digits=PRICE_DIGITS):
+    """VAT-inclusive total Odoo will compute for `lines` [{"price_unit", "quantity"}]:
+    unit price stored with `price_digits`, line subtotal rounded to the currency, tax
+    rounded per line (company 1 uses round_per_line), every line at vat_rate.
+    Only a prediction for build_lines; the real check is the order's amount_total."""
+    total = 0.0
+    for line in lines:
+        subtotal = _r2(_round(line["price_unit"], price_digits) * line["quantity"])
+        total += subtotal + _r2(subtotal * vat_rate / 100.0)
+    return _r2(total)
+
+
+def total_tolerance(lines):
+    """How far Odoo's total may drift from Salla's from rounding alone.
+
+    With 7-digit unit prices Odoo's own error is the per-line rounding of subtotal and
+    tax: under 0.01 per line. What remains is Salla handing us price_without_tax already
+    rounded to 2 decimals (8.69 for 9.99 gross): up to half a halala per unit before
+    VAT, 0.00575 with it, hence 0.006 per unit. Capped at 0.50 SAR: past that it is a
+    real error (wrong product tax, misread field), never rounding."""
+    units = sum(abs(line["quantity"]) for line in lines)
+    return min(0.5, _r2(0.006 * units + 0.01 * len(lines)))
+
+
+def build_lines(order, items, price_digits=PRICE_DIGITS):
+    """Plan the Odoo lines for a normalized order + items. Pure: no product ids.
+
+    Returns {"products": [{"sku", "name", "quantity", "price_unit", "line_id"}],
+             "extras": [{"kind": "shipping"|"cod"|"discount", "name", "price_unit"}],
+             "extras_basis": "gross" | "net" | "none" | "unreconciled",
+             "expected_total", "salla_total", "tolerance"}
+    price_unit is always NET (before VAT), rounded to `price_digits` like Odoo stores
+    it: the KSA sales tax is price-excluded, so Odoo adds 15 % on top and the total must
+    come back to Salla's (9.99 gross -> 8.6869565 net; x 3 -> 26.06 + 3.91 = 29.97).
+
+    Product lines: price_without_tax per unit, discount 0 — item discounts become the
+    discount line instead, so the coupon is visible as its own line.
+    Discount: the order's amounts.discounts, or (when that list is empty) the sum of the
+    items' total_discount — never both, they describe the same money.
+    Shipping / COD / discount: Salla does not say whether these amounts include VAT, so
+    both readings are tried against Salla's own total and the one that reconciles wins
+    ("gross" = VAT-inclusive, divided by 1 + VAT). Neither -> "unreconciled", gross is
+    assumed and the caller's total check flags the order."""
+    vat = order.get("vat_rate")
+    vat = DEFAULT_VAT_RATE if vat is None else vat
+    products = [{
+        "sku": l["sku"], "name": l["name"], "quantity": l["quantity"],
+        "price_unit": _round(l["unit_net"], price_digits), "line_id": l["line_id"],
+    } for l in items]
+
+    raw_extras = []
+    if order.get("shipping"):
+        raw_extras.append(("shipping", "Shipping", order["shipping"]))
+    if order.get("cod"):
+        raw_extras.append(("cod", "Cash on Delivery fee", order["cod"]))
+    discounts = order.get("discounts") or []
+    if not discounts:
+        item_disc = _r2(sum(l["discount"] for l in items))
+        if item_disc:
+            discounts = [{"title": "Salla offer", "amount": item_disc}]
+    for disc in discounts:
+        raw_extras.append(("discount", disc["title"], -abs(disc["amount"])))
+
+    def plan(basis):
+        div = (1 + vat / 100.0) if basis == "gross" else 1.0
+        return [{"kind": k, "name": n, "price_unit": _round(amount / div, price_digits),
+                 "quantity": 1}
+                for k, n, amount in raw_extras]
+
+    candidates = {"gross": plan("gross"), "net": plan("net")}
+    salla_total = order.get("total")
+    tol = total_tolerance(products + candidates["gross"])
+    basis = "none" if not raw_extras else "unreconciled"
+    if raw_extras and salla_total is not None:
+        diffs = {b: abs(expected_total(products + ex, vat, price_digits) - salla_total)
+                 for b, ex in candidates.items()}
+        best = min(("gross", "net"), key=lambda b: diffs[b])   # gross wins a tie
+        if diffs[best] <= tol:
+            basis = best
+    extras = candidates["net" if basis == "net" else "gross"]
+    for extra in extras:
+        extra.pop("quantity")
+    return {
+        "products": products,
+        "extras": extras,
+        "extras_basis": basis,
+        "expected_total": expected_total(products + [dict(e, quantity=1) for e in extras], vat,
+                                         price_digits),
+        "salla_total": salla_total,
+        "tolerance": tol,
+        "vat_rate": vat,
+    }
+
+
+def total_check(odoo_total, salla_total, tolerance):
+    """Compare Odoo's amount_total with Salla's total.
+
+    -> ("ok", 0.0) exact; ("adjust", diff) within the rounding tolerance, diff =
+    salla - odoo, to be absorbed by a rounding line; ("mismatch", diff) beyond it, or
+    ("unknown", None) when Salla's total could not be read."""
+    if salla_total is None or odoo_total is None:
+        return ("unknown", None)
+    diff = _r2(salla_total - odoo_total)
+    if diff == 0:
+        return ("ok", 0.0)
+    if abs(diff) <= tolerance:
+        return ("adjust", diff)
+    return ("mismatch", diff)
+
+
+def _line_total(net, vat_rate):
+    """VAT-inclusive total of a one-unit line, Odoo per-line rounding."""
+    return _r2(net + _r2(net * vat_rate / 100.0))
+
+
+def adjustment_nets(diff, vat_rate):
+    """Net prices of the one-unit rounding line(s) whose VAT-inclusive totals add up to
+    exactly `diff` (Odoo per-line tax rounding). [] when diff is 0 or unreachable.
+
+    e.g. Salla sends price_without_tax 8.69 for 9.99 gross: x 3 -> Odoo 29.98, Salla
+    29.97, diff -0.01 -> [-0.01] (the tax on 0.01 rounds to 0). Searched around diff / (1 + VAT), not just
+    divided: some totals (0.04 at 15 %) no single 2-decimal price reaches — 0.03 lands
+    on 0.03 and 0.04 on 0.05 — and then two lines are used."""
+    diff = _r2(diff or 0.0)
+    if not diff:
+        return []
+    cents = int(round(diff / (1 + vat_rate / 100.0) * 100))
+    span = range(cents - 3, cents + 4)
+    for c in sorted(span, key=lambda c: abs(c - cents)):
+        if c and _line_total(c / 100.0, vat_rate) == diff:
+            return [c / 100.0]
+    for a in sorted(span, key=lambda c: abs(c - cents)):
+        if not a:
+            continue
+        rest = _r2(diff - _line_total(a / 100.0, vat_rate))
+        b_cents = int(round(rest / (1 + vat_rate / 100.0) * 100))
+        for b in (b_cents, b_cents - 1, b_cents + 1):
+            if b and _line_total(b / 100.0, vat_rate) == rest:
+                return [a / 100.0, b / 100.0]
+    return []
+
+
+# ------------------------------------------------------------------ cursor
+def next_cursor(window_end, holds):
+    """Where the reconcile cursor goes after a run.
+
+    `holds` = creation dates (naive UTC, or None when unknown) of the orders that must be
+    seen again: missing SKU, fetch/processing error, recent payment_pending. With none,
+    the cursor advances to window_end; otherwise it stays at the oldest hold, so the next
+    window still contains it. An unknown date returns None = do not move the cursor."""
+    holds = list(holds or [])
+    if not holds:
+        return window_end
+    if any(h is None for h in holds):
+        return None
+    return min(min(holds), window_end)
+
+
+def holds_cursor(status, created_at, now, pending_days=PENDING_HOLD_DAYS):
+    """True when a not-importable order must still hold the cursor: payment_pending and
+    younger than `pending_days` (it may be paid soon). Cancelled ones never hold."""
+    if _canon_status(status) != "payment_pending":
+        return False
+    return created_at is None or created_at >= now - timedelta(days=pending_days)
+
+
+# ------------------------------------------------------------------ notification
+def stock_rows(lines):
+    """[(name, ordered, available, storable)] -> ([{"name", "ordered", "available",
+    "short"}], any_short). Only storable products can be short; a service never is."""
+    rows, any_short = [], False
+    for name, ordered, available, storable in lines:
+        short = bool(storable) and ordered - (available or 0.0) > 1e-9
+        any_short = any_short or short
+        rows.append({"name": name, "ordered": ordered, "available": available or 0.0,
+                     "short": short})
+    return rows, any_short

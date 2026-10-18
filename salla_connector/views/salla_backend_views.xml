@@ -8,12 +8,22 @@
                     <header>
                         <button name="action_test_connection" type="object" string="Test Connection" class="btn-primary"/>
                         <button name="action_check_products" type="object" string="Check Product SKUs"/>
+                        <button name="action_import_orders" type="object" string="Import Orders Now"
+                                groups="sales_team.group_sale_manager"/>
+                        <button name="action_process_order_queue" type="object" string="Process Order Queue"
+                                groups="sales_team.group_sale_manager"/>
                         <!-- System only: it spends the single-use refresh token. -->
                         <button name="action_refresh_token" type="object" string="Refresh Token Now"
                                 groups="base.group_system"
                                 confirm="Refresh the Salla token now? Only needed if the daily cron is failing."/>
                     </header>
                     <sheet>
+                        <div class="oe_button_box" name="button_box">
+                            <button name="action_view_order_queue" type="object" class="oe_stat_button"
+                                    icon="fa-list">
+                                <field name="order_queue_count" widget="statinfo" string="Queued Orders"/>
+                            </button>
+                        </div>
                         <widget name="web_ribbon" title="Archived" bg_color="bg-danger" invisible="active"/>
                         <div class="oe_title">
                             <label for="name"/>
@@ -55,6 +65,25 @@
                                 <field name="webhook_url" placeholder="https://…/sl/webhook" widget="CopyClipboardChar"/>
                                 <field name="webhook_secret" password="True" groups="base.group_system"/>
                                 <field name="log_payloads" groups="base.group_system"/>
+                            </group>
+                        </group>
+                        <group>
+                            <group string="Orders">
+                                <field name="website_id"/>
+                                <field name="pricelist_id"/>
+                                <field name="salesperson_id"/>
+                                <field name="auto_confirm"/>
+                                <field name="last_order_sync"/>
+                            </group>
+                            <group string="Order Lines">
+                                <!-- All three must carry the 15% sales tax, or the Odoo total
+                                     no longer equals what the customer paid on Salla. -->
+                                <field name="shipping_product_id"/>
+                                <field name="cod_product_id"/>
+                                <field name="discount_product_id"/>
+                            </group>
+                            <group string="Notifications">
+                                <field name="notify_user_ids" widget="many2many_tags"/>
                             </group>
                         </group>
                     </sheet>

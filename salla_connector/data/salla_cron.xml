@@ -12,5 +12,30 @@
             <field name="interval_type">days</field>
             <field name="numbercall">-1</field>
         </record>
+
+        <!-- Woken by every order webhook through _trigger(); the 30 min interval only
+             retries what is still pending (missing SKU, API errors). -->
+        <record id="ir_cron_salla_order_queue" model="ir.cron">
+            <field name="name">Salla: Process Order Queue</field>
+            <field name="model_id" ref="model_salla_backend"/>
+            <field name="state">code</field>
+            <field name="code">model.cron_process_order_queue()</field>
+            <field name="user_id" ref="base.user_root"/>
+            <field name="interval_number">30</field>
+            <field name="interval_type">minutes</field>
+            <field name="numbercall">-1</field>
+        </record>
+
+        <!-- Safety net: Salla drops a webhook after 3 failed deliveries. -->
+        <record id="ir_cron_salla_reconcile_orders" model="ir.cron">
+            <field name="name">Salla: Reconcile Orders</field>
+            <field name="model_id" ref="model_salla_backend"/>
+            <field name="state">code</field>
+            <field name="code">model.cron_reconcile_orders()</field>
+            <field name="user_id" ref="base.user_root"/>
+            <field name="interval_number">30</field>
+            <field name="interval_type">minutes</field>
+            <field name="numbercall">-1</field>
+        </record>
     </data>
 </odoo>
