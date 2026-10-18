@@ -12,6 +12,7 @@ disagrees.
 """
 import hashlib
 import hmac
+import json
 import math
 import re
 from urllib.parse import urlsplit
@@ -1006,8 +1007,14 @@ def stock_rows(lines):
 # customer.{id, full_name, first_name, last_name, mobile, mobile_code, email, city,
 # country, country_code} are VALIDATED names (real order detail, 2026-10-18), but the
 # values were masked in that log: the FORMAT of mobile / mobile_code is NOT known, hence
-# every shape below. The shipping address object was never seen (all test orders were
-# pickup): its readers are docs-based guesses. VALIDATE BOTH AGAINST A REAL PAYLOAD.
+# every shape below.
+# Shipping address: key PATHS validated on a real webhook body (staging 2026-10-18,
+# values masked): data.shipments[].ship_to = the buyer's address, data.shipments[].ship_from
+# = the merchant's origin (never used). GET /orders/{id} is the "light" format since
+# 2026-09-01: no shipments, no shipping, receiver null, and /shipments needs a scope the
+# Partners Portal does not offer. So the address only exists in the webhook body: the
+# webhook keeps it on the queue row (webhook_ship_to) and the import merges it back
+# (with_ship_to) before buyer() reads it.
 
 # Arabic-Indic and Extended Arabic-Indic digits: an Arabic keyboard types these, and
 # Python's \d / int() would accept them while Odoo's and WhatsApp's validators may not.
@@ -1106,28 +1113,90 @@ def _join(*parts, sep=" "):
     return sep.join(p for p in (" ".join(text(x).split()) for x in parts) if p)
 
 
+# A ship_to of these types is a place of the merchant (pickup branch, warehouse), never
+# the buyer's door. The real value on a shipped order is unknown (masked in the log):
+# matched as substrings of the lowercased type, anything else is accepted.
+_NOT_BUYER_TYPE_PARTS = ("branch", "merchant", "store", "warehouse", "pickup")
+# The only ship_to keys the webhook keeps on the queue row: what shipping_address reads.
+# No email/phone/coordinates (customer.* already carries the contact data), nothing else
+# of the body. Values are flattened to strings and capped: a queue row is not an archive.
+SHIP_TO_KEYS = ("type", "name", "city", "district", "address_line", "address_line_two",
+                "street_number", "building_number", "block", "subblock", "postal_code",
+                "short_address")
+_SHIP_TO_MAX_LEN = 256
+# order.status.updated carries a status change, not the order: no address in it.
+ADDRESS_EVENTS = {"order.created", "order.updated"}
+
+
+def delivery_method(order):
+    """Canonical delivery_method: "shipping", "pickup" or whatever Salla sends; ""
+    when absent."""
+    return _canon_status(order.get("delivery_method")) if isinstance(order, dict) else ""
+
+
+def _ship_to(order):
+    """The buyer's ship_to dict from order.shipments[], or None. First entry whose
+    ship_to is a non-empty dict of a non-merchant type; ship_from is never looked at."""
+    shipments = order.get("shipments")
+    if isinstance(shipments, dict):
+        shipments = [shipments]
+    if not isinstance(shipments, list):
+        return None
+    for shipment in shipments:
+        found = shipment.get("ship_to") if isinstance(shipment, dict) else None
+        if not isinstance(found, dict) or not found:
+            continue
+        kind = text(found.get("type")).lower()
+        if any(part in kind for part in _NOT_BUYER_TYPE_PARTS):
+            continue
+        return found
+    return None
+
+
+def _contains(haystack, needle):
+    """`needle` appears in `haystack` as whole words: a plain substring test would find
+    block "2" inside building "1234" and drop it."""
+    needle = _addr_key(needle)
+    return bool(needle) and re.search(r"(?<!\w)%s(?!\w)" % re.escape(needle),
+                                      _addr_key(haystack)) is not None
+
+
 def shipping_address(order):
     """The delivery address of an order, {} when there is none (pickup).
 
     {"name", "street", "street2", "city", "zip", "short_code", "short_code_state",
-     "short_code_raw"}. NEVER SEEN IN A REAL PAYLOAD: paths and keys are from the docs
-    (ship_to: country, city, district, street_number, block, address_line, postal_code,
-    short_address, building_number, additional_number, geo_coordinates). First container
-    that is a dict wins. The country is ignored on purpose (always SA, see buyer()).
+     "short_code_raw"}. Real source: shipments[].ship_to (see the section header); the
+    older docs-based containers stay as fallbacks. A pickup order -> {} whatever it
+    carries (its ship_to, if any, is the branch). Saudi-style lines:
+      street  = address_line, else "building_number street_number"; the building number
+                is prefixed when address_line lacks it
+      street2 = address_line_two, district, block, subblock (", "-joined, parts already
+                in street skipped: address_line often repeats the district)
+    additional_number is not used: the short code already pins the building.
+    The country is ignored on purpose (always SA, see buyer()).
     short_code_raw is PII: for the order's chatter only, never a log line."""
-    if not isinstance(order, dict):
+    if not isinstance(order, dict) or delivery_method(order) == "pickup":
         return {}
-    addr = None
-    for path in ("shipping.address", "shipping.ship_to", "ship_to", "shipping_address",
-                 "shipping.receiver.address", "receiver.address", "receiver"):
-        found = _dig(order, path)
-        if isinstance(found, dict) and found:
-            addr = found
-            break
+    addr = _ship_to(order)
+    if addr is None:
+        for path in ("shipping.address", "shipping.ship_to", "ship_to", "shipping_address",
+                     "shipping.receiver.address", "receiver.address", "receiver"):
+            found = _dig(order, path)
+            if isinstance(found, dict) and found:
+                addr = found
+                break
     if addr is None:
         return {}
-    street = _join(addr.get("address_line")) or _join(
-        addr.get("building_number"), addr.get("street_number"), addr.get("street"))
+    building = _join(addr.get("building_number"))
+    street = _join(addr.get("address_line"))
+    if street and building and not _contains(street, building):
+        street = _join(building, street)
+    street = street or _join(building, addr.get("street_number"), addr.get("street"))
+    extra = []
+    for part in (_join(addr.get("address_line_two")), _label(addr.get("district")),
+                 _join(addr.get("block")), _join(addr.get("subblock"))):
+        if part and not _contains(street, part) and part not in extra:
+            extra.append(part)
     raw_code = _first(addr, "short_address", "short_code", "national_short_code",
                       "national_address")
     if isinstance(raw_code, dict):
@@ -1138,7 +1207,7 @@ def shipping_address(order):
     out = {
         "name": _join(addr.get("name")) or _join(addr.get("first_name"), addr.get("last_name")),
         "street": street,
-        "street2": _join(_label(addr.get("district")), addr.get("block"), sep=", "),
+        "street2": ", ".join(extra),
         "city": _label(addr.get("city")),
         "zip": ascii_digits(_first(addr, "postal_code", "zip_code", "zip")),
         "short_code": code,
@@ -1150,12 +1219,73 @@ def shipping_address(order):
     return out
 
 
+def webhook_ship_to(payload):
+    """The buyer's address of an order.created / order.updated webhook, reduced to
+    SHIP_TO_KEYS (string values), or {} (other event, pickup, no usable address).
+
+    Takes the WHOLE webhook body. The result is what the queue row stores (as JSON):
+    nothing else of the body survives (no customer, amounts, items, coordinates)."""
+    if not isinstance(payload, dict) or event_name(payload) not in ADDRESS_EVENTS:
+        return {}
+    data = payload.get("data")
+    if not isinstance(data, dict) or delivery_method(data) == "pickup":
+        return {}
+    found = _ship_to(data)
+    if not found:
+        return {}
+    kept = {}
+    for key in SHIP_TO_KEYS:
+        value = found.get(key)
+        value = _label(value) if isinstance(value, dict) else \
+            ("" if isinstance(value, (list, bool)) else " ".join(text(value).split()))
+        if value:
+            kept[key] = value[:_SHIP_TO_MAX_LEN]
+    # Stored only if shipping_address can use it: a name alone is not an address.
+    return kept if shipping_address({"shipments": [{"ship_to": kept}]}) else {}
+
+
+def dump_ship_to(ship_to):
+    """JSON text for the queue row, or None (stored as NULL) when there is nothing."""
+    return json.dumps(ship_to, ensure_ascii=False, sort_keys=True) if ship_to else None
+
+
+def load_ship_to(value):
+    """Queue row JSON -> SHIP_TO_KEYS dict; {} for empty, corrupt or non-dict JSON.
+    Never raises: a bad row must cost the address, not the order."""
+    if not value or not isinstance(value, (str, bytes)):
+        return {}
+    try:
+        data = json.loads(value)
+    except (ValueError, TypeError, RecursionError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: text(data[k])[:_SHIP_TO_MAX_LEN] for k in SHIP_TO_KEYS
+            if k in data and not isinstance(data[k], (dict, list)) and text(data[k])}
+
+
+def with_ship_to(order, ship_to):
+    """`order` (API detail) with the webhook's address merged in, as a NEW dict.
+
+    Only when the detail itself has no shipments[].ship_to (the light API format never
+    has one; if Salla brings it back, the API's wins). A pickup order is left alone."""
+    if not isinstance(order, dict):
+        return order
+    if not ship_to or delivery_method(order) == "pickup" or _ship_to(order) is not None:
+        return order
+    merged = dict(order)
+    merged["shipments"] = [{"ship_to": dict(ship_to)}]
+    return merged
+
+
 def buyer(order):
     """Everything F2b writes on the customer, from an order detail.
 
     {"ref", "name", "phone" (E.164 KSA mobile or ""), "phone_state" ("ok" | "missing" |
      "invalid"), "email" ("" if unusable), "city" (customer.city, a fallback when there
-    is no shipping address), "address" (shipping_address(order), {} for pickup)}.
+    is no shipping address), "address" (shipping_address(order), {} for pickup),
+    "address_missing" (True: delivery_method "shipping" and no address at all)}.
+    Pass the detail through with_ship_to() first: the API detail has no address.
     The country is NOT read: the partner is always SA (fiscal position, VAT must keep
     matching Salla), and a real test customer carried country_code "MX".
     All values are PII: never log them."""
@@ -1170,6 +1300,7 @@ def buyer(order):
             phone = e164_ksa(number, code)
             if phone:
                 break
+    address = shipping_address(order)
     return {
         "ref": base["ref"],
         "name": base["name"],
@@ -1177,7 +1308,10 @@ def buyer(order):
         "phone_state": "ok" if phone else ("invalid" if given else "missing"),
         "email": clean_email(cust.get("email")),
         "city": _label(cust.get("city")),
-        "address": shipping_address(order),
+        "address": address,
+        # Shipped order but no address anywhere (webhook lost or without it): the
+        # caller alerts so Ops adds it by hand. Pickup / unknown method: nothing to say.
+        "address_missing": not address and delivery_method(order) == "shipping",
     }
 
 

@@ -197,6 +197,10 @@ class SaleOrder(models.Model):
                 "Salla: the customer's phone number is not a valid Saudi mobile, so it was "
                 "not saved on the contact (WhatsApp confirmations need one). Add it by hand "
                 "if needed.")))
+        if buyer.get("address_missing"):
+            notes.append(("alert", _(
+                "Salla did not send the shipping address for this order (imported without "
+                "its webhook): add it by hand before shipping.")))
         code = addr.get("short_code") if has_code_field else ""
         if addr.get("short_code_state") == "invalid":
             notes.append(("alert", _(

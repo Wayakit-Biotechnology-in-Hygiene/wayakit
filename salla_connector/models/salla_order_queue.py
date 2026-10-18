@@ -29,6 +29,12 @@ class SallaOrderQueue(models.Model):
     attempts = fields.Integer(readonly=True)
     last_try = fields.Datetime(readonly=True)
     last_error = fields.Char(readonly=True)
+    # The buyer's shipping address from the webhook body (mapping.webhook_ship_to, JSON):
+    # the API's order detail no longer carries it, so this row is the only copy until
+    # the import. Customer PII: system-only in Python (salesmen read this model over
+    # RPC), in no view, never logged; it leaves the DB with the row once imported.
+    ship_to_json = fields.Text(string="Shipping Address (webhook)", readonly=True,
+                               groups="base.group_system", copy=False)
 
     def action_retry(self):
         if not self.env.user.has_group("sales_team.group_sale_manager"):

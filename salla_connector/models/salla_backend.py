@@ -599,29 +599,35 @@ class SallaBackend(models.Model):
                 _logger.warning("Salla backend %s: %s without a readable order id; payload "
                                 "keys: %s", self.name, event, mapping.payload_keys(payload))
                 return "ignored:no-order-id"
-            self._enqueue_order(order_id, event)
+            # Only the address leaves the body (whitelisted keys): the API detail the
+            # import reads has none since 2026-09-01.
+            self._enqueue_order(order_id, event, ship_to=mapping.webhook_ship_to(payload))
             return "queued"
         return "ignored:%s" % (event or "?")
 
-    def _enqueue_order(self, order_id, event):
+    def _enqueue_order(self, order_id, event, ship_to=None):
         """Queue a Salla order id for the import cron and wake it up. No API call and no
         write on salla_backend here (webhook rules above _set_token_cache).
 
         Append-only: a plain INSERT, one row per delivery, no unique key. It can never
         conflict with, or wait on, the cron working on the same order — the cron only
         deletes the row ids it read, so a webhook arriving mid-processing survives as a
-        new due row and is processed on the next run (which this call triggers)."""
+        new due row and is processed on the next run (which this call triggers).
+
+        `ship_to` = mapping.webhook_ship_to(body): stored on the row (PII, see the field)
+        for _sync_order; None/{} for manual rows and events without an address."""
         self.ensure_one()
         order_id = mapping.clean_id(order_id)
         if not order_id:
             return False
         self.env.cr.execute("""
             INSERT INTO salla_order_queue
-                (backend_id, salla_order_id, event, state, attempts,
+                (backend_id, salla_order_id, event, state, attempts, ship_to_json,
                  create_uid, write_uid, create_date, write_date)
-            VALUES (%s, %s, %s, 'pending', 0, %s, %s,
+            VALUES (%s, %s, %s, 'pending', 0, %s, %s, %s,
                     now() at time zone 'UTC', now() at time zone 'UTC')
-        """, (self.id, order_id, event or "manual", self.env.uid, self.env.uid))
+        """, (self.id, order_id, event or "manual", mapping.dump_ship_to(ship_to),
+              self.env.uid, self.env.uid))
         self.env.ref("salla_connector.ir_cron_salla_order_queue").sudo()._trigger()
         return True
 
@@ -887,8 +893,10 @@ class SallaBackend(models.Model):
             return "error", order["created_at"], problem
         # Read from the raw order, not normalize_order(): that one stays PII-free (name
         # only) because its output reaches log lines; buyer() goes straight to the partner.
+        # The API detail has no address: it comes from the webhook, via the queue.
+        detail = mapping.with_ship_to(raw, self._queued_ship_to(order_id))
         so = SaleOrder._create_from_salla(self, order, plan, products,
-                                          buyer=mapping.buyer(raw))
+                                          buyer=mapping.buyer(detail))
         if not so:
             # Lost the race against the other path (webhook queue vs reconcile). Under
             # REPEATABLE READ the winner's row may be invisible to this snapshot: then it
@@ -900,6 +908,18 @@ class SallaBackend(models.Model):
         _logger.info("Salla order %s (%s) imported as %s, state %s", order["reference"],
                      order_id, so.name, so.state)
         return "created", order["created_at"], ""
+
+    def _queued_ship_to(self, order_id):
+        """The address the NEWEST queue row of this order carries (any state), {} if none.
+
+        Read here, whoever imports (queue or reconcile): the reconcile cron can import an
+        order whose webhook row still waits in the queue (missing SKU retried every
+        ~25 min) and must not drop the address that row holds. Newest wins: an
+        order.updated after the customer edited the address beats the order.created."""
+        row = self.env["salla.order.queue"].sudo().search(
+            [("backend_id", "=", self.id), ("salla_order_id", "=", order_id),
+             ("ship_to_json", "!=", False)], order="id desc", limit=1)
+        return mapping.load_ship_to(row.ship_to_json) if row else {}
 
     def _sync_order_safe(self, order_id, summary=None):
         """_sync_order in a savepoint: one bad order never takes the batch down with it."""
@@ -948,7 +968,7 @@ class SallaBackend(models.Model):
                 groups[row.salla_order_id] |= row
         counters = {}
         for order_id, group in groups.items():
-            outcome, _created, detail = self._sync_order_safe(order_id)
+            outcome, created, detail = self._sync_order_safe(order_id)
             counters[outcome] = counters.get(outcome, 0) + 1
             try:
                 # Own savepoint, any exception: a failure here (a Retry clicked on this
@@ -957,7 +977,8 @@ class SallaBackend(models.Model):
                 # next run. Letting it reach the cron's savepoint rolled back EVERY order
                 # of the batch and the queue never drained (staging 2026-10-18).
                 with self.env.cr.savepoint():
-                    self._queue_bookkeeping(order_id, group, outcome, detail)
+                    self._queue_bookkeeping(order_id, group, outcome, detail,
+                                            created=created)
             except Exception:
                 _logger.warning("Salla order %s: queue bookkeeping failed (outcome %s), "
                                 "rows left as they were; retried next run", order_id,
@@ -970,9 +991,24 @@ class SallaBackend(models.Model):
             _logger.info("Salla backend %s: order queue -> %s", self.name, counters)
         return counters
 
-    def _queue_bookkeeping(self, order_id, group, outcome, detail):
+    def _queue_bookkeeping(self, order_id, group, outcome, detail, created=None):
         """Delete or update the queue rows `group` (read for `order_id`) after a sync."""
         Queue = self.env["salla.order.queue"]
+        now = fields.Datetime.now()
+        if outcome == "not_importable" and mapping.holds_cursor(detail, created, now):
+            # payment_pending and recent: ONE row stays, re-checked every ~25 min (one GET,
+            # no items call). It holds the only copy of the address: the status webhook
+            # that follows the payment carries none, and it may be lost anyway.
+            group = group.exists()
+            if group:
+                keep = next((r for r in group.sudo().sorted("id", reverse=True)
+                             if r.ship_to_json), None) or group.sorted("id")[0]
+                # Never kept past the hold, even when the order date is unreadable
+                # (holds_cursor is True for created=None): the PII must leave.
+                if keep.create_date >= now - timedelta(days=mapping.PENDING_HOLD_DAYS):
+                    (group - keep).unlink()
+                    keep.sudo().write({"last_try": now, "last_error": detail or outcome})
+                    return
         if outcome in ("created", "known", "not_importable"):
             # not_importable (payment_pending/cancelled): a later status webhook queues
             # it again, and the reconcile cursor holds recent pending ones. Old failed
@@ -989,8 +1025,14 @@ class SallaBackend(models.Model):
             return
         attempts = max(group.mapped("attempts") or [0])
         keep = group.sorted("id")[0]
+        # The kept row is the OLDEST; the address of a newer duplicate moves onto it
+        # before that one is deleted, or the order would import without it next run.
+        ship_to = next((r.ship_to_json for r in group.sudo().sorted("id", reverse=True)
+                        if r.ship_to_json), False)
         (group - keep).unlink()
-        vals = {"last_try": fields.Datetime.now(), "last_error": detail or outcome}
+        vals = {"last_try": now, "last_error": detail or outcome}
+        if ship_to:
+            vals["ship_to_json"] = ship_to
         if outcome == "error":
             # A missing SKU never fails the row: it waits until the product exists.
             vals["attempts"] = attempts + 1
@@ -998,7 +1040,7 @@ class SallaBackend(models.Model):
                 vals["state"] = "failed"
                 _logger.warning("Salla order %s: gave up after %s attempts: %s",
                                 order_id, vals["attempts"], detail)
-        keep.write(vals)
+        keep.sudo().write(vals)
 
     def _check_order_manager(self):
         # The view hides the buttons, but any object method is callable over RPC.

@@ -1670,7 +1670,9 @@ def test_shipping_address_fields_variants():
                                              city="FakeCity", district={"name": "D1"},
                                              block="", postal_code=12345,
                                              short_address="RRR29299"))
-    assert a["street"] == "Fake Line 1"          # address_line wins, spaces collapsed
+    # address_line wins, spaces collapsed; the building number (1234 from the fixture)
+    # is prefixed because address_line does not carry it (fix round 1, Saudi style).
+    assert a["street"] == "1234 Fake Line 1", a["street"]
     assert a["street2"] == "D1"                  # empty block: no dangling ", "
     assert a["city"] == "FakeCity" and a["zip"] == "12345"   # numeric postal code
     assert a["short_code"] == "" and a["short_code_state"] == "invalid"
@@ -1719,7 +1721,7 @@ def test_buyer_full():
     b = mapping.buyer(order)
     assert b == {"ref": "7700001", "name": "Fake Buyer", "phone": E164, "phone_state": "ok",
                  "email": "fake@example.invalid", "city": "FakeCity",
-                 "address": mapping.shipping_address(order)}, b
+                 "address": mapping.shipping_address(order), "address_missing": False}, b
     assert b["address"]["short_code"] == "ABCD1234"
     # The payload country (a real test customer said "MX") is NOT carried at all:
     # the partner is always SA.
@@ -1763,7 +1765,7 @@ def test_buyer_email_and_name_fallbacks():
 
 def test_buyer_garbage_and_guest():
     empty = {"ref": "", "name": "", "phone": "", "phone_state": "missing", "email": "",
-             "city": "", "address": {}}
+             "city": "", "address": {}, "address_missing": False}
     for order in ({}, None, [], {"customer": None}, {"customer": "x"}, {"customer": []}):
         assert mapping.buyer(order) == empty, order
     # No customer id (guest order) -> ref "": the backend must route it to the shared
@@ -1951,6 +1953,308 @@ def test_address_fillable():
     assert mapping.address_fillable(None, None)
 
 
+# --- F2b fix round 1: the address only comes in the webhook body ------------
+# Real key paths from the staging webhook of 2026-10-18 (values here are FAKE).
+def _real_ship_to(**over):
+    st = {"type": "address", "name": "Fake Receiver", "email": "r@example.invalid",
+          "phone": "+966500000009", "country": "Saudi Arabia", "country_id": 1,
+          "country_code": "SA", "region": {"id": 1, "name": "Fake Region", "code": "FR"},
+          "city": "FakeCity", "city_id": 101, "district": "Fake District",
+          "address_line": "Fake Line 1", "address_line_two": "Fake Line 2",
+          "street_number": "Fake St", "block": "B7", "subblock": "S3",
+          "short_address": "abcd 1234", "building_number": "1234",
+          "additional_number": "6789", "postal_code": "12345",
+          "latitude": "24.0000001", "longitude": "46.0000001", "branch_id": None}
+    st.update(over)
+    return st
+
+
+def _real_ship_from():
+    return {"type": "branch", "name": "Fake Warehouse", "email": "wh@example.invalid",
+            "phone": "+966500000008", "country": "Saudi Arabia", "country_code": "SA",
+            "city": "OriginCity", "district": "Origin District",
+            "address_line": "Origin Line", "street_number": "Origin St",
+            "short_address": "wxyz9999", "building_number": "9999",
+            "postal_code": "99999", "latitude": "21.0", "longitude": "39.0",
+            "branch_id": 555}
+
+
+def _real_webhook_body(ship_to=None, ship_from=True, delivery="shipping", **data_over):
+    shipment = {}
+    if ship_to is not None:
+        shipment["ship_to"] = ship_to
+    if ship_from:
+        shipment["ship_from"] = _real_ship_from()
+    data = {"id": 900002, "reference_id": 70000002, "delivery_method": delivery,
+            "customer": {"id": 7700002, "full_name": "Fake Buyer", "first_name": "Fake",
+                         "last_name": "Buyer", "mobile": "500000001",
+                         "mobile_code": "+966", "email": "fake.buyer@example.invalid",
+                         "city": "CustomerCity", "country": "Mexico",
+                         "country_code": "MX", "location": "Fake Location"},
+            "amounts": {"sub_total": {"amount": 30, "currency": "SAR"},
+                        "total": {"amount": 34.5, "currency": "SAR"}},
+            "items": [{"sku": "FP-ACC-00004", "quantity": 3}],
+            "shipping": {"id": 1, "company": "Fake Courier",
+                         "receiver": {"name": "Fake Receiver", "email": "r@example.invalid",
+                                      "phone": "+966500000009"},
+                         "shipper": {"name": "Fake Warehouse"},
+                         "pickup_address": {"city": "OriginCity"},
+                         "address": "***", "branch_id": 555},
+            "shipments": [shipment] if shipment else []}
+    data.update(data_over)
+    return {"event": "order.created", "merchant": 1000000001, "data": data}
+
+# Every value of the fixture that is NOT part of the buyer's street address: none of
+# these may reach the queue row (webhook_ship_to) or the Odoo address.
+_NOT_ADDRESS_VALUES = ("r@example.invalid", "+966500000009", "24.0000001", "46.0000001",
+                       "Fake Region", "6789", "fake.buyer@example.invalid", "500000001",
+                       "CustomerCity", "Fake Location", "Mexico", "34.5", "FP-ACC-00004",
+                       "Fake Courier")
+_SHIP_FROM_VALUES = ("Fake Warehouse", "wh@example.invalid", "+966500000008", "OriginCity",
+                     "Origin District", "Origin Line", "Origin St", "wxyz9999", "WXYZ9999",
+                     "9999", "99999", "21.0", "39.0")
+
+
+def test_shipping_address_real_webhook_shape():
+    """The staging finding: the address lives at data.shipments[0].ship_to."""
+    data = _real_webhook_body(_real_ship_to())["data"]
+    a = mapping.shipping_address(data)
+    assert a == {"name": "Fake Receiver", "street": "1234 Fake Line 1",
+                 "street2": "Fake Line 2, Fake District, B7, S3", "city": "FakeCity",
+                 "zip": "12345", "short_code": "ABCD1234", "short_code_state": "ok",
+                 "short_code_raw": "abcd 1234"}, a
+    # The real shape is read FIRST: an old docs-path container never shadows it.
+    data["ship_to"] = {"city": "DocsCity", "postal_code": "00000"}
+    assert mapping.shipping_address(data)["city"] == "FakeCity"
+    # Nothing of ship_from, the customer, the coordinates or the region leaks in.
+    dump = json.dumps(a, ensure_ascii=False)
+    for value in _SHIP_FROM_VALUES + _NOT_ADDRESS_VALUES:
+        assert value not in dump, value
+    # buyer() on the merged detail: the address, and no "address missing" alert.
+    b = mapping.buyer(data)
+    assert b["address"] == mapping.shipping_address(data) and b["address_missing"] is False
+
+
+def test_shipping_address_ship_from_never_used():
+    # Only ship_from (merchant origin): no address at all, never Wayakit's warehouse.
+    data = _real_webhook_body(None)["data"]
+    assert data["shipments"] == [{"ship_from": _real_ship_from()}]
+    assert mapping.shipping_address(data) == {}
+    assert mapping.webhook_ship_to(_real_webhook_body(None)) == {}
+    b = mapping.buyer(data)
+    assert b["address"] == {} and b["address_missing"] is True       # shipping, no address
+    # ship_to shaped like the merchant's (type branch/warehouse/...) is skipped too.
+    for kind in ("branch", "Branch", "merchant", "store", "warehouse", "pickup_point"):
+        body = _real_webhook_body(_real_ship_to(type=kind))
+        assert mapping.shipping_address(body["data"]) == {}, kind
+        assert mapping.webhook_ship_to(body) == {}, kind
+    # A branch ship_to first, the buyer's second: the buyer's wins, origin never read.
+    data = _real_webhook_body(_real_ship_to())["data"]
+    data["shipments"].insert(0, {"ship_to": _real_ship_from()})
+    a = mapping.shipping_address(data)
+    assert a["city"] == "FakeCity" and a["short_code"] == "ABCD1234", a
+    # shipments given as a single dict instead of a list still works.
+    data = _real_webhook_body(_real_ship_to())["data"]
+    data["shipments"] = data["shipments"][0]
+    assert mapping.shipping_address(data)["city"] == "FakeCity"
+
+
+def test_shipping_address_real_pickup_is_empty():
+    # A pickup order: {} whatever ship_to carries (on pickup it is the branch).
+    for method in ("pickup", "Pickup", " PICKUP "):
+        data = _real_webhook_body(_real_ship_to(), delivery=method)["data"]
+        assert mapping.shipping_address(data) == {}, method
+        assert mapping.webhook_ship_to(_real_webhook_body(_real_ship_to(),
+                                                          delivery=method)) == {}
+        assert mapping.buyer(data)["address_missing"] is False      # pickup: no alert
+    # Empty / garbage shipments lists: no address, no crash.
+    for shipments in ([], [None], [{}], [{"ship_to": None}], [{"ship_to": {}}],
+                      [{"ship_to": "a string"}], [{"ship_to": []}], "x", None, 42):
+        data = {"delivery_method": "shipping", "shipments": shipments}
+        assert mapping.shipping_address(data) == {}, shipments
+        assert mapping.buyer(dict(data, customer={"id": 1}))["address_missing"] is True
+        assert mapping.webhook_ship_to({"event": "order.created", "data": data}) == {}
+    # No delivery_method at all (unknown): no address and NO alert (nothing to say).
+    assert mapping.buyer({"customer": {"id": 1}})["address_missing"] is False
+
+
+def test_shipping_address_real_short_code_states():
+    for raw, code, state in (("abcd 1234", "ABCD1234", "ok"), ("RRRD-2929", "RRRD2929", "ok"),
+                             ("ABCD١٢٣٤", "ABCD1234", "ok"), ("RRR29299", "", "invalid"),
+                             ("ABCD12345", "", "invalid"), ("ABC1234", "", "invalid"),
+                             ("", "", "missing"), (None, "", "missing")):
+        a = mapping.shipping_address(_real_webhook_body(_real_ship_to(short_address=raw))["data"])
+        assert (a["short_code"], a["short_code_state"]) == (code, state), (raw, a)
+        # The same through the queue row (webhook -> JSON -> merge -> read).
+        st = mapping.load_ship_to(mapping.dump_ship_to(
+            mapping.webhook_ship_to(_real_webhook_body(_real_ship_to(short_address=raw)))))
+        a2 = mapping.shipping_address(mapping.with_ship_to({"delivery_method": "shipping"}, st))
+        assert (a2["short_code"], a2["short_code_state"]) == (code, state), (raw, a2)
+
+
+def test_shipping_address_real_street_lines():
+    def addr(**kw):
+        st = {"type": "address", "city": "C"}
+        st.update(kw)
+        return mapping.shipping_address({"delivery_method": "shipping",
+                                         "shipments": [{"ship_to": st}]})
+    # address_line already holds the building number: not repeated.
+    assert addr(address_line="1234 Fake Line", building_number="1234")["street"] == "1234 Fake Line"
+    # No address_line: building number + street number.
+    assert addr(building_number="1234", street_number="Fake St")["street"] == "1234 Fake St"
+    # address_line that repeats the district: the district is not repeated in street2.
+    a = addr(address_line="Fake Line, Fake District", district="Fake District", block="B7")
+    assert a["street2"] == "B7", a
+    # Duplicated parts in street2 appear once; empty parts leave no dangling ", ".
+    a = addr(address_line="Fake Line", address_line_two="B7", district="", block="B7",
+             subblock=" ")
+    assert a["street2"] == "B7", a
+    # district as {"name": ...} (like city) is read.
+    assert addr(address_line="L", district={"name": "D1"})["street2"] == "D1"
+    # "Already contained" is by WHOLE word, not substring: building 123 is not inside
+    # "...Rd 1234", block "2" is not inside building "1234" (both would be lost silently).
+    assert addr(address_line="Fake Rd 1234", building_number="123")["street"] == "123 Fake Rd 1234"
+    a = addr(building_number="1234", street_number="Fake St", block="2", subblock="34")
+    assert a["street"] == "1234 Fake St" and a["street2"] == "2, 34", a
+    assert addr(address_line="Fake Olaya St", district="Ola")["street2"] == "Ola"
+    # Reviewer cases: digits inside a longer number are not "contained".
+    assert addr(address_line="1234 Fake Rd", block="2")["street2"] == "2"
+    assert addr(address_line="4123 Fake St", building_number="12")["street"] == "12 4123 Fake St"
+    a = addr(address_line="1234 Fake St, Al Fake", building_number="1234", district="al fake")
+    assert a["street"] == "1234 Fake St, Al Fake" and a["street2"] == "", a
+    # Arabic text: the word boundary is Unicode-aware. The district word inside an
+    # Arabic address_line is not repeated; a district that is only part of a word is kept.
+    a = addr(address_line="شارع الملك فهد، حي العليا", district="العليا")
+    assert a["street2"] == "", a
+    a = addr(address_line="شارع العليا", district="علي")
+    assert a["street2"] == "علي", a
+
+
+def test_webhook_ship_to_keeps_only_address_keys():
+    body = _real_webhook_body(_real_ship_to())
+    st = mapping.webhook_ship_to(body)
+    assert set(st) <= set(mapping.SHIP_TO_KEYS), sorted(set(st) - set(mapping.SHIP_TO_KEYS))
+    assert st == {"type": "address", "name": "Fake Receiver", "city": "FakeCity",
+                  "district": "Fake District", "address_line": "Fake Line 1",
+                  "address_line_two": "Fake Line 2", "street_number": "Fake St",
+                  "building_number": "1234", "block": "B7", "subblock": "S3",
+                  "postal_code": "12345", "short_address": "abcd 1234"}, st
+    for forbidden in ("email", "phone", "latitude", "longitude", "region", "country",
+                      "country_code", "additional_number", "branch_id", "city_id",
+                      "customer", "amounts", "items", "ship_from", "shipping"):
+        assert forbidden not in st, forbidden
+    stored = mapping.dump_ship_to(st)
+    assert isinstance(stored, str)
+    for value in _SHIP_FROM_VALUES + _NOT_ADDRESS_VALUES:
+        assert value not in stored, value
+    # Every value is a flat string (no nested dict/list ends up in the row).
+    assert all(isinstance(v, str) for v in st.values())
+    # Numbers and {"name": ...} are flattened; spaces collapsed; long values capped.
+    st = mapping.webhook_ship_to(_real_webhook_body(_real_ship_to(
+        postal_code=12345, building_number=1234, city={"id": 9, "name": " Fake  City "},
+        address_line="x" * 5000, block=["B7"], subblock=True)))
+    assert st["postal_code"] == "12345" and st["building_number"] == "1234"
+    assert st["city"] == "Fake City"
+    assert 0 < len(st["address_line"]) <= 256
+    assert "block" not in st and "subblock" not in st      # list / bool dropped
+    # The stored address gives the same Odoo address as the full webhook body.
+    merged = mapping.with_ship_to({"id": 900002, "delivery_method": "shipping"},
+                                  mapping.load_ship_to(mapping.dump_ship_to(
+                                      mapping.webhook_ship_to(body))))
+    assert mapping.shipping_address(merged) == mapping.shipping_address(body["data"])
+
+
+def test_webhook_ship_to_empty_cases():
+    good = _real_ship_to()
+    for body in (None, [], "x", {}, {"event": "order.created"},
+                 {"event": "order.created", "data": None},
+                 {"event": "order.created", "data": "x"},
+                 _real_webhook_body(good, delivery="pickup"),
+                 _real_webhook_body(None),                               # ship_from only
+                 _real_webhook_body({"type": "address", "name": "Fake Receiver"}),  # name only
+                 _real_webhook_body({"type": "address", "latitude": "24.1",
+                                     "longitude": "46.1", "country": "SA"})):
+        assert mapping.webhook_ship_to(body) == {}, body
+        assert mapping.dump_ship_to(mapping.webhook_ship_to(body)) is None
+    # Only order.created / order.updated carry the order; any other event -> {}.
+    for event, kept in (("order.created", True), ("order.updated", True),
+                        ("order.status.updated", False), ("order.deleted", False),
+                        ("app.store.authorize", False), ("", False), (None, False)):
+        body = _real_webhook_body(good)
+        body["event"] = event
+        assert bool(mapping.webhook_ship_to(body)) is kept, event
+
+
+def test_load_ship_to_never_raises():
+    for value in (None, "", b"", "{", "[]", "null", "42", '"str"', 5, 4.2, [], {},
+                  "[" * 100000, "{" * 100000, '{"city": {"a": 1}}', "\x00\xff",
+                  b"\xff\xfe"):
+        out = mapping.load_ship_to(value)
+        assert out == {}, (repr(value)[:30], out)
+    # Unknown keys dropped, containers dropped, values capped.
+    out = mapping.load_ship_to(json.dumps({"city": "C", "email": "e@example.invalid",
+                                           "phone": "+966500000009", "evil": "x",
+                                           "district": {"name": "D"}, "block": ["B"],
+                                           "address_line": "y" * 999}))
+    assert out == {"city": "C", "address_line": "y" * 256}, out
+    assert mapping.load_ship_to(b'{"city": "C"}') == {"city": "C"}
+
+
+def test_with_ship_to_merge_rules():
+    st = mapping.webhook_ship_to(_real_webhook_body(_real_ship_to()))
+    # Light API detail: no shipments -> the webhook's address is merged, as a NEW dict.
+    detail = {"id": 900002, "delivery_method": "shipping", "customer": {"id": 7700002}}
+    before = json.dumps(detail, sort_keys=True)
+    merged = mapping.with_ship_to(detail, st)
+    assert merged is not detail and json.dumps(detail, sort_keys=True) == before
+    assert mapping.shipping_address(merged)["city"] == "FakeCity"
+    assert mapping.buyer(merged)["address_missing"] is False
+    # The detail as the API sends it, without the merge: alert (shipping, no address).
+    assert mapping.buyer(detail)["address_missing"] is True
+    # API brought its own ship_to back: the API's wins, the stored one is ignored.
+    api = dict(detail, shipments=[{"ship_to": {"type": "address", "city": "ApiCity",
+                                               "postal_code": "54321"}}])
+    assert mapping.shipping_address(mapping.with_ship_to(api, st))["city"] == "ApiCity"
+    # Pickup detail: untouched even with a stored address.
+    pick = dict(detail, delivery_method="pickup")
+    assert mapping.with_ship_to(pick, st) is pick
+    assert mapping.shipping_address(mapping.with_ship_to(pick, st)) == {}
+    # Nothing stored: unchanged (and buyer() then alerts for a shipping order).
+    for empty in ({}, None):
+        assert mapping.with_ship_to(detail, empty) is detail
+    # Garbage detail is returned as is, never raises.
+    for garbage in (None, [], "x"):
+        assert mapping.with_ship_to(garbage, st) == garbage
+    # A branch-type ship_to in the detail does not block the buyer's stored one.
+    branchy = dict(detail, shipments=[{"ship_to": _real_ship_from(),
+                                       "ship_from": _real_ship_from()}])
+    a = mapping.shipping_address(mapping.with_ship_to(branchy, st))
+    assert a["city"] == "FakeCity", a
+
+
+def test_redact_real_webhook_body():
+    """log_payloads dump of the real body shape: no address/contact value in clear."""
+    body = _real_webhook_body(_real_ship_to())
+    out = mapping.redact(body)
+    dump = json.dumps(out, ensure_ascii=False)
+    for value in ("Fake Receiver", "r@example.invalid", "+966500000009", "Fake Region",
+                  "FakeCity", "Fake District", "Fake Line 1", "Fake Line 2", "Fake St",
+                  "B7", "S3", "abcd 1234", "1234", "6789", "12345", "24.0000001",
+                  "46.0000001", "Fake Buyer", "fake.buyer@example.invalid", "500000001",
+                  "CustomerCity", "Fake Location") + _SHIP_FROM_VALUES:
+        assert value not in dump, value
+    st = out["data"]["shipments"][0]["ship_to"]
+    for key in ("name", "email", "phone", "city", "district", "address_line",
+                "address_line_two", "street_number", "block", "subblock", "short_address",
+                "building_number", "additional_number", "postal_code", "latitude",
+                "longitude"):
+        assert st[key] == "***", key
+    assert st["region"] == "***" or st["region"]["name"] == "***"
+    # Field names stay readable (that is what the dump is for).
+    assert st["type"] == "address" and out["data"]["delivery_method"] == "shipping"
+    assert out["data"]["amounts"]["total"]["amount"] == 34.5
+
+
 if __name__ == "__main__":
     for fn in [test_signature_valid, test_signature_wrong_secret,
                test_signature_tampered_one_byte, test_signature_missing_or_empty_header,
@@ -2026,7 +2330,16 @@ if __name__ == "__main__":
                test_same_address, test_address_fillable, test_pick_partner_rules,
                test_pick_partner_deterministic_any_order,
                test_pick_partner_never_internal,
-               test_redact_shipping_address_pii]:
+               test_redact_shipping_address_pii,
+               # F2b fix round 1: address only in the webhook body
+               test_shipping_address_real_webhook_shape,
+               test_shipping_address_ship_from_never_used,
+               test_shipping_address_real_pickup_is_empty,
+               test_shipping_address_real_short_code_states,
+               test_shipping_address_real_street_lines,
+               test_webhook_ship_to_keeps_only_address_keys,
+               test_webhook_ship_to_empty_cases, test_load_ship_to_never_raises,
+               test_with_ship_to_merge_rules, test_redact_real_webhook_body]:
         fn()
         print(fn.__name__, "OK")
     print("all passed")
