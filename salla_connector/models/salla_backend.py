@@ -885,7 +885,10 @@ class SallaBackend(models.Model):
         problem = self._order_config_problem(order, plan)
         if problem:
             return "error", order["created_at"], problem
-        so = SaleOrder._create_from_salla(self, order, plan, products)
+        # Read from the raw order, not normalize_order(): that one stays PII-free (name
+        # only) because its output reaches log lines; buyer() goes straight to the partner.
+        so = SaleOrder._create_from_salla(self, order, plan, products,
+                                          buyer=mapping.buyer(raw))
         if not so:
             # Lost the race against the other path (webhook queue vs reconcile). Under
             # REPEATABLE READ the winner's row may be invisible to this snapshot: then it

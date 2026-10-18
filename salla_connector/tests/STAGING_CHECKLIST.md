@@ -1,4 +1,4 @@
-# salla_connector: staging checklist (odoo.sh `mainTest` build): F1 (A-I) and F2a (J-L)
+# salla_connector: staging checklist (odoo.sh `mainTest` build): F1 (A-I), F2a (J-N), F2b (O)
 
 Manual run by a human on the odoo.sh staging build. There is no local Odoo.
 Run the standalone suite first: `python3 salla_connector/tests/test_mapping.py` must end in `all passed`.
@@ -419,3 +419,111 @@ For every order below, write down from the Salla dashboard: order id, reference,
 70. **Customer IP and user agent masked.** With **Log Full Webhook Payloads** on, place one order and look at the dump: `source_details.ip` and `source_details["user-agent"]` (and `user_agent`, if present) are `"***"`; `amounts.shipping_cost`, `shipping` keys that are not PII, `description` and the item `sku`/`quantity` stay readable. Turn log_payloads off again.
 71. **Amounts in notes have 2 decimals.** In every Salla chatter note/log line with money from steps 46, 57, 65 and 69 (total mismatch, rounding adjustment, COD dropped, VAT), amounts read like `370.09`, never `370.09000000000003`.
 72. **401 for a missing scope: the message names it.** `show_branches()` from `tests/staging_api_orders.py` (the app has no `branches.read` scope). Expected: one forced refresh (log), then the error *Salla answered 401 on /branches even with a freshly refreshed token. Either the app lacks the scope this endpoint needs (add it to the app in the Salla Partners Portal, then reinstall the app on the store), or the store revoked the app (reinstall it).* Exactly **one** refresh for the call (no loop, no second refresh in the log). Test Connection right after is still **green** (the refresh did not break the token).
+
+## O. F2b: real customer and national address (v17.0.2.1.0)
+
+Order of work: O.1 (preparation, then the one dashboard order that validates the field names) **before** anything else, because the shipping-address field names have never been seen in a real payload. Everything here is on the KSA company (id 1) and the demo store `461067869`. **Every amount test still uses quantity >= 2** (most use 3); a coupon is never 0.
+
+PII rule for this section: the only real phone/email used is **Mafer's own**, on the demo test customer, so the WhatsApp step reaches nobody else. Never paste it, the national address or the short code into the ticket or a chat: write "matches / does not match", and use the masked helper below.
+
+Extra shell helpers (after the J ones). They print **masked** contact data (`+96650*****67`, `m***@***`), never the full values:
+```python
+import re
+mask_phone = lambda v: (v[:6] + "*" * max(len(v) - 8, 0) + v[-2:]) if v else "EMPTY"
+mask_mail = lambda v: (v[0] + "***@***") if v else "EMPTY"
+def P(ids):            # partner facts, active or archived
+    rs = env["res.partner"].with_context(active_test=False).browse(ids)
+    return [dict(id=p.id, active=p.active, company=p.company_id.id or None,
+                 parent=p.parent_id.id or None, type=p.type, salla=p.salla_customer_id or None,
+                 phone=mask_phone(p.phone), mobile=mask_phone(p.mobile),
+                 phone_e164=bool(re.fullmatch(r"\+9665\d{8}", p.phone or "")),
+                 mobile_e164=bool(re.fullmatch(r"\+9665\d{8}", p.mobile or "")),
+                 email=mask_mail(p.email), country=p.country_id.code,
+                 street=bool(p.street), city=bool(p.city), zip=bool(p.zip),
+                 short_code_ok=bool(re.fullmatch(r"[A-Z]{4}\d{4}", p.x_national_short_code or "")),
+                 short_code_set=bool(p.x_national_short_code)) for p in rs]
+def order_partners(salla_id):   # customer / invoice / shipping partner of the imported order
+    o = env["sale.order"].search([("salla_order_id", "=", str(salla_id))])
+    return dict(order=o.name, partner=o.partner_id.id, invoice=o.partner_invoice_id.id,
+                shipping=o.partner_shipping_id.id, fpos=o.fiscal_position_id.name,
+                total=o.amount_total, salla_total=o.salla_total)
+def by_ref(ref):       # every partner (archived too) carrying one Salla customer id: must be 1
+    return env["res.partner"].with_context(active_test=False).search(
+        [("salla_customer_id", "=", str(ref))]).ids
+GUEST = env.ref("salla_connector.partner_salla_guest")
+```
+
+### O.1 Preparation and the real-payload check
+
+73. Build green; `salla_connector` upgrades to **17.0.2.1.0** with no error in the build log. Redo step 37 (backend, Webhook URL in the Partners Portal, reinstall the app, Test Connection green). Run `python3 salla_connector/tests/test_mapping.py` locally first: it ends in `all passed`.
+74. **Guest contact has no contact data (before any import).** `P(GUEST.ids)`: `phone`, `mobile`, `email` are all `EMPTY`, no street, no short code. Write it down: step 86 checks it is still so at the end.
+75. **Mafer, demo store (Salla dashboard):** open the demo test customer and put **your own** mobile and **your own** email on it (nobody else's: step 94 sends a real WhatsApp to that number). Write down only *how* the dashboard shows the mobile (with `+966`? leading `0`? a separate country-code box?), not the number.
+76. Backend: turn **Log Full Webhook Payloads** ON.
+76b. **Staging is a copy of PROD: is your phone/email already on a contact?** Before step 77, in the shell (prints ids and masked facts only; type the values in your own shell, never in the ticket):
+    ```python
+    B = env["salla.backend"].browse(BID)
+    MY_PHONE, MY_MAIL = "<your mobile in +9665... form>", "<your email, lower case>"
+    by_phone = env["sale.order"]._salla_match_ids(B, phone=MY_PHONE)
+    by_mail = env["sale.order"]._salla_match_ids(B, email=MY_MAIL)
+    internal = env["sale.order"]._salla_internal_partners(
+        env["res.partner"].with_context(active_test=False).browse(by_phone + by_mail)).ids
+    print(by_phone, by_mail, internal); P(by_phone + by_mail)
+    ```
+    Ids listed in `internal` (your user's partner, a company partner) are never picked: ignore them. If **any other** id is listed, step 81 will **reuse** that existing contact (filling only its empty fields) instead of creating a new one, and steps 81-85 will not show what they describe. Either use a second email/mobile of yours that matches nothing (re-run until both lists hold only `internal` ids), or write down those ids and read step 81 as "reuse of that contact, only empty fields filled".
+77. **One dashboard order WITH shipping and a national address.** In the Salla dashboard, create an order for that customer: **3 x P1**, delivery = a **paid shipping** option (not pickup), a full KSA national address including a valid **short address / short code** (format `ABCD1234`: 4 letters + 4 digits; use a made-up one, e.g. `RRRD2929`, not a real home), building number, additional number, street, district, postal code, city. Write down the Salla order id (`ORD_SHIP`) and total.
+78. **Validate the field names in the log (the "validate against real payload" step for F2b).** In the build log find the masked dump of `ORD_SHIP` (webhook body and/or the `GET /orders/{id}` detail). Write in the ticket, by **key path only** (values are `***`):
+    - where the address object lives: `shipping.address`? `ship_to`? `receiver`? `shipping.receiver`? something else? Its exact key list.
+    - the short-code key (`short_address`? `national_address.short_code`?), and the building / additional number / postal code / district / street keys.
+    - `customer.mobile` and `customer.mobile_code`: present? Does the masked value show `***` for both (the format is still unknown from the log, see step 79).
+    - `receiver.{name, phone, email}`, if present.
+    Compare every path with `mapping.py` (`buyer()`, the shipping-address helper and their "validate against real payload" comments) and write each mismatch to the dev. **Masking check:** in that same dump every one of `short_address`, `building_number`, `additional_number`, `postal_code`, `street_number`, `street`, `district`, `block`, `address_line`, `city`, `geo_coordinates` (and anything inside it: `lat`, `lng`, `latitude`, `longitude`), `phone`, `mobile`, `mobile_code`, `email`, `name` shows `***`. Any value in clear -> stop, report it to the lead (PII leak), do not paste it.
+79. **Phone format, without logging it.** In the shell, read the order detail once and print only the **shape** of the phone (digits replaced by `9`):
+    ```python
+    d = (B._request("GET", "/orders/%s" % "<ORD_SHIP>") or {}).get("data") or {}
+    c = d.get("customer") or {}
+    shape = lambda v: re.sub(r"\d", "9", str(v)) if v not in (None, "") else v
+    print(shape(c.get("mobile_code")), shape(c.get("mobile")))
+    ```
+    (`B = env["salla.backend"].browse(BID)`.) Write the two shapes in the ticket, e.g. `+999 999999999` or `None 0599999999`. That is the real Salla format: tell the dev if `test_e164_*` does not cover it.
+80. Backend: turn **Log Full Webhook Payloads** OFF again. Look at the log for 1 min after one more webhook: no new dump.
+
+### O.2 First order and reuse
+
+81. **First order creates a full contact.** After the queue cron imported `ORD_SHIP`: `order_partners(ORD_SHIP)` and `P([<partner>])`. Expected: a partner with the Salla name, `salla` = the Salla customer id, country **SA** (even though the payload `customer.country_code` may say something else: a real test payload said `MX`), the **same** E.164 number on **both** `phone` and `mobile` (`phone_e164` and `mobile_e164` True: template 7 reads `partner_id.phone`, the other sale.order templates `partner_id.mobile`), email set (trimmed, lower case), `short_code_ok` True. A **new** contact carries the order's address **on itself** (street, street2 = district/block, city, zip, short code): `shipping` == `partner` in `order_partners()`, no delivery child (`env["res.partner"].search([("parent_id","=",<partner>)])` is empty). `by_ref(<customer id>)` has **exactly one** id. `amount_total` == `salla_total` == Salla's total; fiscal position as on any KSA website order (compare with a recent website order: same name, or both empty).
+82. **Second order reuses it (by Salla customer id).** Same customer, dashboard order **3 x P2** with shipping. Same partner id on the new order, `by_ref()` still one id, no delivery child created (same street + city as the contact's own address, compared ignoring case/spaces), totals equal. Then a third order **3 x P1** shipped to a **different** address: a **delivery** child (`type` delivery, `parent` = the customer, country SA) is created and set as `partner_shipping_id`; the customer's own address is unchanged. A fourth order **3 x P2** to that same different address **reuses** that child (no second child).
+83. **Reuse by phone and by email (no Salla id match).** On staging only, clear the `salla_customer_id` of the partner from step 81 (`env["res.partner"].browse(<id>).salla_customer_id = False; env.cr.commit()`), then place a **new** order **3 x P1** for the same customer. Expected: the **same** partner is found (by phone), its `salla_customer_id` is written back (it was empty), no new partner. Then clear its `salla_customer_id` **and** its phone/mobile, place another **3 x P2** order: found by **email** (try it with the email typed in a different case / with a trailing space on the Odoo contact, e.g. `Fake.Name@Example.Invalid `: still found). Each time: `by_ref()` == one id, totals equal. Since phone **and** mobile were both empty, the email-matched import writes the number back on **both** (allowed: only empty fields are filled).
+84. **Phone spelt differently is the same customer.** On the Odoo partner of step 81, **before each format**: clear `salla_customer_id` (the previous import wrote it back, and a match by Salla id proves nothing here), clear `mobile` (otherwise the E.164 value left there matches and the format in `phone` is never exercised), and type the format into `phone`. Then a new demo order **3 x P1** (or `B._enqueue_order("<new order id>", "manual")` + Process Order Queue). Do one extra round the other way round: format in `mobile`, `phone` empty. Expected every time: the **same** partner is reused, no new partner, and **no** ambiguity note. Formats: `0 50 123 4567`-style (leading 0, spaces), `00966...`, `+966 5...` with spaces, `5...` (9 digits, no prefix). The Ops-typed spelling is **not** rewritten to E.164 (a found contact with a phone keeps it as typed; check `P()` shows the same masked value as before). Put the original E.164 value back at the end.
+85. **A contact typed by hand by Ops keeps its data.** Create a contact by hand (fake data: name `Ops Test Contact`, your own phone as on the Salla customer, street `Ops Street 1`, city `Ops City`, zip `11111`, email `ops.test@example.invalid` **different** from the Salla one, short code `OPST1111`, a note in Internal Notes, country SA). Make sure no partner carries the Salla customer id (clear it on the step-81 partner and archive that partner, or use a second demo customer with your phone). Import a new order **3 x P1** with shipping to a **different** address and short code. Expected: the hand-made contact is reused (by phone); its name, email, phone, street, city, zip, short code and notes are **unchanged**; `salla_customer_id` was empty so it is now filled; `mobile` stays **empty** (the number is only written when phone **and** mobile are both empty, so a contact never carries two different numbers). The order's `partner_shipping_id` is a new **delivery** child with the Salla address and the new short code; the parent's typed address is **not** replaced. Chatter of the order: no error. If you took the clear-and-archive route, the archived step-81 partner still holds your phone/mobile, so **two** contacts match: the **active** Ops contact wins, and the chatter has the note *Salla: 2 contacts match this customer's mobile number; the order uses Ops Test Contact (id ...)*. That note is expected here, not a failure.
+86. **Guest customer never matched, never written.** Place an order whose customer has **no** Salla id (if the dashboard can't, skip; the standalone tests cover it) and, separately, create a fake partner with your phone (step 85) while `GUEST` still has none. Expected: `P(GUEST.ids)` still has `phone`, `mobile`, `email` `EMPTY` (same as step 74), no address, no short code; a guest order **with** a shipping address ships to a **delivery child of the guest** (the guest itself stays empty); no order of a real customer ever lands on `GUEST` because of a phone/email match.
+86b. **An employee's own contact is never the customer.** With your own phone/email on the demo customer (step 75), check after step 81 that `order_partners(ORD_SHIP)["partner"]` is **not** your user's partner (`env.user.partner_id.id`, and the partner of any other internal user with that phone) and that your user's partner got **no** `salla_customer_id`, address or short code. Expected: a **new** customer contact was created instead (internal users' partners, archived users included, a `res.company` partner, and any contact whose commercial partner is a `res.company` partner, are never candidates). The same holds if `ORD_SHIP`'s email equals your user's email. If it did: stop, report to the dev (dedup matched an internal user), and clear those fields by hand on staging.
+87. **Archived and other-company partners.** (a) Archive the step-81 partner (Salla id intact), import **3 x P1**: same archived partner reused, nothing new (as step 53). Unarchive. (b) Clear its Salla id and set its **company** to Mexico (staging only), import **3 x P2**: it is **not** matched (a new KSA/no-company partner is created instead, or another KSA match); a partner with **no** company would be. Put the company back.
+88. **Ambiguous phone/email match is deterministic + noted.** Two partners (fake names `Dup A`, `Dup B`), same phone (yours), **no** Salla id on either, both KSA. Import **3 x P1** for that customer. Expected: the partner picked is the one the dev's documented rule names (CLAUDE.md F2b section, e.g. lowest id), the order chatter has an internal note *Salla: 2 contacts match this customer's mobile number; the order uses <name> (id <id>). If they are the same person, merge them.* (no phone in the note). The dev's rule (`mapping.pick_partner`): contacts already linked to **another** Salla id and delivery/invoice/other addresses are never picked; then active first, top-level (no parent) first, **lowest id**. So here: the lower id of `Dup A` / `Dup B`. Import a second order **3 x P2**: the **same** one is picked again (now by Salla id). Archive the two fakes afterwards.
+
+### O.3 National address and the short code
+
+89. **Invalid short code: order imported + note.** Dashboard order **3 x P1** with shipping and a short address that breaks `^[A-Z]{4}\d{4}$` (e.g. `RRR29299`, or 3 letters / 5 digits; whatever the dashboard accepts). Expected: the order **exists** (no queue `error` row, no `ValidationError` in the log), confirmed per its status, the short code is **not** written on any partner (`short_code_set` stays as before), and the order chatter has an internal note *Salla: the National Address short code "<code>" is not valid (4 letters + 4 digits, e.g. RRRD2929), so it was not saved...* that also reaches the notify users (it is an alert). It quotes only the short code (cut to at most 32 characters), never the rest of the address. Totals equal. If the dashboard only accepts valid codes, forge it in the shell instead (creates nothing: everything is rolled back):
+    ```python
+    from odoo.addons.salla_connector.models import mapping
+    b = env["salla.backend"].search([("store_id", "=", "461067869")], limit=1)
+    buyer = mapping.buyer({"customer": {"id": "FAKE-F2B-89", "first_name": "Fake", "last_name": "Buyer",
+                                        "mobile": "500000001", "mobile_code": "+966"},
+                           "ship_to": {"street_number": "Fake St", "city": "Riyadh", "short_address": "rrr 2929x"}})
+    print(buyer["address"]["short_code_state"])                       # invalid
+    p, ship, notes = env["sale.order"]._salla_partner(b, buyer)
+    print(p.id, p.salla_customer_id, p.x_national_short_code, p.phone == p.mobile == "+966500000001", ship, notes)
+    env.cr.rollback()
+    ```
+    Expected: `x_national_short_code` False, `True` for phone == mobile, `ship` empty (`res.partner()`), `notes` holds exactly one `("alert", ...short code...)`, and **no** `ValidationError`.
+90. **Lower case / spaces short code is normalized, not rejected.** If the dashboard lets you type `rrrd 2929` (lower case, a space): the partner ends with `RRRD2929` (`short_code_ok` True), no "invalid" note.
+91. **Existing short code typed by Ops is kept.** On the step-85 contact (short code `OPST1111`), import an order with a different valid short code: the contact still says `OPST1111` (only empty fields are filled; on a delivery child the child gets the new one, the parent keeps `OPST1111`).
+91b. **Pickup first, shipping later: the address goes on the contact.** A **new** demo customer (second email/mobile of yours, or fake values with no WhatsApp expectation): first order **3 x P1** as **pickup**. The contact gets the city only (from `customer.city`), no street, no short code, no delivery child. Then a **shipped** order **3 x P2** for the same customer, in the **same city**, with a valid short code. Expected: street, zip and short code are written **on the contact itself** (a city alone does not count as "has an address"), and **no** delivery child is created. If a delivery child appears instead, report it to the dev (`mapping.address_fillable`: a contact with only the same city, or nothing, takes the address). Counter-check: a shipped order to a **different** city on a city-only contact does create a delivery child and leaves the contact's city alone.
+91c. **An archived delivery child is not reused.** On the step-82 customer, archive its delivery child, then a new order **3 x P1** to that **same** different address. Expected: a **new**, active delivery child is created and used as `partner_shipping_id`; the archived child stays archived and unchanged. Report it to the dev if the archived child is reused or unarchived.
+92. **Address does not change the money.** For steps 81, 82, 85 and 89: `amount_total` == Salla total to the halala, fiscal position the same as an F2a order of section K, taxes 15 % on every line, and no `salla_total_mismatch`. A delivery child with country SA must not switch the fiscal position.
+
+### O.4 WhatsApp on confirmation (Mafer, UI)
+
+93. **Before any import of this section** (repeat of step 58): Settings > Technical > Automation Rules, the automation that uses WhatsApp template 7 «Sale Order» (automation 4): model, trigger, **domain**, and which phone it uses (`partner_id.phone` for template 7; other sale.order templates use `partner_id.mobile`). Website 2: Settings > Website > *WhatsApp Template* set or empty. Write it down.
+94. **Confirm an order whose customer has a phone: no failure.** Order of step 81 (or 82), paid status: state **sale**, **no** "automatic confirmation failed" note. Chatter / WhatsApp: the confirmation message went to **your** phone (check your WhatsApp) in state sent/delivered, or, if the template/automation is off on this DB, nothing was sent and **no** error. A `whatsapp.message` in error state `phone_invalid` on an order whose partner has a phone is a **bug** (the phone was written in a format WhatsApp rejects): report to the dev with the masked shape from step 79.
+95. **Unusable phone is not written.** On staging only, change the demo customer's mobile in Salla to something unusable (e.g. `12345`, or a landline-like `011...` if the dashboard accepts it), and import **3 x P1** for a **new** demo customer with that number (or clear phone/mobile on the step-81 partner first). Expected: the partner's `phone`/`mobile` stay **EMPTY**, the order chatter has an internal note *Salla: the customer's phone number is not a valid Saudi mobile, so it was not saved on the contact...* (a plain note, not an alert), the order **confirms** (state sale), no "confirmation failed" note. Put your mobile back in Salla.
+96. **Logs clean.** Build log search for your phone (last 4 digits), your email and the short code: they appear **nowhere** except, while log_payloads was on, as `***`. No ambiguous-match / invalid-phone / invalid-short-code log line contains the value itself.
+97. Clean-up: remove your own phone and email from the demo test customer in Salla if you don't want future test orders to WhatsApp you; archive `Ops Test Contact`, `Dup A`, `Dup B`; **Log Full Webhook Payloads** off.

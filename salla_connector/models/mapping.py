@@ -32,10 +32,14 @@ _SENSITIVE_KEY_PARTS = ("token", "secret", "password", "authorization", "api_key
 # a product's "name" — acceptable, the log is for checking field NAMES, not values.
 _PII_KEY_PARTS = ("first_name", "last_name", "full_name", "email", "mobile", "phone",
                   "address", "street", "postal", "zip", "latitude", "longitude",
-                  "national", "district", "block", "building")
+                  "national", "district", "block", "building",
+                  # F2b: Saudi national address parts of Salla's ship_to (docs, unverified)
+                  "additional_number", "geo", "coordinate", "short_code")
 # ip / user agent identify the customer's device (source_details on real orders). Exact
 # keys only: "ip" as a substring would mask "shipping", "description", "zip"...
-_PII_KEYS = {"name", "city", "location", "ip", "user-agent", "user_agent", "useragent"}
+# lat/lng/lon too: as substrings they would hit "translation", "template", "long_desc".
+_PII_KEYS = {"name", "city", "location", "ip", "user-agent", "user_agent", "useragent",
+             "lat", "lng", "lon"}
 # Free text the customer types (order notes, gift messages) routinely carries a phone
 # number or an address: masked as a substring so customer_note / notes are caught too.
 _FREE_TEXT_KEY_PARTS = ("note", "comment", "message", "gift")
@@ -996,3 +1000,250 @@ def stock_rows(lines):
         rows.append({"name": name, "ordered": ordered, "available": available or 0.0,
                      "short": short})
     return rows, any_short
+
+
+# ================================================================== F2b: real customer
+# customer.{id, full_name, first_name, last_name, mobile, mobile_code, email, city,
+# country, country_code} are VALIDATED names (real order detail, 2026-10-18), but the
+# values were masked in that log: the FORMAT of mobile / mobile_code is NOT known, hence
+# every shape below. The shipping address object was never seen (all test orders were
+# pickup): its readers are docs-based guesses. VALIDATE BOTH AGAINST A REAL PAYLOAD.
+
+# Arabic-Indic and Extended Arabic-Indic digits: an Arabic keyboard types these, and
+# Python's \d / int() would accept them while Odoo's and WhatsApp's validators may not.
+_DIGITS_TO_ASCII = {**{0x0660 + i: str(i) for i in range(10)},
+                    **{0x06F0 + i: str(i) for i in range(10)}}
+# Separators people type inside a phone number. Anything else (letters, "ext") = unusable.
+_PHONE_SEPARATORS_RE = re.compile(r"[\s\-./()‎‏‪-‮]")
+KSA_DIAL_CODE = "966"
+# KSA mobile in E.164: +966 5X XXX XXXX. Only mobiles are written on a partner: the
+# order confirmation sends WhatsApp to that number, and a landline or a foreign number
+# Salla let through is exactly what errored inside action_confirm on Trendyol (§11).
+_KSA_MOBILE_RE = re.compile(r"9665[0-9]{8}", re.ASCII)
+_SHORT_CODE_RE = re.compile(r"[A-Z]{4}[0-9]{4}", re.ASCII)
+_EMAIL_RE = re.compile(r"[^@\s<>,;]+@[^@\s<>,;]+\.[^@\s<>,;.]+")
+
+
+def ascii_digits(value):
+    """text(value) with Arabic-Indic digits turned into 0-9."""
+    return text(value).translate(_DIGITS_TO_ASCII)
+
+
+def e164_ksa(number, code=""):
+    """A Saudi mobile as E.164 ("+9665XXXXXXXX"), or "" when it is not one.
+
+    `number`/`code` = customer.mobile / customer.mobile_code as Salla sends them (format
+    unverified: "+966" or "966" or "00966" code, number with or without it). Accepts
+    "0501234567", "501234567", "+966 50 123 4567", "00966501234567", "966501234567",
+    "+966 0 50...", Arabic-Indic digits. A foreign or landline number, letters, or a
+    wrong length -> "" (never written: see _KSA_MOBILE_RE)."""
+    raw = _PHONE_SEPARATORS_RE.sub("", ascii_digits(number))
+    cc = _PHONE_SEPARATORS_RE.sub("", ascii_digits(code)).lstrip("+")
+    if cc.startswith("00"):
+        cc = cc[2:]
+    if not raw:
+        return ""
+    # The code only matters for a number without its own +/00 prefix: an ISO code
+    # ("SA") in mobile_code must not drop a number that is already international.
+    if not cc.isdigit():
+        cc = ""
+    if raw.startswith("+"):
+        intl = raw[1:]
+    elif raw.startswith("00"):
+        intl = raw[2:]
+    elif cc:
+        # The number may already carry the code ("966501234567" + "+966").
+        if raw.startswith(cc) and len(raw) > len(cc) + 8:
+            intl = raw
+        else:
+            intl = cc + (raw[1:] if raw.startswith("0") else raw)
+    elif raw.startswith(KSA_DIAL_CODE) and len(raw) == 12:
+        intl = raw
+    elif raw.startswith("0") and len(raw) == 10:
+        intl = KSA_DIAL_CODE + raw[1:]
+    elif len(raw) == 9:
+        intl = KSA_DIAL_CODE + raw
+    else:
+        return ""
+    if not intl.isdigit():
+        return ""
+    # "+966 0 50..." : the national trunk 0 typed after the country code.
+    if intl.startswith(KSA_DIAL_CODE + "0"):
+        intl = KSA_DIAL_CODE + intl[4:]
+    return "+" + intl if _KSA_MOBILE_RE.fullmatch(intl) else ""
+
+
+def clean_email(value):
+    """Trimmed, lowercased email, or "" when it does not look like one address."""
+    email = text(value).lower()
+    return email if _EMAIL_RE.fullmatch(email) else ""
+
+
+def national_short_code(value):
+    """(code, state) for a Saudi National Address short code ("RRRD2929").
+
+    Uppercased, every space/dash removed, Arabic-Indic digits converted, then it must be
+    exactly 4 ASCII letters + 4 ASCII digits (wayakit_customization's constraint on
+    x_national_short_code raises ValidationError otherwise, which would kill the order).
+    state: "ok" | "missing" (nothing sent) | "invalid" (sent, unusable: code is "")."""
+    raw = text(value)
+    if not raw:
+        return "", "missing"
+    code = re.sub(r"[\s\-]", "", ascii_digits(raw)).upper()
+    if len(code) == 8 and _SHORT_CODE_RE.fullmatch(code):
+        return code, "ok"
+    return "", "invalid"
+
+
+def _label(value):
+    """A place name that may come as a string or as {"name": ...} (city, district)."""
+    if isinstance(value, dict):
+        value = value.get("name")
+    return " ".join(text(value).split())
+
+
+def _join(*parts, sep=" "):
+    return sep.join(p for p in (" ".join(text(x).split()) for x in parts) if p)
+
+
+def shipping_address(order):
+    """The delivery address of an order, {} when there is none (pickup).
+
+    {"name", "street", "street2", "city", "zip", "short_code", "short_code_state",
+     "short_code_raw"}. NEVER SEEN IN A REAL PAYLOAD: paths and keys are from the docs
+    (ship_to: country, city, district, street_number, block, address_line, postal_code,
+    short_address, building_number, additional_number, geo_coordinates). First container
+    that is a dict wins. The country is ignored on purpose (always SA, see buyer()).
+    short_code_raw is PII: for the order's chatter only, never a log line."""
+    if not isinstance(order, dict):
+        return {}
+    addr = None
+    for path in ("shipping.address", "shipping.ship_to", "ship_to", "shipping_address",
+                 "shipping.receiver.address", "receiver.address", "receiver"):
+        found = _dig(order, path)
+        if isinstance(found, dict) and found:
+            addr = found
+            break
+    if addr is None:
+        return {}
+    street = _join(addr.get("address_line")) or _join(
+        addr.get("building_number"), addr.get("street_number"), addr.get("street"))
+    raw_code = _first(addr, "short_address", "short_code", "national_short_code",
+                      "national_address")
+    if isinstance(raw_code, dict):
+        # Shape unknown: an object may hold the code; if not, it is "sent but unusable".
+        raw_code = text(_first(raw_code, "code", "short_address", "short_code", "value")) \
+            or ("?" if raw_code else "")
+    code, state = national_short_code(text(raw_code))
+    out = {
+        "name": _join(addr.get("name")) or _join(addr.get("first_name"), addr.get("last_name")),
+        "street": street,
+        "street2": _join(_label(addr.get("district")), addr.get("block"), sep=", "),
+        "city": _label(addr.get("city")),
+        "zip": ascii_digits(_first(addr, "postal_code", "zip_code", "zip")),
+        "short_code": code,
+        "short_code_state": state,
+        "short_code_raw": raw_code,
+    }
+    if not (out["street"] or out["city"] or out["zip"] or code):
+        return {}
+    return out
+
+
+def buyer(order):
+    """Everything F2b writes on the customer, from an order detail.
+
+    {"ref", "name", "phone" (E.164 KSA mobile or ""), "phone_state" ("ok" | "missing" |
+     "invalid"), "email" ("" if unusable), "city" (customer.city, a fallback when there
+    is no shipping address), "address" (shipping_address(order), {} for pickup)}.
+    The country is NOT read: the partner is always SA (fiscal position, VAT must keep
+    matching Salla), and a real test customer carried country_code "MX".
+    All values are PII: never log them."""
+    customer = order.get("customer") if isinstance(order, dict) else None
+    cust = customer if isinstance(customer, dict) else {}
+    base = order_customer(order)
+    raw_phones = [(cust.get("mobile"), cust.get("mobile_code")), (cust.get("phone"), "")]
+    phone, given = "", False
+    for number, code in raw_phones:
+        if text(number):
+            given = True
+            phone = e164_ksa(number, code)
+            if phone:
+                break
+    return {
+        "ref": base["ref"],
+        "name": base["name"],
+        "phone": phone,
+        "phone_state": "ok" if phone else ("invalid" if given else "missing"),
+        "email": clean_email(cust.get("email")),
+        "city": _label(cust.get("city")),
+        "address": shipping_address(order),
+    }
+
+
+def fill_empty(current, incoming):
+    """The subset of `incoming` to write on an existing record: only keys whose current
+    value is empty/False and whose incoming value is not. Ops data always wins."""
+    return {k: v for k, v in (incoming or {}).items()
+            if v not in (None, "", False) and not (current or {}).get(k)}
+
+
+def _addr_key(value):
+    return " ".join(text(value).casefold().split())
+
+
+def same_address(current, incoming):
+    """True when `current` (a partner's street/city) already is `incoming`'s address:
+    same street and same city, case- and space-insensitive. An empty street is never
+    "the same" (nothing to compare)."""
+    a, b = current or {}, incoming or {}
+    if not _addr_key(a.get("street")) or not _addr_key(b.get("street")):
+        return False
+    return (_addr_key(a.get("street")) == _addr_key(b.get("street"))
+            and _addr_key(a.get("city")) == _addr_key(b.get("city")))
+
+
+def address_fillable(current, incoming):
+    """True when `incoming` (a shipping address) may be written on the contact itself:
+    the contact has no street, street2 or zip, and its city is empty or the same one
+    (a pickup order fills only the city; the first shipped order must still land on
+    the contact, not on a delivery child), or it already is that address."""
+    a = current or {}
+    if same_address(a, incoming):
+        return True
+    if any(_addr_key(a.get(k)) for k in ("street", "street2", "zip")):
+        return False
+    city = _addr_key(a.get("city"))
+    return not city or city == _addr_key((incoming or {}).get("city"))
+
+
+# Partner types that are an ADDRESS of someone, not a customer: never matched as buyer.
+_ADDRESS_TYPES = {"delivery", "invoice", "other", "private"}
+
+
+def pick_partner(candidates, ref=""):
+    """Choose the contact a phone/email match resolves to. -> (id or None, eligible)
+
+    `candidates` = [{"id", "salla_customer_id", "active", "type", "parent_id",
+    "internal"}]. Not eligible: a contact already linked to ANOTHER Salla customer id
+    (it is somebody else who shares the phone/email; the buyer gets their own contact
+    instead), address-type rows (delivery/invoice/other children), and "internal" ones
+    (an employee's user partner or a company's own partner: an employee buying on Salla,
+    or a buyer sharing the office phone, must not turn Wayakit's own contacts into
+    customers and receive their WhatsApp). Among the rest, deterministic:
+    linked to this same ref first, then not yet linked, active first, top-level contact
+    (no parent) first, lowest id. `eligible` > 1 means ambiguous: the caller notes it."""
+    ref = clean_id(ref)
+    pool = []
+    for c in candidates or []:
+        linked = clean_id(c.get("salla_customer_id"))
+        if linked and linked != ref:
+            continue
+        if text(c.get("type")) in _ADDRESS_TYPES or c.get("internal"):
+            continue
+        pool.append(c)
+    if not pool:
+        return None, 0
+    pool.sort(key=lambda c: (not (ref and clean_id(c.get("salla_customer_id")) == ref),
+                             not c.get("active", True), bool(c.get("parent_id")), c["id"]))
+    return pool[0]["id"], len(pool)

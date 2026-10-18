@@ -1523,6 +1523,434 @@ def test_fmt_money():
         assert mapping.fmt_money(bad) == "?", bad
 
 
+# --- F2b: real customer and national address -------------------------------------
+# Fake numbers only: +966 50 123 4567 is a placeholder, every name/email is fake and
+# the email domain is the reserved ".invalid" TLD.
+
+E164 = "+966501234567"
+
+
+def test_e164_ksa_formats_same_customer():
+    """The ticket case: the same phone written with/without spaces, with +966 / 0 /
+    00966 / nothing, must collapse to ONE E.164 value (= one customer)."""
+    for number in ("0501234567", "501234567", "+966 50 123 4567", "00966501234567",
+                   "966501234567", "+966501234567", "+966 0 50 123 4567",
+                   "(050) 123-4567", "050-123-4567", "050.123.4567",
+                   " 0501234567\n", "966 50 123 4567"):
+        assert mapping.e164_ksa(number) == E164, number
+
+
+def test_e164_ksa_mobile_code_split():
+    """mobile_code + mobile as Salla may send them (format unverified: both shapes)."""
+    for number, code in (("501234567", "+966"), ("501234567", "966"),
+                         ("501234567", "00966"), ("501234567", " +966 "),
+                         ("0501234567", "+966"),          # trunk 0 kept by the store
+                         ("966501234567", "+966"),        # number already has the code
+                         ("+966501234567", "966"), ("00966501234567", "+966"),
+                         ("966 50 123 4567", "+966"), ("050-123-4567", "00966"),
+                         ("501234567", 966),              # code as a number
+                         ("501234567", ""), ("501234567", None)):
+        assert mapping.e164_ksa(number, code) == E164, (number, code)
+
+
+def test_e164_ksa_unicode_digits_and_marks():
+    arabic_indic = "٠٥٠١٢٣٤٥٦٧"  # ٠٥٠١٢٣٤٥٦٧
+    assert mapping.e164_ksa(arabic_indic) == E164
+    extended = "".join(chr(0x06F0 + int(d)) for d in "0501234567")          # ۰۵۰...
+    assert mapping.e164_ksa(extended) == E164
+    # Direction marks pasted from an RTL screen are separators, not garbage.
+    assert mapping.e164_ksa("‎+966501234567‏") == E164
+    # Fullwidth / superscript digits pass str.isdigit() but are NOT 0-9: rejected,
+    # never written (WhatsApp / Odoo phone validation would choke on them).
+    fullwidth = "".join(chr(0xFF10 + int(d)) for d in "501234567")
+    assert mapping.e164_ksa(fullwidth) == ""
+    assert mapping.e164_ksa("50123456²") == ""
+    # The result is always plain ASCII.
+    assert mapping.e164_ksa(arabic_indic).isascii()
+
+
+def test_e164_ksa_unusable_is_empty():
+    """Anything that is not a KSA mobile -> "" (never written; confirmation WhatsApp
+    would error inside action_confirm, Trendyol §11)."""
+    for number, code in (("0112345678", ""),          # Riyadh landline
+                         ("+966112345678", ""), ("966112345678", ""),
+                         ("5512345678", "+52"), ("+525512345678", ""),   # Mexico
+                         ("501234567", "+52"),         # KSA-looking number, foreign code
+                         ("50123456", ""), ("05012345678", ""),          # 8 / 11 digits
+                         ("5012345678", ""), ("+9665012345678", ""),     # one digit too many
+                         ("0096650123456", ""), ("9665012345", "966"),
+                         ("05O1234567", ""), ("abc", ""),               # letter O
+                         ("+966 50 123 4567 ext 1", ""),
+                         ("+", ""), ("00", ""), ("0", ""), ("   ", ""), ("", ""),
+                         (None, None), (501234567.0, ""), (True, ""), ({}, ""),
+                         ([], "+966")):
+        assert mapping.e164_ksa(number, code) == "", (number, code)
+    # int 501234567 is a plausible JSON number: accepted like the string.
+    assert mapping.e164_ksa(501234567) == E164
+
+
+def test_clean_email():
+    assert mapping.clean_email("  Fake.Buyer@Example.Invalid ") == "fake.buyer@example.invalid"
+    assert mapping.clean_email("FAKE@EXAMPLE.INVALID") == mapping.clean_email("fake@example.invalid")
+    assert mapping.clean_email("a@b.c") == "a@b.c"
+    for bad in ("a b@x.invalid", "x@y", "@b.invalid", "a@@b.invalid", "a@b.invalid.",
+                "x@y.invalid,z@w.invalid", "<a@b.invalid>", "x@y.invalid; z@w.invalid",
+                "", "   ", None, True, 42, {}, []):
+        assert mapping.clean_email(bad) == "", bad
+
+
+def test_national_short_code_ok_and_normalized():
+    for raw in ("RRRD2929", "rrrd2929", "RRRD 2929", " rr-rd 2929 ", "RRRD\t2929\n",
+                "rRrD-29 29"):
+        assert mapping.national_short_code(raw) == ("RRRD2929", "ok"), raw
+    assert mapping.national_short_code("ABCD١٢٣٤") == ("ABCD1234", "ok")
+    code, state = mapping.national_short_code("abcd 1234")
+    assert state == "ok" and code.isascii() and len(code) == 8
+
+
+def test_national_short_code_invalid_never_written():
+    """Every value that would make wayakit_customization's x_national_short_code
+    constraint raise ValidationError (and kill the order) -> ("", "invalid")."""
+    for raw in ("RRR29299", "ABCD12345", "ABC1234", "ABCDE123", "1234ABCD", "RRRD292",
+                "ÄBCD1234",                                 # non-ASCII letter
+                "ابجد2929",                  # Arabic letters
+                "RRRD" + "".join(chr(0xFF10 + int(d)) for d in "2929"),  # fullwidth digits
+                "RRRD_2929", "RRRD.2929", "RRRD/2929", "RRRD2929X", 12345678, 2929.0):
+        assert mapping.national_short_code(raw) == ("", "invalid"), raw
+    for empty in ("", "   ", None, False, {}, []):
+        assert mapping.national_short_code(empty) == ("", "missing"), empty
+    # Whatever comes out "ok" satisfies the Odoo constraint ^[A-Za-z]{4}\d{4}$ with
+    # ASCII only, and is already upper case (no onchange needed).
+    import re
+    for raw in ("rrrd2929", "ABCD١٢٣٤", " ab-cd 12 34 "):
+        code, state = mapping.national_short_code(raw)
+        assert state == "ok" and re.fullmatch(r"[A-Z]{4}[0-9]{4}", code, re.ASCII), raw
+
+
+# A shipping order as the Salla docs describe it (never seen for real: fake values).
+def _ship_order(container="shipping.address", **over):
+    addr = {"name": "Fake Receiver", "building_number": "1234", "street_number": "Fake St",
+            "district": "Fake District", "block": "B7", "city": {"name": "FakeCity"},
+            "postal_code": "12345", "short_address": "abcd 1234",
+            "additional_number": "6789", "country": "SA",
+            "geo_coordinates": {"lat": "1.0", "lng": "2.0"}}
+    addr.update(over)
+    order = {"id": 900001, "customer": {"id": 7700001}}
+    node = order
+    keys = container.split(".")
+    for k in keys[:-1]:
+        node = node.setdefault(k, {})
+    node[keys[-1]] = addr
+    return order
+
+
+def test_shipping_address_docs_shape():
+    a = mapping.shipping_address(_ship_order())
+    assert a == {"name": "Fake Receiver", "street": "1234 Fake St",
+                 "street2": "Fake District, B7", "city": "FakeCity", "zip": "12345",
+                 "short_code": "ABCD1234", "short_code_state": "ok",
+                 "short_code_raw": "abcd 1234"}, a
+    # No country key: the partner is always SA, the payload country is ignored.
+    assert "country" not in a and "country_code" not in a
+
+
+def test_shipping_address_every_container():
+    for path in ("shipping.address", "shipping.ship_to", "ship_to", "shipping_address",
+                 "shipping.receiver.address", "receiver.address", "receiver"):
+        a = mapping.shipping_address(_ship_order(path))
+        assert a["street"] == "1234 Fake St" and a["short_code"] == "ABCD1234", path
+    # First DICT wins: a string where the first path points is skipped, not used.
+    o = {"shipping": {"address": "a plain string"},
+         "ship_to": {"city": "FakeCity", "postal_code": "12345"}}
+    assert mapping.shipping_address(o)["city"] == "FakeCity"
+
+
+def test_shipping_address_fields_variants():
+    a = mapping.shipping_address(_ship_order(address_line="  Fake   Line 1 ",
+                                             city="FakeCity", district={"name": "D1"},
+                                             block="", postal_code=12345,
+                                             short_address="RRR29299"))
+    assert a["street"] == "Fake Line 1"          # address_line wins, spaces collapsed
+    assert a["street2"] == "D1"                  # empty block: no dangling ", "
+    assert a["city"] == "FakeCity" and a["zip"] == "12345"   # numeric postal code
+    assert a["short_code"] == "" and a["short_code_state"] == "invalid"
+    assert a["short_code_raw"] == "RRR29299"     # kept for the chatter note only
+    # Arabic-Indic postal code -> ASCII digits.
+    a = mapping.shipping_address(_ship_order(postal_code="١٢٣٤٥"))
+    assert a["zip"] == "12345"
+    # zip_code / zip fallbacks; short_code / national_short_code fallbacks.
+    o = {"ship_to": {"city": "C", "zip_code": "11111", "national_short_code": "wxyz9999"}}
+    a = mapping.shipping_address(o)
+    assert a["zip"] == "11111" and a["short_code"] == "WXYZ9999"
+    o = {"ship_to": {"city": "C", "short_address": "", "short_code": "wxyz9999"}}
+    assert mapping.shipping_address(o)["short_code"] == "WXYZ9999"
+    # Missing short code with a real address: "missing", not "invalid" (no note).
+    a = mapping.shipping_address({"ship_to": {"street": "Fake St", "city": "C"}})
+    assert a["short_code"] == "" and a["short_code_state"] == "missing"
+    assert a["street"] == "Fake St"
+    # Only a short code: still an address (the code alone is worth saving).
+    a = mapping.shipping_address({"ship_to": {"national_address": "abcd1234"}})
+    assert a["short_code"] == "ABCD1234" and a["street"] == ""
+
+
+def test_shipping_address_pickup_is_empty():
+    """F2a orders were all pickup (receiver null): no address, nothing written."""
+    for order in ({}, {"delivery_method": "pickup", "receiver": None},
+                  {"shipping": None, "ship_to": None}, {"shipping": {"address": {}}},
+                  {"receiver": {"name": "Fake Receiver", "phone": "0501234567",
+                                "email": "r@example.invalid"}},     # contact, no address
+                  {"ship_to": {"geo_coordinates": {"lat": "1", "lng": "2"},
+                               "country": "SA"}},
+                  None, [], "x", 42):
+        assert mapping.shipping_address(order) == {}, order
+
+
+def _buyer_order(**cust):
+    c = {"id": 7700001, "first_name": "Fake", "last_name": "Buyer", "mobile": "501234567",
+         "mobile_code": "+966", "email": " Fake@Example.Invalid", "city": "FakeCity",
+         "country": "Mexico", "country_code": "MX"}
+    c.update(cust)
+    return {"id": 900001, "customer": c}
+
+
+def test_buyer_full():
+    order = _buyer_order()
+    order["shipping"] = _ship_order()["shipping"]
+    b = mapping.buyer(order)
+    assert b == {"ref": "7700001", "name": "Fake Buyer", "phone": E164, "phone_state": "ok",
+                 "email": "fake@example.invalid", "city": "FakeCity",
+                 "address": mapping.shipping_address(order)}, b
+    assert b["address"]["short_code"] == "ABCD1234"
+    # The payload country (a real test customer said "MX") is NOT carried at all:
+    # the partner is always SA.
+    assert not any("country" in k for k in b)
+    assert "MX" not in repr(b) and "Mexico" not in repr(b)
+
+
+def test_buyer_same_customer_any_phone_format():
+    phones = {mapping.buyer(_buyer_order(mobile=n, mobile_code=c))["phone"]
+              for n, c in (("501234567", "+966"), ("0501234567", ""),
+                           ("+966 50 123 4567", None), ("00966501234567", "+966"),
+                           ("966501234567", "966"))}
+    assert phones == {E164}, phones
+
+
+def test_buyer_phone_states():
+    b = mapping.buyer(_buyer_order(mobile="0112345678", mobile_code=""))
+    assert b["phone"] == "" and b["phone_state"] == "invalid"     # landline: not written
+    b = mapping.buyer(_buyer_order(mobile="", mobile_code="+966"))
+    assert b["phone"] == "" and b["phone_state"] == "missing"     # code alone is nothing
+    b = mapping.buyer(_buyer_order(mobile=None, mobile_code=None))
+    assert b["phone_state"] == "missing"
+    # mobile unusable, customer.phone usable -> the usable one, "ok".
+    b = mapping.buyer(_buyer_order(mobile="0112345678", mobile_code="", phone="0501234567"))
+    assert b["phone"] == E164 and b["phone_state"] == "ok"
+    # mobile usable wins over phone.
+    b = mapping.buyer(_buyer_order(phone="0559999999"))
+    assert b["phone"] == E164
+    b = mapping.buyer(_buyer_order(mobile="", phone="garbage"))
+    assert b["phone"] == "" and b["phone_state"] == "invalid"
+
+
+def test_buyer_email_and_name_fallbacks():
+    b = mapping.buyer(_buyer_order(email="not-an-email"))
+    assert b["email"] == ""
+    b = mapping.buyer(_buyer_order(first_name="", last_name="", full_name="  Fake   Full "))
+    assert b["name"] == "Fake Full"
+    b = mapping.buyer(_buyer_order(city={"name": "FakeCity2"}))
+    assert b["city"] == "FakeCity2"
+
+
+def test_buyer_garbage_and_guest():
+    empty = {"ref": "", "name": "", "phone": "", "phone_state": "missing", "email": "",
+             "city": "", "address": {}}
+    for order in ({}, None, [], {"customer": None}, {"customer": "x"}, {"customer": []}):
+        assert mapping.buyer(order) == empty, order
+    # No customer id (guest order) -> ref "": the backend must route it to the shared
+    # guest contact and never match it by phone/email.
+    b = mapping.buyer({"customer": {"id": None, "mobile": "0501234567"}})
+    assert b["ref"] == "" and b["phone"] == E164
+    b = mapping.buyer({"customer": {"id": "None", "mobile": "0501234567"}})
+    assert b["ref"] == ""
+
+
+def test_fill_empty_never_overwrites_ops_data():
+    ops = {"name": "Ops Typed Name", "email": "ops@example.invalid", "phone": "+966551112222",
+           "street": "Ops Street 1", "city": "Ops City", "zip": "11111",
+           "x_national_short_code": "OPST1111", "mobile": False, "salla_customer_id": False}
+    incoming = {"name": "Fake Buyer", "email": "fake@example.invalid", "phone": E164,
+                "street": "1234 Fake St", "city": "FakeCity", "zip": "12345",
+                "x_national_short_code": "ABCD1234", "mobile": E164,
+                "salla_customer_id": "7700001"}
+    assert mapping.fill_empty(ops, incoming) == {"mobile": E164,
+                                                 "salla_customer_id": "7700001"}
+    # Empty incoming values never blank anything, even on an empty field.
+    assert mapping.fill_empty({"phone": False, "email": ""},
+                              {"phone": "", "email": None, "city": False}) == {}
+    assert mapping.fill_empty({"email": "ops@example.invalid", "phone": False},
+                              {"email": "a@b.c", "phone": E164, "city": ""}) == {"phone": E164}
+    # A brand-new contact: everything non-empty goes in.
+    assert mapping.fill_empty({}, {"phone": E164, "city": ""}) == {"phone": E164}
+    assert mapping.fill_empty(None, None) == {}
+    # The salla_customer_id of a contact found by phone/email is written only if empty.
+    assert mapping.fill_empty({"salla_customer_id": "5500001"},
+                              {"salla_customer_id": "7700001"}) == {}
+
+
+def test_same_address():
+    cur = {"street": " Fake  St 1 ", "city": "fakecity"}
+    assert mapping.same_address(cur, {"street": "FAKE ST 1", "city": "FakeCity "})
+    assert not mapping.same_address(cur, {"street": "Fake St 2", "city": "FakeCity"})
+    assert not mapping.same_address(cur, {"street": "Fake St 1", "city": "OtherCity"})
+    # Empty street on either side is never "the same" (nothing to compare).
+    assert not mapping.same_address({"street": "", "city": "C"}, {"street": "", "city": "C"})
+    assert not mapping.same_address({"street": False, "city": "C"}, {"street": "x", "city": "C"})
+    assert not mapping.same_address(None, None)
+    # Both cities empty, same street -> same.
+    assert mapping.same_address({"street": "a", "city": ""}, {"street": "A", "city": None})
+
+
+def test_pick_partner_rules():
+    cands = [{"id": 5, "salla_customer_id": "99"},                 # another Salla buyer
+             {"id": 9, "salla_customer_id": "", "active": False},  # archived
+             {"id": 7, "parent_id": 3},                            # child contact
+             {"id": 8, "type": "delivery"},                        # an address, not a buyer
+             {"id": 12}]
+    assert mapping.pick_partner(cands, "1") == (12, 3)
+    assert mapping.pick_partner([], "1") == (None, 0)
+    assert mapping.pick_partner(None) == (None, 0)
+    # Only linked to someone else / only addresses -> nobody, the buyer gets a new contact.
+    assert mapping.pick_partner([{"id": 5, "salla_customer_id": "99"}], "") == (None, 0)
+    assert mapping.pick_partner([{"id": 4, "type": t} for t in
+                                 ("delivery", "invoice", "other", "private")]) == (None, 0)
+    # Linked to THIS ref first, even with a higher id.
+    assert mapping.pick_partner([{"id": 2}, {"id": 50, "salla_customer_id": "1"}], "1")[0] == 50
+    assert mapping.pick_partner([{"id": 2}, {"id": 50, "salla_customer_id": " 1 "}], 1)[0] == 50
+    # Active beats archived even when the archived one has the lower id.
+    assert mapping.pick_partner([{"id": 3, "active": False}, {"id": 40}])[0] == 40
+    # Top-level contact beats a company's child contact.
+    assert mapping.pick_partner([{"id": 3, "parent_id": 1}, {"id": 40, "parent_id": False}])[0] == 40
+    # Falsy/None/"None" salla ids count as not linked; type "contact" / None are buyers.
+    assert mapping.pick_partner([{"id": 6, "salla_customer_id": False, "type": "contact"},
+                                 {"id": 4, "salla_customer_id": "None", "type": None}]) == (4, 2)
+    # Single eligible = not ambiguous.
+    assert mapping.pick_partner([{"id": 6}, {"id": 4, "type": "delivery"}]) == (6, 1)
+
+
+def test_pick_partner_deterministic_any_order():
+    import itertools
+    cands = [{"id": 31}, {"id": 17, "active": False}, {"id": 22, "parent_id": 9},
+             {"id": 45}, {"id": 12, "type": "invoice"}, {"id": 8, "salla_customer_id": "x"}]
+    results = {mapping.pick_partner(list(p), "7700001")
+               for p in itertools.permutations(cands)}
+    assert results == {(31, 4)}, results
+
+
+def test_redact_shipping_address_pii():
+    addr = {"short_address": "ABCD1234", "short_code": "ABCD1234",
+            "national_short_code": "ABCD1234", "building_number": "1234",
+            "additional_number": "6789", "postal_code": "12345", "street_number": "Fake St",
+            "street": "Fake St", "district": "Fake District", "block": "B7",
+            "address_line": "Fake Line", "city": "FakeCity", "name": "Fake Receiver",
+            "phone": "0501234567", "mobile": "501234567", "mobile_code": "+966",
+            "email": "r@example.invalid",
+            "geo_coordinates": {"lat": "24.1", "lng": "46.1"},
+            "lat": "24.1", "lng": "46.1", "lon": "46.1",
+            "latitude": "24.1", "longitude": "46.1"}
+    for path in ("ship_to", "shipping", "receiver", "shipping.ship_to"):
+        order = {}
+        node = order
+        keys = path.split(".")
+        for k in keys[:-1]:
+            node = node.setdefault(k, {})
+        node[keys[-1]] = dict(addr)
+        out = mapping.redact(order)
+        node = out
+        for k in keys:
+            node = node[k]
+        if node == "***":        # e.g. a whole "shipping_address" container: fine
+            continue
+        leaked = {k: v for k, v in node.items() if v != "***"}
+        assert leaked == {}, (path, sorted(leaked))
+    # Nested under "address": the whole container is masked.
+    assert mapping.redact({"shipping": {"address": dict(addr)}})["shipping"]["address"] == "***"
+    # Not-PII keys that merely contain lat/lng/lon/geo-ish letters stay readable.
+    out = mapping.redact({"translation": "t", "template": "t", "long_description": "d",
+                          "latest": "l", "flat_rate": 5, "longest": 1, "country": "SA",
+                          "shipping_cost": {"amount": 25}})
+    assert out == {"translation": "t", "template": "t", "long_description": "d",
+                   "latest": "l", "flat_rate": 5, "longest": 1, "country": "SA",
+                   "shipping_cost": {"amount": 25}}, out
+    # No address VALUE ever survives anywhere in the dump.
+    dump = json.dumps(mapping.redact(_ship_order("ship_to")))
+    for value in ("ABCD", "1234", "6789", "12345", "Fake St", "Fake District", "24.1",
+                  "FakeCity", "Fake Receiver"):
+        assert value not in dump, value
+
+
+def test_e164_ksa_non_digit_mobile_code_ignored():
+    """If Salla's mobile_code turns out to be an ISO code ("SA"), the number must not
+    be dropped because of it; a foreign DIGIT code still rejects a bare number."""
+    for number, code in (("+966501234567", "SA"), ("501234567", "SA"),
+                         ("0501234567", "KSA"), ("00966501234567", "sa")):
+        assert mapping.e164_ksa(number, code) == E164, (number, code)
+    assert mapping.e164_ksa("0112345678", "SA") == ""          # still a landline
+    assert mapping.e164_ksa("+525512345678", "SA") == ""       # still foreign
+    assert mapping.e164_ksa("501234567", "+52") == ""
+
+
+def test_shipping_address_short_code_object():
+    a = mapping.shipping_address({"ship_to": {"city": "C",
+                                              "short_address": {"code": "abcd1234"}}})
+    assert a["short_code"] == "ABCD1234" and a["short_code_state"] == "ok", a
+    a = mapping.shipping_address({"ship_to": {"city": "C", "short_address": {"foo": 1}}})
+    assert a["short_code"] == "" and a["short_code_state"] == "invalid", a
+    # An unreadable object is never echoed into the chatter as a dict repr.
+    assert "foo" not in a["short_code_raw"]
+    a = mapping.shipping_address({"ship_to": {"city": "C",
+                                              "short_address": {"code": "RRR29299"}}})
+    assert a["short_code"] == "" and a["short_code_state"] == "invalid"
+
+
+def test_pick_partner_never_internal():
+    """An employee's own contact (res.users partner) or a company partner sharing the
+    buyer's phone/email is never the Salla customer: a new contact is created instead."""
+    staff = {"id": 3, "salla_customer_id": "", "active": True, "type": "contact",
+             "internal": True}
+    buyer_c = {"id": 9, "salla_customer_id": "", "active": True, "type": "contact"}
+    assert mapping.pick_partner([staff, buyer_c], "1") == (9, 1)
+    assert mapping.pick_partner([buyer_c, staff], "1") == (9, 1)
+    assert mapping.pick_partner([staff], "1") == (None, 0)
+    # Internal wins over "linked to this same ref" (a bad link from before the fix).
+    assert mapping.pick_partner([dict(staff, salla_customer_id="1")], "1") == (None, 0)
+    # Archived internal user's partner: still excluded.
+    assert mapping.pick_partner([dict(staff, active=False)], "") == (None, 0)
+    # Missing / False / None "internal" = a normal contact.
+    assert mapping.pick_partner([{"id": 4, "internal": False}, {"id": 6, "internal": None},
+                                 {"id": 2}]) == (2, 3)
+
+
+def test_address_fillable():
+    """Address on the contact itself vs a delivery child. A pickup order leaves only
+    the city on the contact: the first shipped order in that city must still land on
+    the contact. Any typed street/street2/zip, or another city, is Ops data: kept, and
+    the order ships to a delivery child instead."""
+    a = {"street": "1 Fake St", "city": "Riyadh"}
+    for cur in ({}, None, {"city": "riyadh "}, {"city": "Riyadh"},
+                {"street": False, "street2": False, "city": False, "zip": False},
+                {"street": "   "},                              # blank = empty
+                {"street": "1 fake st", "city": "RIYADH"}):     # already that address
+        assert mapping.address_fillable(cur, a), cur
+    for cur in ({"city": "Jeddah"}, {"zip": "12345"}, {"street2": "Fake District"},
+                {"street": "2 Other St", "city": "Riyadh"},
+                {"street": "1 Fake St", "city": "Jeddah"},
+                {"zip": "12345", "city": "Riyadh"}):
+        assert not mapping.address_fillable(cur, a), cur
+    # A contact with a city but an incoming address without one: not "the same city".
+    assert not mapping.address_fillable({"city": "Riyadh"}, {"street": "1 Fake St", "city": ""})
+    assert mapping.address_fillable(None, None)
+
+
 if __name__ == "__main__":
     for fn in [test_signature_valid, test_signature_wrong_secret,
                test_signature_tampered_one_byte, test_signature_missing_or_empty_header,
@@ -1582,7 +2010,23 @@ if __name__ == "__main__":
                test_cod_not_charged_with_coupon_and_shipping,
                test_cod_not_charged_net_shipping,
                test_cod_tiny_fee_charged_wins_tie_or_closest,
-               test_no_cod_field_reports_zero, test_fmt_money]:
+               test_no_cod_field_reports_zero, test_fmt_money,
+               # F2b: real customer and national address
+               test_e164_ksa_formats_same_customer, test_e164_ksa_mobile_code_split,
+               test_e164_ksa_unicode_digits_and_marks, test_e164_ksa_unusable_is_empty,
+               test_e164_ksa_non_digit_mobile_code_ignored, test_clean_email,
+               test_national_short_code_ok_and_normalized,
+               test_national_short_code_invalid_never_written,
+               test_shipping_address_docs_shape, test_shipping_address_every_container,
+               test_shipping_address_fields_variants, test_shipping_address_pickup_is_empty,
+               test_shipping_address_short_code_object,
+               test_buyer_full, test_buyer_same_customer_any_phone_format,
+               test_buyer_phone_states, test_buyer_email_and_name_fallbacks,
+               test_buyer_garbage_and_guest, test_fill_empty_never_overwrites_ops_data,
+               test_same_address, test_address_fillable, test_pick_partner_rules,
+               test_pick_partner_deterministic_any_order,
+               test_pick_partner_never_internal,
+               test_redact_shipping_address_pii]:
         fn()
         print(fn.__name__, "OK")
     print("all passed")

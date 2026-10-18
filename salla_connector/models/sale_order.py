@@ -77,33 +77,227 @@ class SaleOrder(models.Model):
             found.setdefault(product.default_code, product)
         return found
 
+    # ------------------------------------------------------------- customer (F2b)
     @api.model
-    def _salla_partner(self, backend, customer):
-        """F2a customer: found or created ONLY by salla_customer_id, name + country SA.
-        Phone/email/address dedup is F2b. Archived contacts are reused rather than
-        duplicated. No customer id -> the shared guest contact (never one per order)."""
-        if not customer.get("ref"):
-            return self.env.ref("salla_connector.partner_salla_guest")
+    def _salla_usable_phone(self, phone):
+        """`phone` (already a KSA mobile per mapping.e164_ksa) if Odoo's own validator,
+        the one WhatsApp calls inside action_confirm, accepts it too; else "". A number
+        that is not written cannot break the confirmation (Trendyol §11)."""
+        if not phone:
+            return ""
+        try:
+            from odoo.addons.phone_validation.tools import phone_validation
+        except ImportError:
+            return phone
+        try:
+            formatted = phone_validation.phone_format(phone, "SA", 966, force_format="E164",
+                                                      raise_exception=True)
+        except Exception:
+            return ""
+        return formatted if formatted == phone else ""
+
+    @api.model
+    def _salla_match_ids(self, backend, phone="", email=""):
+        """Contact ids (archived included, company 1 or none) whose phone or mobile is
+        `phone`, or whose email is `email`. SQL on purpose: contacts Ops typed by hand
+        hold "050 123 4567" or "+966 50..." and an exact domain misses them, while
+        phone_mobile_search only exists with the sms module and misses the "0" form.
+        Candidates by the last 9 digits, then confirmed in Python with the same
+        normalizer. Email: exact after trim + lower, no ilike wildcards."""
+        Partner = self.env["res.partner"]
+        # A contact created earlier in this same cron run must be found.
+        Partner.flush_model(["phone", "mobile", "email", "company_id"])
+        company = backend.company_id.id
+        if phone:
+            tail = "%" + phone[-9:]
+            self.env.cr.execute("""
+                SELECT id, phone, mobile FROM res_partner
+                 WHERE (company_id IS NULL OR company_id = %s)
+                   AND (regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') LIKE %s
+                        OR regexp_replace(coalesce(mobile, ''), '[^0-9]', '', 'g') LIKE %s)
+            """, (company, tail, tail))
+            return [pid for pid, p1, p2 in self.env.cr.fetchall()
+                    if phone in (mapping.e164_ksa(p1), mapping.e164_ksa(p2))]
+        if email:
+            self.env.cr.execute("""
+                SELECT id FROM res_partner
+                 WHERE (company_id IS NULL OR company_id = %s) AND lower(trim(email)) = %s
+            """, (company, email))
+            return [r[0] for r in self.env.cr.fetchall()]
+        return []
+
+    @api.model
+    def _salla_internal_partners(self, partners):
+        """The subset of `partners` that are Wayakit's own: partner of an internal user
+        (archived users too), a company's partner or any contact under it. Never a Salla
+        buyer (mapping.pick_partner)."""
+        if not partners:
+            return partners
+        users = self.env["res.users"].sudo().with_context(active_test=False).search(
+            [("partner_id", "in", partners.ids), ("share", "=", False)])
+        # Every company partner, not only those in `partners`: a contact under the
+        # company (an employee without a user, sharing the office phone) is ours too.
+        company_partners = self.env["res.company"].sudo().search([]).partner_id
+        return users.partner_id | partners.filtered(
+            lambda p: p.commercial_partner_id in company_partners)
+
+    @api.model
+    def _salla_pick(self, ids, ref, guest, what, notes):
+        """mapping.pick_partner over `ids` (the guest never counts). Ambiguity -> note,
+        without the phone/email itself."""
         Partner = self.env["res.partner"].with_context(active_test=False)
+        partners = Partner.browse(ids).exists() - guest
+        internal = self._salla_internal_partners(partners)
+        chosen, eligible = mapping.pick_partner([{
+            "id": p.id, "salla_customer_id": p.salla_customer_id, "active": p.active,
+            "type": p.type, "parent_id": p.parent_id.id, "internal": p in internal}
+            for p in partners], ref)
+        partner = Partner.browse(chosen) if chosen else Partner
+        if eligible > 1:
+            notes.append(("note", _(
+                "Salla: %(n)s contacts match this customer's %(what)s; the order uses "
+                "%(name)s (id %(id)s). If they are the same person, merge them.") % {
+                    "n": eligible, "what": what, "name": partner.display_name,
+                    "id": partner.id}))
+        return partner
+
+    @api.model
+    def _salla_partner(self, backend, buyer):
+        """Customer and delivery address of a Salla order. -> (partner, shipping, notes)
+
+        `buyer` = mapping.buyer(order). `notes` = [(kind, text)] for the order's chatter
+        once it exists ("alert" pings the notify users, "note" does not).
+
+        Dedup: salla_customer_id, then the E.164 mobile (phone or mobile field), then
+        the email; archived contacts too, only company 1 or none, never the shared
+        guest and never a contact linked to ANOTHER Salla id (mapping.pick_partner).
+        A found contact only gets EMPTY fields filled: Ops data always wins, and the
+        phone is written only when both phone and mobile are empty (otherwise the
+        contact would carry two inconsistent numbers). Country is always SA, whatever
+        the payload says: the fiscal position, hence the VAT, hence the total, hang on
+        it. Nothing usable (no id, phone or email) -> the shared guest, never written.
+
+        Address: like website_sale. A new contact, or one without any address, gets the
+        order's address on itself. A contact whose address is a different one keeps it
+        and the order ships to a delivery child (reused when the same street/city comes
+        again), country SA too because sale.order computes the fiscal position from
+        partner_shipping_id."""
+        notes = []
+        Partner = self.env["res.partner"].with_context(active_test=False)
+        guest = self.env.ref("salla_connector.partner_salla_guest", raise_if_not_found=False) \
+            or Partner
         country = self.env.ref("base.sa", raise_if_not_found=False)
-        partner = Partner.search([("salla_customer_id", "=", customer["ref"])],
-                                 order="active desc, id", limit=1)
-        if partner:
-            # Only fill blanks: whatever ops typed wins over the API.
-            if country and not partner.country_id:
-                partner.country_id = country
-            return partner
-        # ponytail: no phone/email on purpose in F2a. whatsapp_sale/website automations
-        # send off partner_id.phone on every confirmation (Trendyol §11); F2b adds the
-        # phone together with the dedup and the WhatsApp review.
-        return Partner.create({
-            "name": customer.get("name") or _("Salla customer %s") % customer["ref"],
-            "type": "contact",
-            "customer_rank": 1,
-            "company_id": backend.company_id.id,
-            "country_id": country.id if country else False,
-            "salla_customer_id": customer["ref"],
-        })
+        has_code_field = "x_national_short_code" in Partner._fields
+        ref = buyer.get("ref") or ""
+        phone = self._salla_usable_phone(buyer.get("phone"))
+        email = buyer.get("email") or ""
+        addr = buyer.get("address") or {}
+        if buyer.get("phone_state") == "invalid" or (buyer.get("phone") and not phone):
+            notes.append(("note", _(
+                "Salla: the customer's phone number is not a valid Saudi mobile, so it was "
+                "not saved on the contact (WhatsApp confirmations need one). Add it by hand "
+                "if needed.")))
+        code = addr.get("short_code") if has_code_field else ""
+        if addr.get("short_code_state") == "invalid":
+            notes.append(("alert", _(
+                "Salla: the National Address short code \"%s\" is not valid (4 letters + "
+                "4 digits, e.g. RRRD2929), so it was not saved. Check it with the customer "
+                "before shipping.") % (addr.get("short_code_raw") or "")[:32]))
+
+        partner = Partner
+        if ref:
+            found = Partner.search([("salla_customer_id", "=", ref), ("id", "!=", guest.id),
+                                    ("company_id", "in", [False, backend.company_id.id])],
+                                   order="active desc, id")
+            # Someone typing a Salla id on an employee/company contact must not make it
+            # the buyer either.
+            found -= self._salla_internal_partners(found)
+            partner = found[:1]
+            if len(found) > 1:
+                notes.append(("note", _(
+                    "Salla: %(n)s contacts carry Salla customer id %(ref)s; the order uses "
+                    "%(name)s (id %(id)s). Merge them.") % {
+                        "n": len(found), "ref": ref, "name": partner.display_name,
+                        "id": partner.id}))
+        if not partner and phone:
+            partner = self._salla_pick(self._salla_match_ids(backend, phone=phone), ref,
+                                       guest, _("mobile number"), notes)
+        if not partner and email:
+            partner = self._salla_pick(self._salla_match_ids(backend, email=email), ref,
+                                       guest, _("email"), notes)
+        if not partner and not (ref or phone or email):
+            return guest, self._salla_delivery(guest, addr, code, country), notes
+
+        addr_vals = {k: addr.get(k) or False for k in ("street", "street2", "city", "zip")}
+        if not partner:
+            vals = {
+                "name": buyer.get("name") or (_("Salla customer %s") % ref if ref
+                                              else _("Salla customer")),
+                "type": "contact",
+                "customer_rank": 1,
+                "company_id": backend.company_id.id,
+                "country_id": country.id if country else False,
+                "salla_customer_id": ref or False,
+                "email": email or False,
+                # Same number on both: template 7 reads phone, the others read mobile.
+                "phone": phone or False,
+                "mobile": phone or False,
+            }
+            vals.update(addr_vals if addr else {"city": buyer.get("city") or False})
+            if code:
+                vals["x_national_short_code"] = code
+            return Partner.create(vals), Partner.browse(), notes
+
+        incoming = {"country_id": country.id if country else False,
+                    "salla_customer_id": ref or False, "email": email or False}
+        current = {"country_id": partner.country_id.id,
+                   "salla_customer_id": partner.salla_customer_id, "email": partner.email}
+        if phone and not partner.phone and not partner.mobile:
+            incoming.update(phone=phone, mobile=phone)
+        shipping = Partner.browse()
+        own = {"street": partner.street, "street2": partner.street2, "city": partner.city,
+               "zip": partner.zip}
+        if not addr:
+            incoming["city"] = buyer.get("city") or False
+            current["city"] = partner.city
+        elif mapping.address_fillable(own, addr):
+            incoming.update(addr_vals)
+            current.update(own)
+            if code:
+                incoming["x_national_short_code"] = code
+                current["x_national_short_code"] = partner.x_national_short_code
+        else:
+            shipping = self._salla_delivery(partner, addr, code, country)
+        vals = mapping.fill_empty(current, incoming)
+        if vals:
+            partner.write(vals)
+        return partner, shipping, notes
+
+    @api.model
+    def _salla_delivery(self, partner, addr, code, country):
+        """Delivery child of `partner` for `addr` (empty recordset when there is no
+        address): an existing child with the same street/city is reused and only gets
+        empty fields filled, else one is created."""
+        Partner = self.env["res.partner"].with_context(active_test=False)
+        if not addr:
+            return Partner.browse()
+        vals = {k: addr.get(k) or False for k in ("street", "street2", "city", "zip")}
+        vals["country_id"] = country.id if country else False
+        if code:
+            vals["x_national_short_code"] = code
+        # Active children only: an address Ops archived was wrong or obsolete.
+        for child in self.env["res.partner"].search([("parent_id", "=", partner.id),
+                                                     ("type", "=", "delivery")], order="id"):
+            if mapping.same_address({"street": child.street, "city": child.city}, addr):
+                current = {k: child[k] for k in vals if k != "country_id"}
+                current["country_id"] = child.country_id.id
+                fill = mapping.fill_empty(current, vals)
+                if fill:
+                    child.write(fill)
+                return child
+        vals.update(type="delivery", parent_id=partner.id, name=addr.get("name") or False,
+                    company_id=partner.company_id.id)
+        return Partner.create(vals)
 
     def _salla_line_vals(self, product, name, qty, price_unit, line_id=False, delivery=False):
         vals = {
@@ -121,12 +315,13 @@ class SaleOrder(models.Model):
         return vals
 
     @api.model
-    def _create_from_salla(self, backend, order, plan, products):
+    def _create_from_salla(self, backend, order, plan, products, buyer=None):
         """Create the sale.order for one normalized Salla order. Returns the order, or
         False when the webhook/cron race already created it (caller re-reads it).
 
         `plan` = mapping.build_lines(); `products` = {sku: product.product} covering
-        every SKU (the caller skipped the order otherwise)."""
+        every SKU (the caller skipped the order otherwise); `buyer` = mapping.buyer() of
+        the raw order (None: id and name only, as in F2a)."""
         extra_products = {"shipping": backend.shipping_product_id,
                           "cod": backend.cod_product_id,
                           "discount": backend.discount_product_id}
@@ -172,9 +367,11 @@ class SaleOrder(models.Model):
                 # Cheap pre-check; the unique constraint is the real guard.
                 if self._salla_find(order["id"]):
                     return False
-                partner = self._salla_partner(backend, order["customer"])
+                partner, shipping, partner_notes = self._salla_partner(
+                    backend, buyer or dict(order["customer"], phone="", email="",
+                                           phone_state="missing", address={}))
                 vals.update(partner_id=partner.id, partner_invoice_id=partner.id,
-                            partner_shipping_id=partner.id)
+                            partner_shipping_id=(shipping or partner).id)
                 so = self.create(vals)
         except pg_errors.UniqueViolation as e:
             if e.diag.constraint_name == SALLA_ORDER_CONSTRAINT:
@@ -182,6 +379,11 @@ class SaleOrder(models.Model):
                              order["id"])
                 return False
             raise
+        for kind, body in partner_notes:
+            if kind == "alert":
+                so._salla_alert(body)
+            else:
+                so.message_post(body=body, subtype_xmlid="mail.mt_note")
         if plan.get("cod_not_charged"):
             # Not an alert: the total reconciled, nothing to fix. Visible for the audit
             # of why a COD order carries no COD line.
