@@ -14,12 +14,9 @@
     <template id="appointment_form_phone" inherit_id="appointment.appointment_form">
         <xpath expr="//input[@name='phone']" position="attributes">
             <attribute name="required">1</attribute>
-            <attribute name="pattern">\+?[\d\s\-\(\)]{8,20}</attribute>
-            <attribute name="title">Please enter a valid phone number, e.g. +966 5X XXX XXXX</attribute>
-            <attribute name="placeholder">+966 5X XXX XXXX</attribute>
-        </xpath>
-        <xpath expr="//input[@name='phone']" position="after">
-            <small class="form-text text-muted">(so our team can reach you)</small>
+            <attribute name="pattern">[\d\s]{8,20}</attribute>
+            <attribute name="title">Please enter numbers only, e.g. 05X XXX XXXX</attribute>
+            <attribute name="placeholder">05X XXX XXXX</attribute>
         </xpath>
     </template>
 
