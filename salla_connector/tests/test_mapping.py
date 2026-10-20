@@ -688,11 +688,11 @@ def test_order_status_shapes():
 
 
 def test_status_filter():
-    for st in ("payment_pending", "Payment-Pending", "canceled", "cancelled", "refunded",
-               "restored", "restoring", "deleted"):
+    for st in ("payment_pending", "Payment-Pending", "request_quote", "canceled",
+               "cancelled", "refunded", "restored", "restoring", "deleted"):
         assert not mapping.should_import(st), st
         assert not mapping.should_confirm(st), st
-    for st in ("in_progress", "processing", "completed", "shipped",
+    for st in ("in_progress", "processing", "completed", "closed", "shipped",
                "delivering", "delivered", "ready_for_pickup", "In Progress"):
         assert mapping.should_import(st), st
         assert mapping.should_confirm(st), st

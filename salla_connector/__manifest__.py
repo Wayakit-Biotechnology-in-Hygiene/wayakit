@@ -4,7 +4,7 @@
                "authorization, signed webhooks, SKU reconciliation and order import "
                "(webhook queue + reconcile cron).",
     "category": "Sales",
-    "version": "17.0.2.1.2",
+    "version": "17.0.2.1.3",
     "author": "Wayakit",
     "website": "https://wayakit.com",
     "license": "LGPL-3",

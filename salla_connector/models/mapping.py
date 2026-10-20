@@ -472,11 +472,13 @@ STATUS_EVENT = "order.status.updated"
 
 # Status slugs (status.slug). Validate against a real payload: a store can rename
 # statuses ("customized"), the slug is what should stay stable.
-# Not imported: nothing has been paid (payment_pending) or the order is dead.
-NOT_IMPORTABLE_STATUSES = {"payment_pending", "canceled", "cancelled", "restored",
-                           "restoring", "refunded", "deleted"}
+# Not imported: nothing has been paid (payment_pending, request_quote = the customer
+# asked for a price quote) or the order is dead.
+NOT_IMPORTABLE_STATUSES = {"payment_pending", "request_quote", "canceled", "cancelled",
+                           "restored", "restoring", "refunded", "deleted"}
 # Imported AND confirmed: the order is paid and must be prepared.
-CONFIRMABLE_STATUSES = {"in_progress", "processing", "completed",
+# closed: Salla's final state after completed (demo store status list, 2026-10-20).
+CONFIRMABLE_STATUSES = {"in_progress", "processing", "completed", "closed",
                         "shipped", "delivering", "delivered", "ready_for_pickup"}
 # "Under review" (Pending review): Salla holds it for the merchant to accept. Since the
 # 2026-10-18 meeting the store only takes Apple Pay, Tabby, Tamara and cards, all paid
