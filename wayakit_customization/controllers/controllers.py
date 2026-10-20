@@ -51,6 +51,7 @@ _logger = logging.getLogger(__name__)
 # ID first: the name was renamed once already and is translatable (Arabic site).
 HOME_DEEP_CLEANING_TYPE_ID = 3
 HOME_DEEP_CLEANING_NAMES = {"home deep cleaning care", "curtain and furniture care"}
+MIN_PHONE_DIGITS = 8
 
 
 def _is_home_deep_cleaning(appointment_type):
@@ -87,6 +88,9 @@ class CustomAppointmentController(AppointmentController):
     def appointment_form_submit(self, appointment_type_id, datetime_str, duration_str, name, phone, email, staff_user_id=None, available_resource_ids=None, asked_capacity=1,
                                 guest_emails_str=None, **kwargs):
         kwargs.pop('duration_str', None)
+        if len(re.sub(r'\D', '', phone or '')) < MIN_PHONE_DIGITS:
+            return request.redirect('/appointment/%s?%s' % (
+                appointment_type_id, keep_query('*', state='failed-phone')))
         appointment_type = request.env['appointment.type'].sudo().browse(appointment_type_id)
         if appointment_type and _is_home_deep_cleaning(appointment_type):
             # Kitchen keeps the full 2 h slot so availability is checked for
