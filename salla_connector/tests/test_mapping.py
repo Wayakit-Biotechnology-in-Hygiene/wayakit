@@ -697,10 +697,14 @@ def test_status_filter():
         assert mapping.should_import(st), st
         assert mapping.should_confirm(st), st
         assert mapping.should_confirm(st, "bank"), st          # payment method irrelevant
-    # under_review: imported, confirmed ONLY for cash on delivery
+    # under_review: imported, confirmed (only electronic, fully paid methods since
+    # 2026-10-18) unless the payment method is a bank transfer
     for st in ("under_review", "Under Review", "under-review"):
         assert mapping.should_import(st), st
-        assert not mapping.should_confirm(st), st
+        assert mapping.should_confirm(st), st
+        assert mapping.should_confirm(st, "credit_card"), st
+        assert not mapping.should_confirm(st, "bank"), st
+        assert not mapping.should_confirm(st, "bank_transfer"), st
     # unknown / unreadable: imported (never lose a paid order), never auto-confirmed
     for st in ("", None, "fake_custom_status"):
         assert mapping.should_import(st), st
@@ -1131,19 +1135,45 @@ def test_build_lines_default_vat_when_missing():
     assert plan["vat_rate"] == 15.0 and plan["expected_total"] == 94.0
 
 
-def test_should_confirm_cod_vs_bank_transfer():
-    """under_review means "waiting for the merchant": for COD that IS the accepted order
-    (confirm, prepare it); for a bank transfer it means the receipt is not checked yet
-    (quotation, no delivery)."""
+def test_should_confirm_under_review_vs_bank_transfer():
+    """Since the 2026-10-18 meeting Salla takes only Apple Pay, Tabby, Tamara and cards:
+    an under_review order is already paid and is confirmed. A stray bank-transfer order
+    (receipt not checked yet) stays a quotation."""
+    paid = ("card", "credit_card", "Credit Card", "debit_card", "apple_pay", "Apple-Pay",
+            "tabby", "TABBY", "tamara", "mada", "cod", "", None, "fake_unknown_method")
+    for method in paid:
+        assert mapping.should_confirm("under_review", method), method
+        assert mapping.should_confirm("Under Review", method), method
+    for method in ("bank", "BANK", "bank_transfer", "Bank Transfer", "BANK-TRANSFER",
+                   " bank_transfer "):
+        assert not mapping.should_confirm("under_review", method), method
+        assert not mapping.should_confirm("under-review", method), method
+    for method in ("bank", "Bank Transfer", "bank-transfer", "banktransfer", "wire",
+                   "Wire", "wire_transfer", "Wire Transfer", "transfer", "\u0628\u0646\u0643",
+                   "\u062a\u062d\u0648\u064a\u0644 \u0628\u0646\u0643\u064a",
+                   "\u062d\u0648\u0627\u0644\u0629 \u0628\u0646\u0643\u064a\u0629"):
+        assert mapping.is_bank_transfer(method), method
+        assert not mapping.should_confirm("under_review", method), method
+    for method in ("credit_card", "apple_pay", "tabby", "tamara", "mada", "cod", "", None,
+                   "bankx", "bank_card", "banking"):
+        assert not mapping.is_bank_transfer(method), method
+    # COD is no longer offered but stays recognisable
     for method in ("cod", "COD", "cash_on_delivery", "Cash-On-Delivery", "cash on delivery"):
         assert mapping.is_cod(method), method
-        assert mapping.should_confirm("under_review", method), method
-    for method in ("bank", "bank_transfer", "credit_card", "mada", "", None, "codx", "c.o.d"):
+    for method in ("bank", "credit_card", "", None, "codx", "c.o.d"):
         assert not mapping.is_cod(method), method
-        assert not mapping.should_confirm("under_review", method), method
-    # COD never makes a dead or unpaid status confirmable
-    for st in ("payment_pending", "canceled", "refunded", "", "fake_custom_status"):
-        assert not mapping.should_confirm(st, "cod"), st
+    # a bank transfer the merchant approved (in_progress / completed) is confirmed
+    for st in ("in_progress", "processing", "completed", "shipped"):
+        assert mapping.should_confirm(st, "bank"), st
+        assert mapping.should_confirm(st, "bank_transfer"), st
+    # no payment method makes an unpaid, dead or unknown status confirmable
+    for st in ("payment_pending", "Payment-Pending", "cancelled", "canceled", "refunded",
+               "restored", "deleted", "", None, "fake_custom_status"):
+        for method in ("credit_card", "apple_pay", "tabby", "tamara", "cod", "bank", ""):
+            assert not mapping.should_confirm(st, method), (st, method)
+    for st in ("payment_pending", "cancelled", "refunded", "deleted"):
+        assert not mapping.should_import(st), st
+    assert mapping.should_import("under_review")
 
 
 def test_order_payment_method():
@@ -1160,9 +1190,48 @@ def test_order_payment_method():
     o = mapping.normalize_order(_order(69.0, payment_method="cod"))
     assert o["payment_method"] == "cod"
     assert mapping.should_confirm(o["status"], o["payment_method"])
+    o = mapping.normalize_order(_order(69.0, payment_method={"slug": "tabby"}))
+    assert o["status"] == "under_review" and o["payment_method"] == "tabby"
+    assert mapping.should_confirm(o["status"], o["payment_method"])
+    o = mapping.normalize_order(_order(69.0))                # method missing: paid
+    assert mapping.should_confirm(o["status"], o["payment_method"])
     o = mapping.normalize_order(_order(69.0, payment_method="bank"))
     assert not mapping.should_confirm(o["status"], o["payment_method"])
+    o = mapping.normalize_order(_order(69.0, payment_method={"name": "Bank Transfer"}))
+    assert o["payment_method"] == "bank_transfer"
+    assert not mapping.should_confirm(o["status"], o["payment_method"])
     assert mapping.normalize_order({"id": 1})["payment_method"] == ""
+
+
+def test_order_payment_method_list_fallback():
+    """payment_methods[] fallback: a bank transfer anywhere in the list wins (missing it
+    would confirm an unverified order), else the first readable entry."""
+    pm = mapping.order_payment_method
+    assert pm({"payment_methods": ["credit_card", {"slug": "bank"}]}) == "bank"
+    assert pm({"payment_methods": [{"name": "Tabby"}]}) == "tabby"
+    assert pm({"payment_methods": ["apple_pay", "tamara"]}) == "apple_pay"
+    assert pm({"payment_methods": [None, "", {}, 5, "Mada"]}) == "mada"
+    assert pm({"payment_methods": ["credit_card"]}) == "credit_card"
+    assert pm({"payment_methods": [{"slug": "tabby"}]}) == "tabby"
+    for junk in ([None, 5], [None, {}, 5, ""], [], "credit_card", "bank", {"slug": "bank"},
+                 None):
+        assert pm({"payment_methods": junk}) == "", junk
+    for junk in (5, 5.0, True, ["bank"]):          # non-str primary field is ignored
+        assert pm({"payment_method": junk}) == "", junk
+    # a non-empty payment_method wins over the list (even a bank transfer in the list)
+    assert pm({"payment_method": "credit_card", "payment_methods": ["bank"]}) == "credit_card"
+    assert pm({"payment_method": "", "payment_methods": [{"name": "Bank Transfer"}]}) \
+        == "bank_transfer"
+    assert pm({"payment": {"method": "tabby"}, "payment_methods": ["bank"]}) == "tabby"
+    # end to end: under_review + list holding a transfer stays a quotation
+    o = mapping.normalize_order(_order(69.0, payment_methods=["credit_card", "bank"]))
+    assert o["status"] == "under_review" and o["payment_method"] == "bank"
+    assert not mapping.should_confirm(o["status"], o["payment_method"])
+    o = mapping.normalize_order(_order(69.0, payment_methods=["bank"]))
+    assert o["payment_method"] == "bank"
+    assert not mapping.should_confirm(o["status"], o["payment_method"])
+    o = mapping.normalize_order(_order(69.0, payment_methods=[{"slug": "tamara"}]))
+    assert mapping.should_confirm(o["status"], o["payment_method"])
 
 
 def test_vat_rate():
@@ -2301,7 +2370,8 @@ if __name__ == "__main__":
                test_next_cursor_held_by_missing_sku, test_holds_cursor_payment_pending,
                test_stock_rows_short_lines, test_redact_order_notes,
                # F2a round 2
-               test_should_confirm_cod_vs_bank_transfer, test_order_payment_method,
+               test_should_confirm_under_review_vs_bank_transfer, test_order_payment_method,
+               test_order_payment_method_list_fallback,
                test_vat_rate, test_normalize_order_vat_suspect_and_default,
                test_price_digits_7_rounding, test_extras_at_7_digits_hundred_net,
                test_rounding_adjust_salla_net_two_decimals,

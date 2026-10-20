@@ -475,15 +475,24 @@ STATUS_EVENT = "order.status.updated"
 # Not imported: nothing has been paid (payment_pending) or the order is dead.
 NOT_IMPORTABLE_STATUSES = {"payment_pending", "canceled", "cancelled", "restored",
                            "restoring", "refunded", "deleted"}
-# Imported AND confirmed: the order is paid (or COD accepted) and must be prepared.
+# Imported AND confirmed: the order is paid and must be prepared.
 CONFIRMABLE_STATUSES = {"in_progress", "processing", "completed",
                         "shipped", "delivering", "delivered", "ready_for_pickup"}
-# "Under review": Salla holds it for the merchant to accept. For a prepaid method it is
-# not proof of payment (bank transfer receipts sit here), so it is confirmed only for
-# cash on delivery, where nothing is paid upfront anyway. Lead's call, Mafer may change it.
+# "Under review" (Pending review): Salla holds it for the merchant to accept. Since the
+# 2026-10-18 meeting the store only takes Apple Pay, Tabby, Tamara and cards, all paid
+# upfront, so an order here is already paid and is confirmed. The one exception is a bank
+# transfer, whose receipt waits in this status unchecked: should one slip through (the
+# method switched back on), it stays a quotation.
 REVIEW_STATUSES = {"under_review"}
-# Payment method slugs meaning cash on delivery. VALIDATE AGAINST A REAL PAYLOAD: both the
-# field (payment_method) and the slug are taken from the docs.
+# Payment method slugs meaning bank transfer. VALIDATE AGAINST A REAL PAYLOAD: both the
+# field (payment_method) and the slugs are taken from the docs ("bank").
+BANK_TRANSFER_PAYMENT_METHODS = {"bank", "bank_transfer", "banktransfer", "بنك"}
+# The guard is allow-by-default, so a label (payment_method.name, maybe Arabic: "تحويل
+# بنكي", "حوالة بنكية") must also trip it: a value containing one of these is a bank
+# transfer. Not a bare "bank": "bank_card" / mada is a prepaid card, not a transfer.
+BANK_TRANSFER_MARKERS = ("transfer", "wire", "تحويل", "حوالة")
+# Payment method slugs meaning cash on delivery (not offered since 2026-10-18; kept so a
+# COD order is still recognisable). Same caveat: slugs from the docs.
 COD_PAYMENT_METHODS = {"cod", "cash_on_delivery"}
 # On an order we already have: posted once as a "needs manual handling" notice, never
 # automated (same call as Trendyol Phase 3).
@@ -492,7 +501,8 @@ CANCEL_STATUSES = {"canceled", "cancelled", "restored", "restoring", "refunded"}
 # confirmed, so a human looks at it. Losing it would be worse.
 
 # payment_pending orders hold the reconcile cursor so the cron still sees them once paid
-# (bank transfer) even if the status webhook is lost; abandoned ones stop holding after:
+# (e.g. a Tabby/Tamara checkout finished late) even if the status webhook is lost;
+# abandoned ones stop holding after:
 PENDING_HOLD_DAYS = 7
 # Salla's order dates are Riyadh time when they carry no zone (UTC+3, no DST).
 SALLA_UTC_OFFSET = timedelta(hours=3)
@@ -618,13 +628,20 @@ def is_cod(payment_method):
     return _canon_status(payment_method) in COD_PAYMENT_METHODS
 
 
+def is_bank_transfer(payment_method):
+    method = _canon_status(payment_method)
+    return method in BANK_TRANSFER_PAYMENT_METHODS \
+        or any(marker in method for marker in BANK_TRANSFER_MARKERS)
+
+
 def should_confirm(status, payment_method=""):
-    """True only for a status known to mean "paid (or COD accepted), prepare it".
-    under_review counts only with a cash-on-delivery payment method."""
+    """True only for a status known to mean "paid, prepare it".
+    under_review counts too, except with a bank transfer (receipt not verified yet).
+    An empty/unknown method under review is confirmed: every method on offer is prepaid."""
     status = _canon_status(status)
     if status in CONFIRMABLE_STATUSES:
         return True
-    return status in REVIEW_STATUSES and is_cod(payment_method)
+    return status in REVIEW_STATUSES and not is_bank_transfer(payment_method)
 
 
 def vat_rate(value):
@@ -709,15 +726,26 @@ def normalize_order(order):
     }
 
 
-def order_payment_method(order):
-    """Canonical payment method slug, "" if absent. VALIDATE AGAINST A REAL PAYLOAD:
-    docs show a bare string ("cod", "bank", "credit_card"); an object is accepted too."""
-    value = order.get("payment_method") if isinstance(order, dict) else None
+def _method_slug(value):
     if isinstance(value, dict):
         value = value.get("slug") or value.get("name")
-    if not value and isinstance(order, dict):
-        value = _dig(order, "payment.method")
-    return _canon_status(value)
+    return _canon_status(value) if isinstance(value, str) else ""
+
+
+def order_payment_method(order):
+    """Canonical payment method slug, "" if absent. VALIDATE AGAINST A REAL PAYLOAD:
+    docs show a bare string ("cod", "bank", "credit_card"); an object is accepted too.
+    Fallbacks: payment.method, then payment_methods[] (docs list it on the order). From
+    the list a bank transfer wins over the first entry: should_confirm only needs to
+    know whether one is involved, and missing it would confirm an unverified order."""
+    if not isinstance(order, dict):
+        return ""
+    method = _method_slug(order.get("payment_method")) or _method_slug(_dig(order, "payment.method"))
+    if method:
+        return method
+    listed = order.get("payment_methods")
+    listed = [m for m in (_method_slug(v) for v in listed) if m] if isinstance(listed, list) else []
+    return next((m for m in listed if is_bank_transfer(m)), listed[0] if listed else "")
 
 
 def order_customer(order):

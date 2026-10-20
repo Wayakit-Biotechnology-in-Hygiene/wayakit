@@ -4,14 +4,15 @@
                "authorization, signed webhooks, SKU reconciliation and order import "
                "(webhook queue + reconcile cron).",
     "category": "Sales",
-    "version": "17.0.2.1.1",
+    "version": "17.0.2.1.2",
     "author": "Wayakit",
     "website": "https://wayakit.com",
     "license": "LGPL-3",
     # sale_stock (not plain stock): from F2 on a confirmed Salla order must produce its
     # delivery and carry warehouse_id. Deliberately independent of the Tecfy modules
     # (odoo_salla_*, models tecfysalla.*): this replaces them and must survive their
-    # uninstall. website_sale: imported orders carry website_id (KSA website, B2C).
+    # uninstall. website_sale: backend.website_id (empty by default since
+    # 2.1.2, can still be set) and the website fields on imported orders.
     "depends": ["sale_management", "sale_stock", "website_sale"],
     "external_dependencies": {"python": ["requests"]},
     "data": [

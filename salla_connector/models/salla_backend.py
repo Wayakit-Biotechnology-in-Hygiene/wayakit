@@ -61,9 +61,6 @@ QUEUE_MAX_ATTEMPTS = 10       # errors only; a missing SKU never fails the row
 # the 30 min cron interval so the interval run picks it up.
 QUEUE_RETRY_AFTER = timedelta(minutes=25)
 CURSOR_STALE_AFTER = timedelta(days=3)
-# Default website for Salla orders: the KSA website (id 2 in production). Orders carry
-# it for reporting and the B2C flows; see salla_connector/CLAUDE.md for what it triggers.
-KSA_WEBSITE_ID = 2
 
 
 class SallaBackend(models.Model):
@@ -140,10 +137,12 @@ class SallaBackend(models.Model):
 
     # --- F2a: orders ---
     website_id = fields.Many2one(
-        "website", string="Website", default=lambda self: self._default_website(),
+        "website", string="Website",
         domain="[('company_id', '=', company_id)]",
-        help="Set on every imported order (B2C channel reporting). WARNING: a website "
-             "with a WhatsApp confirmation template sends it on confirmation.")
+        help="Leave EMPTY (decided 2026-10-18). If set, every imported order carries "
+             "this website: its WhatsApp confirmation template is sent on top of the "
+             "Salla automation (customer gets it twice) and Salla orders mix with web "
+             "sales in reporting. Customer messages come from Salla.")
     pricelist_id = fields.Many2one(
         "product.pricelist", string="Pricelist",
         default=lambda self: self._default_pricelist(),
@@ -186,11 +185,6 @@ class SallaBackend(models.Model):
         Queue = self.env["salla.order.queue"]
         for backend in self:
             backend.order_queue_count = Queue.search_count([("backend_id", "=", backend.id)])
-
-    @api.model
-    def _default_website(self):
-        website = self.env["website"].browse(KSA_WEBSITE_ID).exists()
-        return website if website.company_id == self.env.company else self.env["website"]
 
     @api.model
     def _default_pricelist(self):

@@ -529,10 +529,11 @@ class SaleOrder(models.Model):
             return False
         if not mapping.should_confirm(status, self.salla_payment_method):
             if status in mapping.REVIEW_STATUSES:
+                # Only a bank transfer lands here: its receipt is not checked by Salla.
                 self._salla_alert(_(
-                    "Salla: status \"%(s)s\" with payment method \"%(m)s\": not confirmed "
-                    "until paid. The order was left as a quotation; confirm it by hand once "
-                    "the payment is verified.") % {
+                    "Salla: status \"%(s)s\" with payment method \"%(m)s\" (bank transfer): "
+                    "not confirmed until the transfer is verified. The order was left as a "
+                    "quotation; confirm it by hand once the payment is checked.") % {
                         "s": status, "m": self.salla_payment_method or _("unknown")})
             elif mapping.should_import(status):
                 # Unknown/empty status: a custom status, or the field misread. Visible.
