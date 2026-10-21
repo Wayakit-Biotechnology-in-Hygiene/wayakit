@@ -730,7 +730,8 @@ def test_webhook_order_id():
     # every delivery about the same order, in any order and any number of times, maps to
     # ONE key: the one the UNIQUE salla_order_id is checked against
     assert keys == {"900000101"}, keys
-    assert mapping.ORDER_EVENTS == {"order.created", "order.updated", "order.status.updated"}
+    assert mapping.ORDER_EVENTS == {"order.created", "order.updated", "order.status.updated",
+                                    "order.cancelled", "order.refunded"}
 
 
 def test_webhook_order_id_empty_rejected():
@@ -2324,6 +2325,200 @@ def test_redact_real_webhook_body():
     assert out["data"]["amounts"]["total"]["amount"] == 34.5
 
 
+# ================================================================== F3: status Odoo -> Salla
+# Pure decisions only. Picking states are Odoo's stock.picking.state values; the caller
+# passes the OUTGOING pickings only (returns filtered out). Fake order ids 9000003xx.
+
+_AHEAD = ("shipped", "delivering", "delivered", "completed", "closed")
+_CANCELS = ("canceled", "cancelled", "restored", "restoring", "refunded")
+_BEFORE = ("under_review", "in_progress", "processing", "ready_for_pickup", "", None,
+           "fake_custom_status")
+
+
+def test_order_cancelled_is_queued():
+    for ev in ("order.created", "order.updated", "order.status.updated",
+               "order.cancelled", "order.refunded"):
+        assert ev in mapping.ORDER_EVENTS, ev
+    # a cancel webhook never feeds the address reader (its body is not trusted)
+    assert "order.cancelled" not in mapping.ADDRESS_EVENTS
+    assert "order.refunded" not in mapping.ADDRESS_EVENTS
+    # the dedup key of a cancel webhook is the same order id as the create
+    for body in ({"event": "order.cancelled", "merchant": 1000000001, "data": {"id": 900000301}},
+                 {"event": "order.cancelled", "data": {"id": "900000301",
+                                                       "status": {"slug": "canceled"}}},
+                 {"event": "order.refunded", "data": {"id": 900000301}}):
+        assert mapping.webhook_order_id(body) == "900000301", body
+    assert mapping.event_name({"event": "order.cancelled"}) in mapping.ORDER_EVENTS
+
+
+def test_cancel_refund_webhook_order_ref_first():
+    """order.cancelled / order.refunded (shape unverified): data may be the refund or the
+    status change, whose own id is NOT the order id -> the order reference wins."""
+    assert mapping.ORDER_REF_FIRST_EVENTS == {"order.status.updated", "order.cancelled",
+                                              "order.refunded"}
+    for ev in ("order.cancelled", "order.refunded", "order.status.updated"):
+        for data in ({"id": 555, "order_id": 900000301},
+                     {"id": 555, "order": {"id": 900000301}},
+                     {"id": 555, "order": {"id": "900000301"}, "order_id": 777},
+                     {"id": 900000301},                       # bare order id: still read
+                     {"id": 555, "order_id": None, "order": {"id": 900000301}},
+                     {"id": 555, "order_id": "None", "order": {"id": 900000301}}):
+            got = mapping.webhook_order_id({"event": ev, "merchant": 1000000001, "data": data})
+            assert got == "900000301", (ev, data, got)
+    # order.created / updated: data IS the order, its own id wins over any nested ref
+    for ev in ("order.created", "order.updated"):
+        got = mapping.webhook_order_id({"event": ev, "data": {"id": 900000301,
+                                                               "order_id": 555}})
+        assert got == "900000301", (ev, got)
+    # nothing usable -> "" (never "None", never the refund id via a literal None ref)
+    for data in ({}, {"order": None}, {"order_id": ""}, {"order": {"id": None}}):
+        assert mapping.webhook_order_id({"event": "order.refunded", "data": data}) == "", data
+
+
+def test_ship_push_single_delivery_done():
+    for st in _BEFORE:
+        assert mapping.ship_push_decision("sale", st, "", ["done"]) == "push", st
+        assert mapping.ship_push_decision("sale", st, None, ["done"]) == "push", st
+        assert mapping.ship_push_decision("sale", st, False, ["done"]) == "push", st
+    # a cancelled extra delivery next to a done one still pushes
+    assert mapping.ship_push_decision("sale", "in_progress", "", ["cancel", "done"]) == "push"
+    assert mapping.ship_push_decision("sale", "in_progress", "", ["done", "done", "cancel"]) == "push"
+
+
+def test_ship_push_backorder_waits_until_last():
+    # 3 x P1 split: 2 shipped (done), 1 in a backorder -> wait for every open state
+    for open_state in ("draft", "waiting", "confirmed", "assigned"):
+        assert mapping.ship_push_decision("sale", "in_progress", "", ["done", open_state]) \
+            == "wait", open_state
+        assert mapping.ship_push_decision("sale", "in_progress", "", [open_state, "done"]) \
+            == "wait", open_state
+        assert mapping.ship_push_decision("sale", "in_progress", "", [open_state]) == "wait"
+    # then the backorder is validated -> push (once)
+    assert mapping.ship_push_decision("sale", "in_progress", "", ["done", "done"]) == "push"
+    assert mapping.ship_push_decision("sale", "in_progress", "shipped", ["done", "done"]) == "skip"
+
+
+def test_ship_push_nothing_done_waits():
+    # no delivery yet, or every delivery cancelled: nothing has shipped, never "shipped"
+    for states in ([], None, ["cancel"], ["cancel", "cancel"]):
+        assert mapping.ship_push_decision("sale", "in_progress", "", states) == "wait", states
+
+
+def test_ship_push_already_pushed_is_remembered():
+    # remembered by what WE sent, not by the previous Salla status: even if a stale /
+    # out-of-order webhook put salla_status back to in_progress, never push twice
+    for st in _BEFORE:
+        assert mapping.ship_push_decision("sale", st, "shipped", ["done"]) == "skip", st
+        assert mapping.ship_push_decision("sale", st, " Shipped ", ["done"]) == "skip", st
+    # an unrelated pushed value does not count as "already shipped"
+    assert mapping.ship_push_decision("sale", "in_progress", "in_progress", ["done"]) == "push"
+
+
+def test_ship_push_salla_already_ahead_or_cancelled():
+    for st in _AHEAD + _CANCELS:
+        for variant in (st, st.upper(), " %s " % st):
+            assert mapping.ship_push_decision("sale", variant, "", ["done"]) == "skip", variant
+    # never revive an order Salla does not consider paid/alive
+    for st in ("payment_pending", "request_quote", "deleted"):
+        assert mapping.ship_push_decision("sale", st, "", ["done"]) == "skip", st
+    # "under review" spelled with a space / dash is still before shipped
+    for st in ("Under Review", "under-review", "In Progress"):
+        assert mapping.ship_push_decision("sale", st, "", ["done"]) == "push", st
+    assert mapping.SHIPPED_STATUS == "shipped"
+    assert set(_AHEAD) == mapping.SHIPPED_OR_LATER_STATUSES
+
+
+def test_ship_push_only_confirmed_orders():
+    for state in ("draft", "sent", "cancel", "", None, "done"):
+        assert mapping.ship_push_decision(state, "in_progress", "", ["done"]) == "skip", state
+
+
+def test_ship_push_garbage_never_raises():
+    for states in ("done", ["DONE"], [None], [""], [{"state": "done"}], (), set()):
+        out = mapping.ship_push_decision("sale", "in_progress", "", states)
+        assert out in ("push", "wait", "skip"), (states, out)
+    # a bare string is not a list of states: it must not count as ["d","o","n","e"] -> push
+    assert mapping.ship_push_decision("sale", "in_progress", "", "done") == "wait"
+    # malformed entries are never read as "done"
+    assert mapping.ship_push_decision("sale", "in_progress", "", [{"state": "done"}]) == "wait"
+    assert mapping.ship_push_decision("sale", "in_progress", "", [None, "done"]) == "wait"
+
+
+def test_status_payload():
+    assert mapping.status_payload("shipped", True) == {"slug": "shipped", "send_status_sms": True}
+    assert mapping.status_payload(" Shipped ", False) == {"slug": "shipped",
+                                                           "send_status_sms": False}
+    # Odoo Boolean fields come back as False/True; None (unset) -> False, never "None"
+    assert mapping.status_payload("shipped", None)["send_status_sms"] is False
+    assert mapping.status_payload("shipped", 1)["send_status_sms"] is True
+    body = json.dumps(mapping.status_payload("shipped", True))
+    assert body == '{"slug": "shipped", "send_status_sms": true}', body
+
+
+def test_is_permanent_error():
+    for code in (400, 401, 403, 404, 405, 409, 422, "422", " 404 "):
+        assert mapping.is_permanent_error(code), code
+    for code in (408, 425, 429, 500, 502, 503, 504, None, "", "abc", 0, 200, 201, 302):
+        assert not mapping.is_permanent_error(code), code
+
+
+def test_push_next_try_bounded():
+    now = NOW
+    assert mapping.PUSH_MAX_ATTEMPTS == len(mapping.PUSH_RETRY_MINUTES) + 1
+    assert mapping.push_next_try(1, now) == now + timedelta(minutes=mapping.PUSH_RETRY_MINUTES[0])
+    assert mapping.push_next_try(2, now) == now + timedelta(minutes=mapping.PUSH_RETRY_MINUTES[1])
+    last = mapping.PUSH_MAX_ATTEMPTS - 1
+    assert mapping.push_next_try(last, now) == \
+        now + timedelta(minutes=mapping.PUSH_RETRY_MINUTES[-1])
+    # delays grow, and the walk ends (None = give up + alert once)
+    tries, attempts = [], 1
+    while True:
+        nxt = mapping.push_next_try(attempts, now)
+        if nxt is None:
+            break
+        tries.append(nxt)
+        attempts += 1
+        assert attempts < 50, "push retries never end"
+    assert tries == sorted(tries) and len(tries) == len(mapping.PUSH_RETRY_MINUTES)
+    assert attempts == mapping.PUSH_MAX_ATTEMPTS
+    for attempts in (mapping.PUSH_MAX_ATTEMPTS, mapping.PUSH_MAX_ATTEMPTS + 5, 0, -1, None):
+        assert mapping.push_next_try(attempts, now) is None, attempts
+    # permanent error (422 invalid transition): give up at once, even on the 1st failure
+    assert mapping.push_next_try(1, now, permanent=True) is None
+
+
+def test_cancel_action_not_shipped_cancels():
+    for states in ([], None, ["assigned"], ["confirmed", "waiting"], ["draft"], ["cancel"],
+                   ["assigned", "cancel"]):
+        for order_state in ("sale", "draft", "sent"):
+            assert mapping.cancel_action(order_state, states, False) == "cancel", \
+                (order_state, states)
+
+
+def test_cancel_action_shipped_alerts_only():
+    # one delivery done is enough (partial shipment + open backorder): goods left
+    for states in (["done"], ["done", "assigned"], ["assigned", "done"], ["cancel", "done"]):
+        assert mapping.cancel_action("sale", states, False) == "alert_shipped", states
+        # shipped wins over invoiced: the return is what Ops must handle
+        assert mapping.cancel_action("sale", states, True) == "alert_shipped", states
+
+
+def test_cancel_action_posted_invoice_alerts():
+    for states in ([], ["assigned"], ["cancel"]):
+        assert mapping.cancel_action("sale", states, True) == "alert_invoiced", states
+
+
+def test_cancel_action_idempotent():
+    # repeated / out-of-order webhook: handled before -> nothing, whatever the pickings
+    for states in ([], ["done"], ["assigned"]):
+        for inv in (False, True):
+            assert mapping.cancel_action("sale", states, inv, already_handled=True) == "none"
+            # already cancelled in Odoo (by hand or by the first webhook)
+            assert mapping.cancel_action("cancel", states, inv) == "none"
+    # after the auto-cancel, a replay sees state "cancel" + cancelled pickings -> none
+    assert mapping.cancel_action("cancel", ["cancel"], False) == "none"
+
+
 if __name__ == "__main__":
     for fn in [test_signature_valid, test_signature_wrong_secret,
                test_signature_tampered_one_byte, test_signature_missing_or_empty_header,
@@ -2409,7 +2604,16 @@ if __name__ == "__main__":
                test_shipping_address_real_street_lines,
                test_webhook_ship_to_keeps_only_address_keys,
                test_webhook_ship_to_empty_cases, test_load_ship_to_never_raises,
-               test_with_ship_to_merge_rules, test_redact_real_webhook_body]:
+               test_with_ship_to_merge_rules, test_redact_real_webhook_body,
+               # F3: status Odoo -> Salla and cancellations
+               test_order_cancelled_is_queued, test_cancel_refund_webhook_order_ref_first,
+               test_ship_push_single_delivery_done, test_ship_push_backorder_waits_until_last,
+               test_ship_push_nothing_done_waits, test_ship_push_already_pushed_is_remembered,
+               test_ship_push_salla_already_ahead_or_cancelled,
+               test_ship_push_only_confirmed_orders, test_ship_push_garbage_never_raises,
+               test_status_payload, test_is_permanent_error, test_push_next_try_bounded,
+               test_cancel_action_not_shipped_cancels, test_cancel_action_shipped_alerts_only,
+               test_cancel_action_posted_invoice_alerts, test_cancel_action_idempotent]:
         fn()
         print(fn.__name__, "OK")
     print("all passed")

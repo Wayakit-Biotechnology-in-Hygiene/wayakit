@@ -2,9 +2,10 @@
     "name": "Salla Connector",
     "summary": "Direct Salla (KSA) integration for Wayakit, no middleware: OAuth app "
                "authorization, signed webhooks, SKU reconciliation and order import "
-               "(webhook queue + reconcile cron).",
+               "(webhook queue + reconcile cron), \"shipped\" pushed back to Salla and "
+               "Salla cancellations applied.",
     "category": "Sales",
-    "version": "17.0.2.1.3",
+    "version": "17.0.3.0.0",
     "author": "Wayakit",
     "website": "https://wayakit.com",
     "license": "LGPL-3",

@@ -467,8 +467,14 @@ def payload_keys(payload, prefix="", depth=4):
 # real payload: validate against the first real order (log_payloads on) and fix the
 # names here, once. Each reader takes a list of candidate paths, first hit wins.
 
-ORDER_EVENTS = {"order.created", "order.updated", "order.status.updated"}
+# order.cancelled / order.refunded (F3): queued like the others; the queue re-reads the
+# order and _salla_apply_status acts on its status, so the event body is never trusted.
+ORDER_EVENTS = {"order.created", "order.updated", "order.status.updated",
+                "order.cancelled", "order.refunded"}
 STATUS_EVENT = "order.status.updated"
+# Events whose `data` may be something other than the order (a status change, a refund):
+# their own `id` is then not the order id, so the order reference is read first.
+ORDER_REF_FIRST_EVENTS = {STATUS_EVENT, "order.cancelled", "order.refunded"}
 
 # Status slugs (status.slug). Validate against a real payload: a store can rename
 # statuses ("customized"), the slug is what should stay stable.
@@ -496,8 +502,9 @@ BANK_TRANSFER_MARKERS = ("transfer", "wire", "تحويل", "حوالة")
 # Payment method slugs meaning cash on delivery (not offered since 2026-10-18; kept so a
 # COD order is still recognisable). Same caveat: slugs from the docs.
 COD_PAYMENT_METHODS = {"cod", "cash_on_delivery"}
-# On an order we already have: posted once as a "needs manual handling" notice, never
-# automated (same call as Trendyol Phase 3).
+# On an order we already have: handled once (F3, cancel_action): cancelled in Odoo when
+# nothing shipped yet, else handed to Ops. restoring/restored = return in progress /
+# returned (the items go back to Salla's stock): the same as a cancellation for Odoo.
 CANCEL_STATUSES = {"canceled", "cancelled", "restored", "restoring", "refunded"}
 # Unknown slug (a custom status, or the field misread): imported as a quotation, never
 # confirmed, so a human looks at it. Losing it would be worse.
@@ -669,13 +676,14 @@ def is_cancel_status(status):
 def webhook_order_id(payload):
     """Salla order id a webhook is about, as a string, "" if absent.
 
-    order.created/updated: data IS the order (data.id). order.status.updated: data may
-    be the status change itself, whose own `id` is NOT the order id, so the order
-    reference (data.order.id / data.order_id) is tried first for that event."""
+    order.created/updated: data IS the order (data.id). order.status.updated (and the
+    cancel/refund events, shape unverified): data may be the status change or the refund
+    itself, whose own `id` is NOT the order id, so the order reference (data.order.id /
+    data.order_id) is tried first for those events."""
     if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
         return ""
     data = payload["data"]
-    paths = ("order.id", "order_id", "id") if event_name(payload) == STATUS_EVENT \
+    paths = ("order.id", "order_id", "id") if event_name(payload) in ORDER_REF_FIRST_EVENTS \
         else ("id", "order.id", "order_id")
     for path in paths:
         found = clean_id(_dig(data, path))
@@ -1018,6 +1026,87 @@ def holds_cursor(status, created_at, now, pending_days=PENDING_HOLD_DAYS):
     if _canon_status(status) != "payment_pending":
         return False
     return created_at is None or created_at >= now - timedelta(days=pending_days)
+
+
+# ================================================================== F3: status Odoo -> Salla
+# POST /orders/{id}/status {"slug", "send_status_sms"} VALIDATED on staging 2026-10-21
+# (order 765844026 = S02378): 201 from under_review, no shipment needed.
+SHIPPED_STATUS = "shipped"
+# Salla is already there or past it: pushing "shipped" would move the order BACK.
+SHIPPED_OR_LATER_STATUSES = {"shipped", "delivering", "delivered", "completed", "closed"}
+# Retry delays (minutes) after the 1st, 2nd and 3rd failed push; the 4th failure gives
+# up and alerts Ops once. Short first: most failures are a blip (token refresh, 5xx).
+PUSH_RETRY_MINUTES = (5, 30, 120)
+PUSH_MAX_ATTEMPTS = len(PUSH_RETRY_MINUTES) + 1
+_PICKING_FINAL_STATES = {"done", "cancel"}
+
+
+def ship_push_decision(order_state, salla_status, pushed_status, out_picking_states):
+    """Whether Odoo must tell Salla the order is "shipped". -> "push" | "wait" | "skip"
+
+    `out_picking_states` = states of the order's OUTGOING pickings, returns excluded (the
+    caller filters). "wait": a delivery is still open (backorder) or none was done — the
+    last validation pushes. "skip": nothing to send, ever: the order is not a confirmed
+    sale, "shipped" was already sent (remembered, not compared with the previous status:
+    webhooks arrive repeated and out of order), or Salla is already at/after shipped or
+    cancelled (a push would move it back or revive it)."""
+    states = [text(s) for s in (out_picking_states or [])]
+    if text(order_state) != "sale":
+        return "skip"
+    if not states or any(s not in _PICKING_FINAL_STATES for s in states) \
+            or "done" not in states:
+        return "wait"
+    if _canon_status(pushed_status) == SHIPPED_STATUS:
+        return "skip"
+    status = _canon_status(salla_status)
+    if status in SHIPPED_OR_LATER_STATUSES or status in CANCEL_STATUSES \
+            or status in NOT_IMPORTABLE_STATUSES:
+        return "skip"
+    return "push"
+
+
+def status_payload(slug, send_sms):
+    """Body of POST /orders/{id}/status. send_status_sms: Salla texts the customer (the
+    customer messages come from Salla, not Odoo)."""
+    return {"slug": _canon_status(slug), "send_status_sms": bool(send_sms)}
+
+
+def is_permanent_error(http_status):
+    """True for an answer that retrying cannot change (bad path/slug, 404, 422 invalid
+    transition, 401/403 scope after _request's own refresh). None (network, 5xx/429 after
+    _request's retries) is transient."""
+    try:
+        code = int(http_status)
+    except (TypeError, ValueError):
+        return False
+    return 400 <= code < 500 and code not in (408, 425, 429)
+
+
+def push_next_try(attempts, now, permanent=False):
+    """When to retry a failed push after `attempts` failures (>= 1), or None = give up
+    and alert Ops. A permanent error gives up at once: waiting hours to report a 422
+    only delays the person who has to fix it by hand."""
+    if permanent or attempts is None or attempts < 1 or attempts >= PUSH_MAX_ATTEMPTS:
+        return None
+    return now + timedelta(minutes=PUSH_RETRY_MINUTES[int(attempts) - 1])
+
+
+def cancel_action(order_state, out_picking_states, has_posted_invoice, already_handled=False):
+    """What Odoo does when Salla says an order we have is cancelled/refunded/returned.
+    -> "none" | "cancel" | "alert_shipped" | "alert_invoiced"
+
+    "none": handled before (repeated / reordered webhook) or already cancelled in Odoo.
+    "alert_shipped": an outgoing picking is done, the goods left: nothing changes in
+    Odoo, Ops handles the return. "alert_invoiced": nothing shipped but a posted invoice
+    exists: cancelling needs a credit note (F5), a human does it. "cancel": cancel the
+    order and its open deliveries automatically."""
+    if already_handled or text(order_state) == "cancel":
+        return "none"
+    if any(text(s) == "done" for s in (out_picking_states or [])):
+        return "alert_shipped"
+    if has_posted_invoice:
+        return "alert_invoiced"
+    return "cancel"
 
 
 # ------------------------------------------------------------------ notification

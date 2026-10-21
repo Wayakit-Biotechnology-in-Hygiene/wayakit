@@ -63,6 +63,16 @@ QUEUE_RETRY_AFTER = timedelta(minutes=25)
 CURSOR_STALE_AFTER = timedelta(days=3)
 
 
+class SallaApiError(UserError):
+    """A Salla API error answer, carrying its HTTP status so a caller can tell a
+    permanent refusal (404, 422) from a blip (mapping.is_permanent_error). Still a
+    UserError: every existing caller and message stays as it was."""
+
+    def __init__(self, message, http_status=None):
+        super().__init__(message)
+        self.http_status = http_status
+
+
 class SallaBackend(models.Model):
     _name = "salla.backend"
     _description = "Salla Store Backend"
@@ -157,6 +167,20 @@ class SallaBackend(models.Model):
         help="Pinged (Discuss inbox) on every imported order with ordered vs available "
              "stock, and on every Salla problem with it (total mismatch, failed "
              "confirmation, cancellation). Empty = silent.")
+    # --- F3: order status Odoo -> Salla, cancellations ---
+    ops_alert_user_ids = fields.Many2many(
+        "res.users", "salla_backend_ops_alert_user_rel", "backend_id", "user_id",
+        string="Ops Alerts",
+        help="Get a To-Do activity on the sale order when Odoo could not set it to "
+             "\"shipped\" in Salla, or when Salla cancels an order Odoo must not cancel "
+             "by itself (already shipped, invoice posted). Ops decided: the operations "
+             "lead and the general Operations account. Empty = Notify on New Order users.",
+        domain=[("share", "=", False)])
+    send_status_sms = fields.Boolean(
+        string="Send Status SMS", default=True,
+        help="Sent with every status Odoo pushes (send_status_sms): Salla notifies the "
+             "customer of the new status. On by default: customer messages come from "
+             "Salla, not Odoo. Off = the status changes silently.")
     shipping_product_id = fields.Many2one(
         "product.product", domain="[('company_id', 'in', [company_id, False])]",
         string="Shipping Product",
@@ -515,11 +539,11 @@ class SallaBackend(models.Model):
                 if refreshed:
                     # Salla also answers 401 (not 403) for an endpoint outside the app's
                     # scopes (GET /branches without branches.read, staging 2026-10-18).
-                    raise UserError(_(
+                    raise SallaApiError(_(
                         "Salla answered 401 on %s even with a freshly refreshed token. "
                         "Either the app lacks the scope this endpoint needs (add it to the "
                         "app in the Salla Partners Portal, then reinstall the app on the "
-                        "store), or the store revoked the app (reinstall it).") % path)
+                        "store), or the store revoked the app (reinstall it).") % path, 401)
                 # One refresh per call, then the loop retries; no recursion into _request.
                 token = self._refresh_token(stale_access_token=token, force=True)["access_token"]
                 refreshed = True
@@ -534,8 +558,8 @@ class SallaBackend(models.Model):
             if not resp.ok:
                 # Admin API error bodies carry the error message, not credentials; still
                 # truncated so a huge HTML error page doesn't flood the notification.
-                raise UserError(_("Salla API error %s on %s: %s") % (
-                    resp.status_code, path, resp.text[:500]))
+                raise SallaApiError(_("Salla API error %s on %s: %s") % (
+                    resp.status_code, path, resp.text[:500]), resp.status_code)
             try:
                 return resp.json()
             except ValueError:

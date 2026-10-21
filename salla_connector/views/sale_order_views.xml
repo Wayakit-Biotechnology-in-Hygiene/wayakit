@@ -13,6 +13,18 @@
                     <field name="salla_total" readonly="1" invisible="not salla_order_id"/>
                     <field name="salla_total_mismatch" readonly="1" invisible="not salla_total_mismatch"/>
                     <field name="salla_backend_id" readonly="1" invisible="not salla_order_id"/>
+                    <field name="salla_pushed_status" readonly="1" invisible="not salla_order_id"/>
+                    <field name="salla_push_pending" readonly="1" invisible="not salla_push_pending"/>
+                    <field name="salla_push_attempts" readonly="1" invisible="not salla_push_pending"/>
+                    <field name="salla_push_next_try" readonly="1" invisible="not salla_push_pending"/>
+                    <field name="salla_push_error" readonly="1" invisible="not salla_push_error"/>
+                    <field name="salla_alerted_status" readonly="1" invisible="not salla_alerted_status"/>
+                </xpath>
+                <!-- Ops retry after a failed push. Rights are re-checked in Python. -->
+                <xpath expr="//header" position="inside">
+                    <button name="action_salla_push_status" type="object" string="Push Status to Salla"
+                            groups="sales_team.group_sale_salesman"
+                            invisible="not salla_order_id or state != 'sale' or salla_pushed_status == 'shipped'"/>
                 </xpath>
             </field>
         </record>
@@ -39,6 +51,8 @@
                     <filter name="salla_orders" string="Salla Orders" domain="[('salla_order_id', '!=', False)]"/>
                     <filter name="salla_total_mismatch" string="Salla Total Mismatch"
                             domain="[('salla_total_mismatch', '=', True)]"/>
+                    <filter name="salla_push_failed" string="Salla Push Failed"
+                            domain="[('salla_push_pending', '!=', False), ('salla_push_next_try', '=', False)]"/>
                 </xpath>
             </field>
         </record>

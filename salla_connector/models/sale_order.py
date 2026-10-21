@@ -1,9 +1,12 @@
 import logging
+import threading
+from datetime import timedelta
 
 from markupsafe import Markup
 from psycopg2 import errors as pg_errors
 
-from odoo import api, fields, models, _
+from odoo import api, fields, models, SUPERUSER_ID, _
+from odoo.exceptions import AccessError, UserError
 from odoo.tools import html_escape
 
 from . import mapping
@@ -13,6 +16,10 @@ _logger = logging.getLogger(__name__)
 # Postgres names an _sql_constraints entry "<table>_<key>". Only a violation of THIS
 # constraint means "the webhook/cron race already imported it"; anything else is a bug.
 SALLA_ORDER_CONSTRAINT = "sale_order_salla_order_uniq"
+PUSH_BATCH = 30               # orders per push cron run; it re-triggers itself when full
+# Safety net for a validation whose push was never marked (the picking hook only logs):
+# the cron re-checks orders with a delivery done this recently and nothing pushed.
+PUSH_SWEEP_WINDOW = timedelta(days=2)
 
 
 class SaleOrder(models.Model):
@@ -34,10 +41,27 @@ class SaleOrder(models.Model):
              "out of order.",
     )
     salla_alerted_status = fields.Char(
-        string="Status Alerted in Chatter", readonly=True, copy=False,
-        help="Last cancellation-type status announced in the chatter. Keeps the notice "
-             "idempotent when Salla redelivers or reorders webhooks.",
+        string="Cancellation Handled", readonly=True, copy=False,
+        help="First cancellation-type status from Salla that Odoo acted on (cancelled the "
+             "order, or alerted Ops). Once set, later cancel/refund/return statuses do "
+             "nothing: Salla redelivers and reorders webhooks.",
     )
+    # --- F3: status push Odoo -> Salla. Set inside the picking validation, sent by the
+    # push cron in its own transaction: Salla failing never touches the validation.
+    salla_push_pending = fields.Char(
+        string="Salla Status to Push", readonly=True, copy=False,
+        help="Status waiting to be sent to Salla (\"shipped\" once every delivery is "
+             "done). Empty = nothing to send.")
+    salla_push_attempts = fields.Integer(string="Salla Push Attempts", readonly=True,
+                                         copy=False)
+    salla_push_next_try = fields.Datetime(
+        string="Salla Push Next Try", readonly=True, copy=False,
+        help="UTC. Empty while pending = retries exhausted: use Push Status to Salla.")
+    salla_push_error = fields.Char(string="Salla Push Error", readonly=True, copy=False)
+    salla_push_alerted = fields.Boolean(
+        string="Salla Push Failure Alerted", readonly=True, copy=False,
+        help="Ops already got the activity for this failure; reset on the next attempt "
+             "cycle (a new validation or the button).")
     salla_total = fields.Monetary(string="Salla Total", readonly=True, copy=False,
                                   currency_field="currency_id")
     salla_total_mismatch = fields.Boolean(
@@ -478,12 +502,13 @@ class SaleOrder(models.Model):
         return False
 
     # ------------------------------------------------------------- notices
-    def _salla_alert(self, body):
+    def _salla_alert(self, body, extra_partners=None):
         """Internal note that also lands in the notify users' Discuss inbox. A note, not
         a comment: from F2b the customer is a follower with an email, and none of these
-        notices is meant for them."""
+        notices is meant for them. `extra_partners`: also pinged (F3 Ops alert users)."""
         self.ensure_one()
-        partners = self.salla_backend_id.notify_user_ids.partner_id
+        partners = self.salla_backend_id.notify_user_ids.partner_id | (
+            extra_partners or self.env["res.partner"])
         self.message_post(body=body, partner_ids=partners.ids, subtype_xmlid="mail.mt_note")
 
     def _salla_notify_new_order(self, plan):
@@ -585,26 +610,328 @@ class SaleOrder(models.Model):
         return True
 
     def _salla_apply_status(self, status):
-        """Status of an order we already have (queue or reconcile cron). Only forward:
-        a confirmable status retries a confirmation that never happened (only when the
-        status actually changed, or a failing confirm would post every 30 min), and a
-        cancellation is announced once and handed to a human."""
+        """Status of an order we already have (queue, reconcile or push cron). Only
+        forward: a confirmable status retries a confirmation that never happened (only
+        when the status actually changed, or a failing confirm would post every 30 min),
+        and a cancellation is handled once (_salla_handle_cancel). delivered/completed
+        only refresh salla_status: the order is never locked (Ops, 2026-10-21)."""
         self.ensure_one()
         previous = self.salla_status
         if status and status != previous:
             self.salla_status = status
         if mapping.is_cancel_status(status):
-            if self.salla_alerted_status != status:
-                self.salla_alerted_status = status
-                self._salla_alert(_(
-                    "Salla: the order is now \"%s\". It needs manual handling in Odoo "
-                    "(cancel it, or process the return).") % status)
+            self._salla_handle_cancel(status)
             return
         if status and status != previous and self.state in ("draft", "sent") \
                 and mapping.should_confirm(status, self.salla_payment_method) \
                 and self.salla_backend_id.auto_confirm \
                 and not self.salla_total_mismatch:
             self._salla_confirm()
+
+    # ------------------------------------------------------------- F3: cancellation
+    def _salla_out_pickings(self):
+        """The order's deliveries to the customer: outgoing type, returns excluded (a
+        return of a WH/OUT is not a shipment, whatever its picking type)."""
+        self.ensure_one()
+        has_return = "return_id" in self.env["stock.picking"]._fields
+        return self.sudo().picking_ids.filtered(
+            lambda p: p.picking_type_code == "outgoing"
+            and not (has_return and p.return_id)
+            and not p.move_ids.origin_returned_move_id)
+
+    def _salla_handle_cancel(self, status):
+        """Salla cancelled / refunded / returned the order (Ops, 2026-10-21): nothing
+        shipped -> cancel the order and its open deliveries here too; shipped (or a
+        posted invoice, or the cancel fails) -> change nothing, Ops gets an activity.
+        Once per order (salla_alerted_status): "canceled" then "restored", or the same
+        webhook three times, act once. Refunds are made by hand in the payment gateway."""
+        self.ensure_one()
+        action = mapping.cancel_action(
+            self.state, self._salla_out_pickings().mapped("state"),
+            bool(self.sudo().invoice_ids.filtered(lambda m: m.state == "posted")),
+            already_handled=mapping.is_cancel_status(self.salla_alerted_status))
+        if action == "none":
+            if not self.salla_alerted_status:
+                self.salla_alerted_status = status
+            return action
+        self.salla_alerted_status = status
+        if action == "cancel":
+            # Stock picked/packed by an internal step stays where it was put: a cancel
+            # only cancels the moves that are not done yet.
+            picked = self.sudo().picking_ids.filtered(
+                lambda p: p.state == "done" and p.picking_type_code != "outgoing")
+            try:
+                with self.env.cr.savepoint():
+                    # _action_cancel, not action_cancel: the latter can return a wizard
+                    # (draft invoices) or refuse a locked order, neither of which a cron
+                    # can answer. It cancels the open pickings and draft invoices.
+                    self.with_context(mail_notify_force_send=False)._action_cancel()
+                    if self.state != "cancel":
+                        raise UserError(_("the order is still in state %s") % self.state)
+            except Exception as e:
+                _logger.warning("Salla order %s (%s): automatic cancellation failed",
+                                self.salla_order_id, self.name, exc_info=True)
+                self._salla_ops_alert(_("Salla: automatic cancellation failed"), _(
+                    "Salla: the order is now \"%(s)s\" and nothing was shipped, but Odoo "
+                    "could not cancel it automatically (%(e)s). Cancel the order and its "
+                    "delivery by hand. Any refund is made in the payment gateway.") % {
+                        "s": status, "e": str(e)[:300]})
+                return "failed"
+            _logger.info("Salla order %s (%s): cancelled in Odoo after Salla status %s",
+                         self.salla_order_id, self.name, status)
+            extra = ""
+            if picked:
+                extra += _(" Already picked/packed (%s): put that stock back.") % \
+                    ", ".join(picked.mapped("name"))
+            if "mrp_production_count" in self._fields and self.sudo().mrp_production_count:
+                extra += _(" Check the related manufacturing orders.")
+            self._salla_alert(_(
+                "Salla: the order is now \"%s\" and nothing was shipped, so Odoo cancelled "
+                "it and its open deliveries. Any refund is made in the payment gateway.")
+                % status + extra)
+            return action
+        if action == "alert_shipped":
+            self._salla_ops_alert(_("Salla: cancelled after shipping"), _(
+                "Salla: the order is now \"%s\" but it was already shipped from Odoo. "
+                "Nothing was changed in Odoo: handle the return with the courier (and the "
+                "refund in the payment gateway).") % status)
+        else:
+            self._salla_ops_alert(_("Salla: cancelled, invoice posted"), _(
+                "Salla: the order is now \"%s\". Nothing was shipped, but it has a posted "
+                "invoice, so Odoo did not cancel it: cancel it by hand with a credit "
+                "note. Any refund is made in the payment gateway.") % status)
+        return action
+
+    def _salla_ops_alert(self, summary, body):
+        """The chatter alert (notify users) plus a To-Do activity for each Ops alert
+        user (notify users when none is set). One user who cannot be assigned (no
+        access to the order) must not cost the others their activity, nor the caller
+        its transaction."""
+        self.ensure_one()
+        backend = self.salla_backend_id
+        ops = backend.ops_alert_user_ids
+        # Ops partners are pinged in the chatter too: an inbox notification reaches them
+        # even if their activity cannot be created.
+        self._salla_alert(body, extra_partners=ops.partner_id)
+        failed = self.env["res.users"]
+        if ops:
+            failed = self._salla_schedule_activities(ops, summary, body)
+            if failed == ops and backend.notify_user_ids:
+                # Nobody on the Ops side got the To-Do: it must not vanish.
+                self._salla_schedule_activities(backend.notify_user_ids, summary, body)
+        elif backend.notify_user_ids:
+            self._salla_schedule_activities(backend.notify_user_ids, summary, body)
+        else:
+            _logger.warning("Salla order %s: no Ops Alerts / Notify users on backend %s, "
+                            "no activity created: %s", self.name, backend.name, summary)
+        if failed:
+            self.message_post(body=_(
+                "Salla: the activity could not be assigned to %s. Check their access on "
+                "the Salla backend's Ops Alerts.") % ", ".join(failed.mapped("name")),
+                subtype_xmlid="mail.mt_note")
+
+    def _salla_schedule_activities(self, users, summary, body):
+        """A To-Do per user, each in its own savepoint: one user who cannot be assigned
+        must not cost the others theirs, nor the caller its transaction. -> users that
+        failed."""
+        failed = self.env["res.users"]
+        for user in users:
+            try:
+                with self.env.cr.savepoint():
+                    self.sudo().activity_schedule(
+                        "mail.mail_activity_data_todo", user_id=user.id,
+                        summary=summary, note=body)
+            except Exception:
+                failed |= user
+                _logger.warning("Salla order %s: activity for user %s not created",
+                                self.name, user.id, exc_info=True)
+        return failed
+
+    # ------------------------------------------------------------- F3: push status
+    def _salla_ship_decision(self):
+        self.ensure_one()
+        return mapping.ship_push_decision(self.state, self.salla_status,
+                                          self.salla_pushed_status,
+                                          self._salla_out_pickings().mapped("state"))
+
+    def _salla_mark_push(self, trigger=True):
+        """Called from the picking validation/cancellation (sudo). Only marks the order
+        and wakes the push cron: no API call here, the validation must never wait on or
+        fail because of Salla (golden rule 5)."""
+        for order in self.filtered(lambda o: o.salla_order_id and o.salla_backend_id):
+            if order._salla_ship_decision() != "push":
+                continue
+            order.write({"salla_push_pending": mapping.SHIPPED_STATUS,
+                         "salla_push_attempts": 0,
+                         "salla_push_next_try": fields.Datetime.now(),
+                         "salla_push_error": False, "salla_push_alerted": False})
+            if trigger:
+                self.env.ref("salla_connector.ir_cron_salla_push_status").sudo()._trigger()
+
+    def _salla_push_now(self, manual=False):
+        """Send salla_push_pending to Salla for ONE order. -> (outcome, detail)
+        outcome: "pushed" | "wait" | "skip" | "failed". `manual`: the button; a failure
+        is reported to whoever clicked instead of retried and alerted.
+
+        The order is re-read from Salla first: a cancellation whose webhook was lost (or
+        is still in the queue) must not be overwritten by "shipped", which could revive
+        it. The push fields are written only after the POST. A fresh status that differs
+        is applied before it (salla_status written, row locked during the POST): a
+        status webhook the queue cron processes meanwhile then fails on this row and is
+        retried ~25 min later, which is harmless.
+        Not serialised with the button: both may POST "shipped" (two SMS with
+        send_status_sms on). Accepted: it needs a click inside the cron's seconds."""
+        self.ensure_one()
+        backend = self.salla_backend_id
+        target = self.salla_push_pending or mapping.SHIPPED_STATUS
+        clear = {"salla_push_pending": False, "salla_push_attempts": 0,
+                 "salla_push_next_try": False, "salla_push_error": False}
+        try:
+            with self.env.cr.savepoint():
+                raw = backend._fetch_order(self.salla_order_id)
+                fresh = mapping.order_status(raw) if raw else ""
+                if fresh and fresh != self.salla_status:
+                    self._salla_apply_status(fresh)
+                decision = self._salla_ship_decision()
+                if decision != "push":
+                    self.write(clear)
+                    _logger.info("Salla order %s (%s): no status push (%s, Salla status %s)",
+                                 self.salla_order_id, self.name, decision, self.salla_status)
+                    return decision, self.salla_status or ""
+                backend._request("POST", "/orders/%s/status" % self.salla_order_id,
+                                 payload=mapping.status_payload(target,
+                                                                backend.send_status_sms))
+                self.write(dict(clear, salla_pushed_status=target))
+                self.message_post(body=_(
+                    "Salla: order set to \"%s\" in Salla (every delivery validated).")
+                    % target, subtype_xmlid="mail.mt_note")
+        except Exception as e:
+            return self._salla_push_failed(e, target=target, manual=manual)
+        _logger.info("Salla order %s (%s): status %s pushed", self.salla_order_id,
+                     self.name, target)
+        return "pushed", target
+
+    def _salla_push_failed(self, error, target=None, manual=False):
+        """Count the failure, schedule the retry, alert Ops once when retries run out.
+        salla_push_pending stays set: the button (or a new validation) can retry.
+        Manual: no automatic retry and no activity, the person who clicked sees it."""
+        self.ensure_one()
+        http_status = getattr(error, "http_status", None)
+        attempts = mapping.PUSH_MAX_ATTEMPTS if manual else self.salla_push_attempts + 1
+        next_try = None if manual else mapping.push_next_try(
+            attempts, fields.Datetime.now(), mapping.is_permanent_error(http_status))
+        # UserErrors from _request carry Salla's error body (truncated there), never a
+        # token. Anything else is a bug: its type is enough here, the traceback is logged.
+        detail = (error.args[0] if isinstance(error, UserError) and error.args
+                  else type(error).__name__)
+        detail = str(detail)[:300]
+        _logger.warning("Salla order %s (%s): status push failed (attempt %s, %s): %s",
+                        self.salla_order_id, self.name, attempts,
+                        "retry %s UTC" % next_try if next_try else "giving up", detail,
+                        exc_info=not isinstance(error, UserError))
+        self.write({"salla_push_pending": target or self.salla_push_pending
+                    or mapping.SHIPPED_STATUS,
+                    "salla_push_attempts": attempts, "salla_push_next_try": next_try or False,
+                    "salla_push_error": detail})
+        if next_try is None and not manual and not self.salla_push_alerted:
+            self.salla_push_alerted = True
+            self._salla_ops_alert(_("Salla: status push failed"), _(
+                "Salla: Odoo could not set the order to \"%(s)s\" in Salla after %(n)s "
+                "attempt(s). The delivery in Odoo stays validated. Set the status in the "
+                "Salla dashboard by hand, or fix the cause and click \"Push Status to "
+                "Salla\". Error: %(e)s") % {
+                    "s": self.salla_push_pending or mapping.SHIPPED_STATUS, "n": attempts,
+                    "e": detail})
+        return "failed", detail
+
+    @api.model
+    def cron_salla_push_status(self, limit=PUSH_BATCH):
+        """Push the pending statuses that are due. One transaction per order: a push
+        Salla accepted stays recorded whatever happens to the next order, and a
+        SerializationFailure (the queue cron writing the same order for the status
+        webhook our push caused) costs only that order a retry, its pending intact."""
+        now = fields.Datetime.now()
+        testing = getattr(threading.current_thread(), "testing", False)
+        self._salla_sweep_unmarked(now, limit)
+        if not testing:
+            # Kept apart from the per-order rollbacks below.
+            self.env.cr.commit()
+        orders = self.search([("salla_push_pending", "!=", False),
+                              ("salla_push_next_try", "!=", False),
+                              ("salla_push_next_try", "<=", now),
+                              ("salla_push_attempts", "<", mapping.PUSH_MAX_ATTEMPTS),
+                              ("salla_backend_id.active", "=", True)],
+                             order="salla_push_next_try, id", limit=limit)
+        counters = {}
+        for order_id in orders.ids:
+            order = self.browse(order_id)
+            try:
+                outcome = order._salla_push_now()[0]
+                if not testing:
+                    self.env.cr.commit()
+            except Exception:
+                # Bookkeeping itself failed (e.g. SerializationFailure): nothing of this
+                # order is kept, it is still pending and due, so the next run retries.
+                _logger.warning("Salla order %s: status push bookkeeping failed, retried "
+                                "next run", order_id, exc_info=True)
+                if testing:
+                    raise
+                self.env.cr.rollback()
+                outcome = "rolled_back"
+            counters[outcome] = counters.get(outcome, 0) + 1
+        if len(orders) == limit:
+            self.env.ref("salla_connector.ir_cron_salla_push_status").sudo()._trigger()
+        if counters:
+            _logger.info("Salla status push: %s", counters)
+        return counters
+
+    @api.model
+    def _salla_sweep_unmarked(self, now, limit):
+        """Mark orders a picking hook failed to mark: a delivery done in the last
+        PUSH_SWEEP_WINDOW, nothing pending, nothing pushed. The domain is coarse (any
+        picking matches); _salla_mark_push applies the real rule, and once the push
+        re-reads the order from Salla a stale "skip" stops matching the local decision."""
+        candidates = self.search([
+            ("salla_order_id", "!=", False), ("salla_backend_id.active", "=", True),
+            ("state", "=", "sale"), ("salla_push_pending", "=", False),
+            ("salla_pushed_status", "=", False),
+            ("picking_ids.picking_type_code", "=", "outgoing"),
+            ("picking_ids.date_done", ">=", now - PUSH_SWEEP_WINDOW)],
+            # Newest first: orders that legitimately wait (open backorder) match every
+            # run and must not starve a fresh one out of the batch.
+            order="id desc", limit=limit)
+        for order in candidates:
+            try:
+                with self.env.cr.savepoint():
+                    order._salla_mark_push(trigger=False)
+            except Exception:
+                _logger.warning("Salla order %s: push sweep could not mark it", order.name,
+                                exc_info=True)
+
+    def action_salla_push_status(self):
+        """Manual retry for Ops: reset the attempts and push now, reporting the outcome.
+        Same path as the cron (fresh GET, same decision), run as OdooBot like the other
+        Salla buttons; rights are checked here since any method is callable over RPC."""
+        self.ensure_one()
+        if not self.env.user.has_group("sales_team.group_sale_salesman"):
+            raise AccessError(_("Only the sales team can push a status to Salla."))
+        self.check_access_rights("write")
+        self.check_access_rule("write")
+        if not (self.salla_order_id and self.salla_backend_id):
+            raise UserError(_("This is not a Salla order."))
+        # No write before the call: the order row would stay locked during the API call
+        # and the status webhook our POST causes would collide with it.
+        outcome, detail = self.with_user(SUPERUSER_ID)._salla_push_now(manual=True)
+        messages = {
+            "pushed": (_("Salla status set to \"%s\".") % detail, False),
+            "wait": (_("Not pushed: not every delivery of this order is validated yet "
+                       "(or none is)."), True),
+            "skip": (_("Nothing to push: already sent, or Salla is already at \"%s\".")
+                     % (detail or "?"), False),
+            "failed": (_("Salla refused or did not answer: %s") % detail, True),
+        }
+        message, warning = messages[outcome]
+        return self.salla_backend_id._notify(message, warning=warning)
 
 
 class SaleOrderLine(models.Model):

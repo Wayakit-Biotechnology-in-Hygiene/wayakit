@@ -84,6 +84,10 @@
                             </group>
                             <group string="Notifications">
                                 <field name="notify_user_ids" widget="many2many_tags"/>
+                                <field name="ops_alert_user_ids" widget="many2many_tags"/>
+                            </group>
+                            <group string="Order Status to Salla">
+                                <field name="send_status_sms"/>
                             </group>
                         </group>
                     </sheet>

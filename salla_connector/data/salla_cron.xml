@@ -37,5 +37,18 @@
             <field name="interval_type">minutes</field>
             <field name="numbercall">-1</field>
         </record>
+
+        <!-- F3: woken by every validated WH/OUT through _trigger(); the 30 min interval
+             runs the retries (5 / 30 / 120 min after a failure). -->
+        <record id="ir_cron_salla_push_status" model="ir.cron">
+            <field name="name">Salla: Push Order Status</field>
+            <field name="model_id" ref="sale.model_sale_order"/>
+            <field name="state">code</field>
+            <field name="code">model.cron_salla_push_status()</field>
+            <field name="user_id" ref="base.user_root"/>
+            <field name="interval_number">30</field>
+            <field name="interval_type">minutes</field>
+            <field name="numbercall">-1</field>
+        </record>
     </data>
 </odoo>

@@ -1,4 +1,4 @@
-# salla_connector: staging checklist (odoo.sh `mainTest` build): F1 (A-I), F2a (J-N), F2b (O), F2a post-meeting (P)
+# salla_connector: staging checklist (odoo.sh `mainTest` build): F1 (A-I), F2a (J-N), F2b (O), F2a post-meeting (P), F3 (Q)
 
 Manual run by a human on the odoo.sh staging build. There is no local Odoo.
 Run the standalone suite first: `python3 salla_connector/tests/test_mapping.py` must end in `all passed`.
@@ -573,3 +573,104 @@ Decisions: payments **only** Apple Pay, Tabby, Tamara and credit/debit cards (ev
 102. **under_review paid by card / BNPL.** Re-run step 63 on this build (card or Tabby/Tamara under review -> confirmed; bank transfer if still available -> quotation with the bank-transfer note). Write down the payment-method slug of each order.
 103. **payment_pending still not imported.** A demo order left in **payment_pending** (e.g. a Tabby/Tamara checkout abandoned before paying, if the demo store can produce one): not imported, held in the queue as in step 91g3. Completing the payment imports and confirms it. A **cancelled** order is never imported (step 55).
 
+# salla_connector F3: order status Odoo -> Salla, and cancellations
+
+Version `17.0.3.0.0`. Decided with Ops 2026-10-21: validating the **WH/OUT by hand** puts the
+order in **shipped** in Salla; a failed push never undoes the validation, it alerts Ops (activity);
+a Salla cancellation before shipping cancels the order and its WH/OUT, after shipping it only
+alerts Ops. No lock on delivery. Out of scope: shipments/tracking, stock (F4), invoices/refunds (F5).
+Run the standalone suite first (`python3 salla_connector/tests/test_mapping.py` -> `all passed`;
+the F3 decisions are `test_ship_push_*`, `test_cancel_action_*`, `test_push_next_try_bounded`,
+`test_is_permanent_error`, `test_order_cancelled_is_queued`).
+
+Pieces (names from the code; check them in the UI):
+- `sale.order`: `salla_push_pending` ("shipped" while waiting), `salla_push_attempts`,
+  `salla_push_next_try`, `salla_push_error`, `salla_push_alerted` (one-shot), existing
+  `salla_pushed_status` (set to `shipped` on 201) and `salla_alerted_status` (first cancel status handled).
+- `salla.backend`: **Ops Alerts** (`ops_alert_user_ids`, empty -> falls back to Notify users) and
+  **Send Status SMS** (`send_status_sms`, default on).
+- Cron **"Salla: Push Order Status"** (`salla_connector.ir_cron_salla_push_status`, 30 min backup,
+  `_trigger()`ed when a WH/OUT is validated or cancelled). Retries after 5 / 30 / 120 min, then
+  gives up and alerts once. A 4xx (except 408/425/429) gives up at once.
+- Button **Push Status to Salla** (`action_salla_push_status`) on the sale order header: hidden when state != sale or `salla_pushed_status == "shipped"`. Writes nothing before the call; on failure keeps `pending`, stores the error, sets attempts = 4 and `next_try` empty, shows a sticky warning, creates **no** activity (the person who clicked sees it).
+- Sales filter **Salla Push Failed** (`salla_push_failed`) = `salla_push_pending` set AND `salla_push_next_try` empty (retries exhausted, or the button failed).
+
+Extra shell helpers (after the F1/F2a ones). Ids, states and statuses only, never customer data:
+```python
+def push(salla_id):   # committed state of the push fields
+    with reg.cursor() as cr:
+        o = api.Environment(cr, SUPERUSER_ID, {})["sale.order"].search(
+            [("salla_order_id", "=", str(salla_id))])
+        return dict(name=o.name, state=o.state, salla_status=o.salla_status,
+                    pending=o.salla_push_pending, pushed=o.salla_pushed_status,
+                    attempts=o.salla_push_attempts, next_try=o.salla_push_next_try,
+                    error=o.salla_push_error, alerted=o.salla_push_alerted,
+                    alerted_status=o.salla_alerted_status)
+def picks(salla_id):  # every picking of the order: (name, type, state)
+    o = env["sale.order"].search([("salla_order_id", "=", str(salla_id))])
+    return [(p.name, p.picking_type_code, p.state) for p in o.picking_ids]
+def acts(salla_id):   # open activities on the order: (summary, user login)
+    o = env["sale.order"].search([("salla_order_id", "=", str(salla_id))])
+    return [(a.summary, a.user_id.login) for a in o.activity_ids]
+def run_push():       # run the push cron now, as the scheduler would
+    env.ref("salla_connector.ir_cron_salla_push_status").method_direct_trigger()
+    env.cr.commit()
+```
+Read the Salla side with `GET /orders/{id}` (dashboard or `tests/staging_api_orders.py`): only `status.slug`.
+
+Replay a cancel webhook by hand (zsh and bash; uses `sig`/`post` from the top of this file). The
+queue re-reads the order from Salla, so this only re-delivers: the real status comes from Salla.
+```sh
+export ORDER_ID="<Salla order id of the demo order under test>"
+cancel_body() { printf '{"event":"order.cancelled","merchant":%s,"data":{"id":%s}}' "$STORE_ID" "$ORDER_ID"; }
+B="$(cancel_body)"; post "$B" "$(sig "$B")"        # expect: ok:queued | HTTP 200
+B="$(cancel_body)"; post "$B" "$(sig "$B")"        # same body again: also ok:queued (one more queue row, harmless)
+```
+
+## Q. F3: shipped push and cancellations (v17.0.3.0.0)
+
+### Q.1 Build and configuration
+104. Build green; `salla_connector` upgrades to **17.0.3.0.0** with no error in the build log. Redo step 37 (Webhook URL in the Partners Portal for this build, reinstall the app on the demo store, Test Connection green).
+105. Backend form: **Ops Alerts** and **Send Status SMS** visible with help text. Set **Ops Alerts** = your own user only on staging (never ghanimah / the Ops account on a staging DB: activities would notify real people). **Send Status SMS** = **off** on staging (no SMS to the demo customer). Scheduled Actions: **"Salla: Push Order Status"** exists, active, every 30 min, model sale.order.
+106. Leave **Ops Alerts** empty once, and check in step 111 that the activity goes to the **Notify on New Order** users instead (fallback). Then set it back to your user.
+
+### Q.2 WH/OUT validated -> shipped in Salla
+107. Import a new demo order **3 x P1** with a **non-zero coupon**, paid (card) in **under_review** or **in_progress**; it confirms (state sale) and has one WH/OUT. `push(ORDER_ID)`: pending empty, pushed empty.
+108. Validate the WH/OUT **by hand** (quantities done = 3). The validation finishes normally (no error dialog, no wait on Salla). Right after: `push(ORDER_ID)["pending"] == "shipped"`. Within ~1 min (cron triggered) or after `run_push()`: `pushed == "shipped"`, `pending` empty, `attempts == 0`, `error` empty, **no** activity. Salla: `GET /orders/{id}` -> `status.slug == "shipped"`; the dashboard shows it shipped. The build log line for the push shows the order id and HTTP 201 only (no token, no customer data).
+109. Salla answers with `order.status.updated`: `salla_status` becomes `shipped`, **no** second push (`run_push()` again: nothing sent, `pushed` still `shipped`), no new chatter message, no loop of webhooks in the log.
+110. **Status already ahead.** In the Salla dashboard set another imported demo order (3 x P2) to **delivering** (or delivered/completed) **before** validating its WH/OUT; wait for the webhook (`salla_status` updated). Validate the WH/OUT: `run_push()` sends **nothing** (Salla stays at delivering, not moved back to shipped), the order is marked as handled (`pending` empty), no activity. If the button is still visible, pressing it shows *nothing to push, Salla already at delivering*.
+
+### Q.3 Push failure -> activity, validation kept, retry works
+111. **Break the push on staging only:** backend **Base URL** = `https://api.salla.dev/admin/v2/fake-broken` (same host, so the constraint accepts it; every API call answers 404). Import (before breaking it) and confirm a new **3 x P1** order, then break the URL and validate its WH/OUT. Expected: the WH/OUT stays **done** (never rolled back), the order stays **sale**; after `run_push()`: `attempts >= 1`, `error` shows the HTTP code (no token, no URL query), and since 404 is permanent `alerted == True` and `pending == "shipped"` at once. One activity **"Salla: status push failed"** per Ops Alerts user (or per Notify user with Ops Alerts empty, step 106) + an `_salla_alert` note. The order appears under the **Salla Push Failed** filter (`pending` set, `next_try` empty). While the URL is still broken, press **Push Status to Salla** once: sticky warning *Salla refused or did not answer: ...*, `attempts == 4`, `next_try` empty, still **one** activity per user (the button adds none).
+112. **Alert only once.** `run_push()` twice more and wait for the 30 min cron once: still exactly **one** activity per user (`acts(ORDER_ID)`), no new note.
+113. **Transient failure retries** (optional, if you can cut the network or get a 5xx): `attempts` grows, `next_try` moves 5 -> 30 -> 120 min, and the alert comes only after the 4th failure. If it cannot be reproduced on staging, write "not run" in the ticket: the timing is covered by `test_push_next_try_bounded`.
+114. **Retry.** Restore **Base URL** = `https://api.salla.dev/admin/v2` (exactly; Test Connection green). On the order press **Push Status to Salla**: a notification says it was pushed, `pushed == "shipped"`, `pending` empty, `error` empty, Salla shows **shipped**. The button disappears once pushed. Mark the activity done by hand. Check a **salesman** user can press it and a portal/no-sales user cannot see it.
+
+114a. **Safety net for an unmarked order (`_salla_sweep_unmarked`).** At the start of every run, the push cron marks orders that are in state sale, have an outgoing picking done in the last **2 days**, and have neither `pending` nor `pushed` set. Validating a WH/OUT triggers the cron within seconds. So first **archive** the scheduled action "Salla: Push Order Status" (Active off), then take a new **3 x P1** order, validate its WH/OUT, and clear the mark in the shell: `o = env["sale.order"].search([("salla_order_id","=",ORDER_ID)]); o.write({"salla_push_pending": False}); env.cr.commit()`. Then `run_push()` (it runs even with the action archived). Expected: in that run, `pending` is set again by the sweep and then pushed: `pushed == "shipped"`, Salla shows **shipped**. `run_push()` again: nothing is sent. **Set the scheduled action Active again.**
+114b. **First F3 build: older orders get swept.** Right after the upgrade of step 104, before validating anything, run `push(<id>)` on every Salla order whose WH/OUT was validated in the last 2 days (if any). The first cron run pushes **shipped** for those unless Salla is already at/after shipped or cancelled. On staging the backend points to the demo store, so this only touches demo orders. Write down which ones were pushed. **Before production go-live (Mafer):** the same sweep runs on the first production run, and the real customer may get a status SMS if Send Status SMS is on. Check beforehand which Salla orders in production have a WH/OUT done in the last 2 days and are not yet shipped in Salla.
+
+### Q.4 Backorder: no push until the last picking
+115. Import a new **3 x P1** order (P1 with stock, or set quantities by hand). On the WH/OUT set done = **2** of 3, validate, **Create Backorder**. Expected: `pending` empty or the decision `wait` (nothing sent), `run_push()` sends nothing, Salla still in its previous status. `picks(ORDER_ID)` shows one `done` + one open WH/OUT. Pressing **Push Status to Salla** here shows *not every delivery validated* and sends nothing.
+116. Validate the backorder (the last unit). Now the push runs once: Salla **shipped**, `pushed == "shipped"`.
+117. Variant: a backorder that is **cancelled** instead of validated (`done` + `cancel`): the push runs (something did ship). An order whose only WH/OUT is cancelled: never pushed.
+118. A **return** (WH/IN or Return of a done WH/OUT) on the order of step 116: nothing is pushed, `pushed` unchanged (returns are ignored).
+
+### Q.5 Cancellation in Salla
+119. **Cancel before shipping.** Import + confirm a new **3 x P2** order (WH/OUT ready, not validated, **no invoice**). Cancel it in the Salla dashboard. Within ~1 min (`order.cancelled` and/or `order.status.updated` queued, then processed): the sale order is **cancel**, its WH/OUT is **cancel** (`picks(ORDER_ID)`), `alerted_status` is set, a chatter note pings the Notify users, **no** activity. Variant: on a BB/BC/CC-style order whose internal **pick/pack** picking is already done and that has a manufacturing order, the note also says *Already picked/packed (names): put that stock back* and *Check the related manufacturing orders*; on the plain order of this step neither line appears. The order never asks for a wizard (no "Cancel order?" dialog left pending).
+120. **Repeated webhook, nothing duplicated.** Run the two replay `post` lines above with that `ORDER_ID`, then let the queue process (or press **Process Order Queue**). Expected: no new note, no activity, no error on the queue rows, no new order, state still cancel. Replaying the same cancel body hours later (after the order was re-read) also changes nothing.
+121. **Cancel after shipping.** Take the order of step 108 (WH/OUT done, Salla shipped). Cancel it in Salla (if the dashboard does not allow cancelling a shipped order, use **restoring**/return, or write "not possible on Salla" in the ticket). Expected: the sale order stays **sale**, the WH/OUT stays **done**, one activity **"Salla: cancelled after shipping"** per Ops Alerts user + alert note. Replay the webhook (step 120 commands): still **one** activity.
+121a. **Ops alert user without Sales rights (reviewer BLOCKER 1).** On staging only, create a fake internal user `Fake Stock Only` (login `fake.stock.only@example.invalid`, Inventory = User, Sales = **no access**, no other Sales group), add it to **Ops Alerts** next to your own user, and keep **Notify on New Order** = your own user. Repeat step 121 on a new shipped **3 x P1** order (WH/OUT done, Salla shipped, then cancel/restoring in Salla). Expected:
+    - The queue row ends **done**, not in error. The order stays **sale** and the WH/OUT stays **done**.
+    - `Fake Stock Only` gets the **inbox ping**: the alert note pings the Notify users **and** the Ops Alerts users. Log in as that user or check Discuss > Inbox.
+    - The **"Salla: cancelled after shipping"** activity: dev expects Odoo 17 to create it for `Fake Stock Only` even without read access to sale orders. Write down which case happened:
+      - (a) `acts(ORDER_ID)` lists it for `Fake Stock Only` and for your own user. Log in as `Fake Stock Only` and open Activities: note whether the user can open the order or gets an access error.
+      - (b) It could not be assigned to `Fake Stock Only`, so it went to the **Notify users**. The order chatter has a note naming `Fake Stock Only` (a name only, no email or phone).
+    - Either way: no activity has an empty user, and nothing goes in the queue row's error.
+    - Replay the cancel webhook (step 120 commands): still one activity per user, no second note.
+    - Archive `Fake Stock Only` afterwards.
+121b. **Access of the real Ops accounts (read-only, on production, by Mafer in the UI; no change).** Settings > Users: open **ghanimah** and the **general Operations account**, and write down in the ticket for each one whether it has a Sales right that can read sale orders (Sales > *User: Own Documents Only* or higher). Answer yes/no only, no other user data. If either one has no Sales right, step 121a's fallback is what will happen in production. Mafer and the Ops lead decide whether to grant the right or keep the fallback before go-live. Claude does not change users.
+122. **Partial shipment + cancel:** order with one WH/OUT done and a backorder open (step 115 before step 116), cancelled in Salla: treated as shipped (activity only, nothing cancelled automatically, the open backorder stays for Ops).
+123. **Posted invoice, not shipped** (staging only, **never** post in the production INV journal; on staging the DB is a copy and ZATCA must be neutralized: check the journal shows no live ZATCA submission before posting, else skip and write "not run"): order with a posted invoice and an open WH/OUT, cancelled in Salla -> nothing cancelled, activity **"Salla: cancelled, invoice posted"**.
+124. **Auto-cancel failure** (optional): if any cancel raises (e.g. a WH/OUT locked by another module), the order stays as it was, activity **"Salla: automatic cancellation failed"**, and the queue row is not stuck in error.
+125. **Delivered / completed do nothing else.** Set the step-108 order to **delivered** then **completed** in Salla: only `salla_status` changes; the order is **not** locked (lines still editable by a salesman), no push, no activity.
+126. Clean-up: backend **Base URL** back to the default (step 114), **Ops Alerts** = what prod will use is set **on production by Mafer**, not here; **Log Full Webhook Payloads** off. Record in the ticket: Salla order ids, statuses and HTTP codes only.
