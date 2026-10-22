@@ -268,8 +268,11 @@ class AccountMove(models.Model):
                 raise UserError(_("no public https base URL: set the backend's Webhook "
                                   "URL to the public https domain"))
             if move.salla_upload_posted:
+                # Without `type` Salla lists tax invoices only (staging 2026-10-22): a lost
+                # credit note would never be found and would be posted twice.
                 listed = backend._request("GET", "/orders/invoices",
-                                          params={"order_id": order.salla_order_id})
+                                          params={"order_id": order.salla_order_id,
+                                                  "type": kind})
                 listed = listed.get("data") if isinstance(listed, dict) else None
                 known = self.search([("salla_invoice_id", "!=", False),
                                      ("salla_sale_order_id", "=", order.id)]).mapped(
