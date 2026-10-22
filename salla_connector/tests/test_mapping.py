@@ -2519,6 +2519,345 @@ def test_cancel_action_idempotent():
     assert mapping.cancel_action("cancel", ["cancel"], False) == "none"
 
 
+# --- F5: invoices (proposal C), payments, credit notes -----------------------
+
+_FAKE_TOKEN = "fake-access-token-0000-test"   # obviously fake account.move access token
+
+
+def test_payment_journal_key_salla_payments():
+    for slug in ("mada", "MADA", " mada ", "credit_card", "Credit Card", "credit-card",
+                 "apple_pay", "Apple Pay", "apple-pay", "applepay", "visa", "mastercard",
+                 "bank_card", "debit_card"):
+        assert mapping.payment_journal_key(slug) == "salla_payments", slug
+    assert set(mapping.PAYMENT_JOURNAL_KEYS) == {"salla_payments", "tabby", "tamara"}
+
+
+def test_payment_journal_key_bnpl():
+    for slug in ("tabby", "tabby_installment", "Tabby Installment", "TABBY-INSTALLMENT",
+                 "tabby_pay_later", "tabby_card"):
+        # "tabby_card" contains "card": it must still be Tabby, never Salla Payments
+        assert mapping.payment_journal_key(slug) == "tabby", slug
+    for slug in ("tamara", "tamara_installment", "Tamara-Pay-Later", " TAMARA "):
+        assert mapping.payment_journal_key(slug) == "tamara", slug
+
+
+def test_payment_journal_key_unknown_no_payment():
+    # unknown / empty / COD / bank transfer -> "" (no payment + alert, never a guess)
+    for slug in ("", None, False, 0, [], {}, "stc_pay", "myfatoorah", "paypal",
+                 "cod", "cash_on_delivery", "bank", "bank_transfer", "wire",
+                 "تحويل بنكي", "None", "card_tabby_transfer"):
+        assert mapping.payment_journal_key(slug) == "", slug
+    # "bank_card" is a card, not a transfer (F2a rule kept)
+    assert mapping.payment_journal_key("bank_card") == "salla_payments"
+
+
+def test_payment_journal_key_overrides():
+    over, bad = mapping.parse_method_overrides("stc_pay = salla_payments\nX:tabby, bad")
+    assert over == {"stc_pay": "salla_payments", "x": "tabby"}, over
+    assert bad == ["bad"], bad
+    assert mapping.payment_journal_key("stc_pay", over) == "salla_payments"
+    assert mapping.payment_journal_key("STC Pay", {"stc_pay": "tamara"}) == "tamara"
+    # the override wins over the built-in list (Accounting decided, e.g. a real slug)
+    assert mapping.payment_journal_key("mada", {"mada": "tabby"}) == "tabby"
+    # ...but never for COD or a bank transfer (unverified money): still no payment
+    for slug, key in (("bank_transfer", "salla_payments"), ("cod", "tabby"),
+                      ("bank", "tamara"), ("cash_on_delivery", "salla_payments"),
+                      ("wire_transfer", "salla_payments")):
+        assert mapping.payment_journal_key(slug, {slug: key}) == "", slug
+    over, _ = mapping.parse_method_overrides("bank_transfer = salla_payments\ncod = tabby")
+    assert mapping.payment_journal_key("Bank Transfer", over) == ""
+    assert mapping.payment_journal_key("COD", over) == ""
+    # an override to something that is not a journal key is ignored
+    assert mapping.payment_journal_key("mada", {"mada": "cash"}) == "salla_payments"
+    assert mapping.payment_journal_key("stc_pay", {"stc_pay": "cash"}) == ""
+    # no / garbage overrides never raise
+    for o in (None, {}, {"": "tabby"}):
+        assert mapping.payment_journal_key("tabby_installment", o) == "tabby"
+
+
+def test_parse_method_overrides_tolerant():
+    for empty in (None, "", "   ", "\n\n", ",;,"):
+        assert mapping.parse_method_overrides(empty) == ({}, []), empty
+    over, bad = mapping.parse_method_overrides(
+        "Apple-Pay = Salla Payments; tabby_new : TABBY\n a=b=c \n=tabby\nfoo: cash\nnosep")
+    assert over == {"apple_pay": "salla_payments", "tabby_new": "tabby"}, over
+    assert bad == ["a=b=c", "=tabby", "foo: cash", "nosep"], bad
+    _, bad = mapping.parse_method_overrides("x" * 200)
+    assert bad and all(len(b) <= 60 for b in bad), bad
+    # every key the parser accepts is a journal key
+    over, _ = mapping.parse_method_overrides("a=tamara\nb=salla_payments\nc=tabby")
+    assert set(over.values()) <= set(mapping.PAYMENT_JOURNAL_KEYS)
+
+
+def test_should_auto_invoice():
+    ok = dict(order_state="sale", total_mismatch=False, invoice_status="to invoice",
+              has_invoice=False)
+    assert mapping.should_auto_invoice(**ok) is True
+    assert mapping.should_auto_invoice(**ok, auto_invoice=True, failed_before=False) is True
+    # each guard alone blocks it
+    for state in ("draft", "sent", "cancel", "", None):
+        assert not mapping.should_auto_invoice(**dict(ok, order_state=state)), state
+    assert not mapping.should_auto_invoice(**dict(ok, total_mismatch=True))
+    for st in ("invoiced", "no", "upselling", "", None, "To Invoice"):
+        assert not mapping.should_auto_invoice(**dict(ok, invoice_status=st)), st
+    assert not mapping.should_auto_invoice(**dict(ok, has_invoice=True))   # draft too
+    assert not mapping.should_auto_invoice(**ok, auto_invoice=False)
+    assert not mapping.should_auto_invoice(**ok, failed_before=True)
+
+
+def test_upload_kind():
+    assert mapping.upload_kind("out_invoice") == mapping.TAX_INVOICE == "tax_invoice"
+    assert mapping.upload_kind("out_refund") == mapping.CREDIT_NOTE == "credit_note"
+    for t in ("in_invoice", "in_refund", "entry", "out_receipt", "", None, False):
+        assert mapping.upload_kind(t) == "", t
+
+
+def test_upload_decision_invoice_zatca_required():
+    d = mapping.upload_decision
+    assert d("out_invoice", "posted", "sent", True) == "upload"
+    assert d("out_invoice", "posted", "to_send", True) == "wait"
+    assert d("out_invoice", "posted", "to_send", True, edi_error=True) == "zatca_error"
+    for edi in (False, None, "", "nonsense"):
+        assert d("out_invoice", "posted", edi, True) == "no_zatca", edi
+    for edi in ("cancelled", "to_cancel"):
+        assert d("out_invoice", "posted", edi, True) == "skip", edi
+
+
+def test_upload_decision_zatca_off_staging():
+    # staging: "Require ZATCA acceptance" off -> EDI state ignored
+    for edi in ("sent", "to_send", False, None, ""):
+        assert mapping.upload_decision("out_invoice", "posted", edi, False) == "upload", edi
+        assert mapping.upload_decision("out_invoice", "posted", edi, False,
+                                       edi_error=True) == "upload", edi
+
+
+def test_upload_decision_never_twice_never_draft():
+    d = mapping.upload_decision
+    for req in (True, False):
+        # already uploaded: never again (Salla accepts a 2nd tax invoice for one order)
+        for sid in ("1644645772", 1644645772, " 1644645772 "):
+            assert d("out_invoice", "posted", "sent", req, salla_invoice_id=sid) == "skip"
+            assert d("out_refund", "posted", "sent", req, salla_invoice_id=sid) == "skip"
+        # empty / literal None id = not uploaded yet
+        for sid in ("", None, False, "None", "null"):
+            assert d("out_invoice", "posted", "sent", req, salla_invoice_id=sid) == "upload"
+        for state in ("draft", "cancel", "", None):
+            assert d("out_invoice", state, "sent", req) == "skip", state
+            assert d("out_refund", state, "sent", req) == "skip", state
+        for mt in ("in_invoice", "in_refund", "entry", ""):
+            assert d(mt, "posted", "sent", req) == "skip", mt
+
+
+def test_upload_decision_credit_note_follows_invoice():
+    d = mapping.upload_decision
+    for req in (True, False):
+        assert d("out_refund", "posted", "sent", req, origin_state="done") == "upload"
+        assert d("out_refund", "posted", "sent", req, origin_state="pending") == "wait"
+        # invoice upload gave up: never a silent wait, the caller alerts Accounting once
+        assert d("out_refund", "posted", "sent", req, origin_state="failed") == "origin_failed"
+        # credit note of an invoice that was never a Salla upload -> skip
+        for origin in ("", None, False, "skipped", "nonsense"):
+            assert d("out_refund", "posted", "sent", req, origin_state=origin) == "skip"
+    # ZATCA still gates the credit note itself first
+    assert d("out_refund", "posted", "to_send", True, origin_state="done") == "wait"
+    assert d("out_refund", "posted", False, True, origin_state="done") == "no_zatca"
+    # origin_state is ignored for tax invoices
+    assert d("out_invoice", "posted", "sent", True, origin_state="") == "upload"
+    assert d("out_invoice", "posted", "sent", True, origin_state="failed") == "upload"
+
+
+def test_upload_decision_cancelled_before_upload():
+    d = mapping.upload_decision
+    # order cancelled in Salla before its invoice went up: the invoice is never uploaded
+    # (it is credited at once), whatever ZATCA says; checked before any ZATCA state
+    for req in (True, False):
+        for edi in ("sent", "to_send", False, None, "cancelled"):
+            assert d("out_invoice", "posted", edi, req, cancelled_before_upload=True) \
+                == "skip", (req, edi)
+            assert d("out_invoice", "posted", edi, req, edi_error=True,
+                     cancelled_before_upload=True) == "skip", (req, edi)
+    # no effect on credit notes: the credit note still follows its invoice
+    assert d("out_refund", "posted", "sent", True, origin_state="done",
+             cancelled_before_upload=True) == "upload"
+    assert d("out_refund", "posted", "sent", True, origin_state="skipped",
+             cancelled_before_upload=True) == "skip"
+    # default off: unchanged
+    assert d("out_invoice", "posted", "sent", True) == "upload"
+    # the full set of answers callers must handle
+    seen = set()
+    for mt in ("out_invoice", "out_refund", "entry"):
+        for st in ("posted", "draft"):
+            for edi in ("sent", "to_send", False, "cancelled"):
+                for req in (True, False):
+                    for err in (True, False):
+                        for origin in ("done", "pending", "failed", "skipped"):
+                            for cbu in (True, False):
+                                seen.add(d(mt, st, edi, req, edi_error=err,
+                                           origin_state=origin,
+                                           cancelled_before_upload=cbu))
+    assert seen == {"upload", "wait", "skip", "no_zatca", "zatca_error",
+                    "origin_failed"}, seen
+
+
+def test_status_before_upload_never_backwards():
+    for st in ("under_review", "Under Review", "under-review", " UNDER_REVIEW "):
+        assert mapping.status_before_upload("tax_invoice", st) == "in_progress", st
+        assert mapping.status_before_upload("credit_note", st) == "", st
+    assert mapping.IN_PROGRESS_STATUS == "in_progress"
+    for st in _AHEAD + _CANCELS + ("in_progress", "processing", "payment_pending",
+                                    "request_quote", "deleted", "", None):
+        assert mapping.status_before_upload("tax_invoice", st) == "", st
+    assert mapping.status_before_upload("", "under_review") == ""
+
+
+def test_pdf_filename_safe():
+    assert mapping.pdf_filename("INV/2026/00012") == "INV_2026_00012.pdf"
+    assert mapping.pdf_filename("RINV/2026/00003") == "RINV_2026_00003.pdf"
+    for name in ("", None, False, "/", "///", "فاتورة"):
+        assert mapping.pdf_filename(name) == "invoice.pdf", name
+    for name in ("../../etc/passwd", "a b?c#d%2F..", "INV/2026/00012.pdf",
+                 "x" * 300, "inv\\..\\x", "INV/2026/0001\n2"):
+        out = mapping.pdf_filename(name)
+        assert out.endswith(".pdf") and out.count(".") == 1, (name, out)
+        assert "/" not in out and "\\" not in out and ".." not in out, (name, out)
+        assert len(out) <= 84 and not out.startswith("_"), (name, out)
+    assert mapping.pdf_filename("../../etc/passwd") == "etc_passwd.pdf"
+
+
+def test_public_base_url():
+    f = mapping.public_base_url
+    assert f("https://ksasystem.wayakit.com/sl/webhook") == "https://ksasystem.wayakit.com"
+    assert f("https://Fake-Maintest-123.dev.odoo.com/sl/webhook?x=1") == \
+        "https://fake-maintest-123.dev.odoo.com"
+    assert f("https://example.test:8443/sl/webhook") == "https://example.test:8443"
+    # webhook unusable -> fallback (web.base.url)
+    for bad in ("", None, "http://example.test/sl/webhook", "ftp://example.test",
+                "https://", "https://user:pw@example.test/sl/webhook", "https://[bad/sl",
+                "/sl/webhook", "example.test"):
+        assert f(bad, "https://fallback.example.test") == "https://fallback.example.test", bad
+        assert f(bad) == "", bad
+        assert f(bad, "http://fallback.example.test") == "", bad
+    # a good webhook URL wins over the fallback
+    assert f("https://a.example.test/sl/webhook", "https://b.example.test") == \
+        "https://a.example.test"
+
+
+def test_invoice_pdf_url():
+    url = mapping.invoice_pdf_url("https://fake.example.test/", 42, _FAKE_TOKEN,
+                                  "INV/2026/00012")
+    assert url == "https://fake.example.test/sl/invoice/42/%s/INV_2026_00012.pdf" \
+        % _FAKE_TOKEN, url
+    assert mapping.INVOICE_PDF_ROUTE == "/sl/invoice"
+    # path must not name the marketplace (repo rule 6) and must end in .pdf (Salla checks)
+    assert "salla" not in url.lower() and url.endswith(".pdf")
+    assert mapping.invoice_pdf_url("https://h.test", "42", _FAKE_TOKEN, "") == \
+        "https://h.test/sl/invoice/42/%s/invoice.pdf" % _FAKE_TOKEN
+    for base, mid, tok in (("", 42, _FAKE_TOKEN), (None, 42, _FAKE_TOKEN),
+                           ("https://h.test", 0, _FAKE_TOKEN), ("https://h.test", None,
+                                                                 _FAKE_TOKEN),
+                           ("https://h.test", 42, ""), ("https://h.test", 42, None),
+                           ("https://h.test", 42, False)):
+        assert mapping.invoice_pdf_url(base, mid, tok, "INV/1") == "", (base, mid, tok)
+
+
+def test_invoice_upload_payload():
+    url = "https://fake.example.test/sl/invoice/42/%s/INV_2026_00012.pdf" % _FAKE_TOKEN
+    for oid in (504361123, "504361123", " 504361123 "):
+        body = mapping.invoice_upload_payload(oid, "tax_invoice", url)
+        assert body == {"order_id": 504361123, "type": "tax_invoice", "data_type": "url",
+                        "url": url}, body
+    body = mapping.invoice_upload_payload("504361123", "credit_note", url)
+    assert json.dumps(body) == ('{"order_id": 504361123, "type": "credit_note", '
+                                '"data_type": "url", "url": "%s"}' % url)
+
+
+def test_uploaded_invoice_id():
+    real = {"status": 200, "success": True,
+            "data": {"id": 1644645772, "invoice_number": None, "uuid": "fake-uuid",
+                     "type": "tax_invoice", "slug": 1, "date": "2026-10-22",
+                     "url": "https://cdn.example.test/fake.pdf"}}
+    assert mapping.uploaded_invoice_id(real) == "1644645772"
+    for resp in (None, [], "", {}, {"data": None}, {"data": []}, {"data": {}},
+                 {"data": {"id": None}}, {"data": {"id": "None"}}, {"id": 5},
+                 {"data": [{"id": 5}]}):
+        assert mapping.uploaded_invoice_id(resp) == "", resp
+
+
+def test_salla_invoice_kind():
+    k = mapping.salla_invoice_kind
+    assert k({"slug": 1}) == k({"slug": "1"}) == "tax_invoice"
+    assert k({"slug": 2}) == k({"slug": " 2 "}) == "credit_note"
+    assert k({"type": "Credit Note"}) == k({"type": "credit_note"}) == "credit_note"
+    assert k({"type": "tax_invoice"}) == k({"type": "Invoice"}) == "tax_invoice"
+    # slug wins over a contradicting label
+    assert k({"slug": 2, "type": "tax_invoice"}) == "credit_note"
+    for e in (None, [], "1", {"slug": 3}, {"type": "فاتورة"}, {}, {"slug": True}):
+        assert k(e) == "", e
+
+
+def test_adopt_uploaded_invoice():
+    # Pure pick only. The CALLER must adopt only for a move that already attempted a
+    # POST (the POST succeeded, the commit did not): otherwise two credit notes of one
+    # order could adopt each other's Salla id. That guard is checked on staging (R).
+    listing = [
+        {"id": 4, "invoice_number": 4, "slug": 1},          # Salla's own (store in Salla mode)
+        {"id": 5, "invoice_number": "5", "slug": 1},
+        {"id": 1644645772, "invoice_number": None, "slug": 1},
+        {"id": 1644645990, "invoice_number": "", "slug": 1},
+        {"id": 1644646100, "invoice_number": None, "slug": 2},
+        None, "garbage", {"slug": 1}, {"id": None, "slug": 1},
+    ]
+    a = mapping.adopt_uploaded_invoice
+    assert a(listing, "tax_invoice", []) == "1644645990"          # newest of ours
+    assert a(listing, "tax_invoice", ["1644645990"]) == "1644645772"
+    assert a(listing, "tax_invoice", [1644645990, "1644645772"]) == ""
+    assert a(listing, "credit_note", None) == "1644646100"
+    assert a(listing, "credit_note", ["1644646100"]) == ""
+    # Salla's own numbered invoices are never adopted
+    assert a(listing[:2], "tax_invoice", []) == ""
+    for lst in (None, [], [None], "x"):
+        assert a(lst, "tax_invoice", []) == "", lst
+    # numeric ordering, not string ordering
+    assert a([{"id": "99", "slug": 1}, {"id": "100", "slug": 1}], "tax_invoice", []) == "100"
+
+
+def test_invoice_total_check_tolerance_zero():
+    # F5 posts the invoice / registers the payment only when amount_total == Salla's
+    # total (total_check with tolerance 0). 3 x 9.99 incl. VAT with a 20 % coupon: float
+    # noise must not leave a correct invoice in draft, a 0.01 cent gap must.
+    net_unit = round(9.99 / 1.15, 7)
+    odoo_total = 3 * net_unit * 1.15 * 0.8            # 23.975999999... in float
+    assert mapping.total_check(odoo_total, 23.98, 0) == ("ok", 0.0)
+    assert mapping.total_check(29.969999999999995, 29.97, 0) == ("ok", 0.0)
+    for odoo, salla in ((23.97, 23.98), (23.99, 23.98), (0.0, 23.98)):
+        verdict, diff = mapping.total_check(odoo, salla, 0)
+        assert verdict == "mismatch" and diff != 0, (odoo, salla, verdict)
+    # Salla total unknown -> never "ok" (left in draft + alert)
+    assert mapping.total_check(23.98, None, 0)[0] == "unknown"
+
+
+def test_cancel_action_credit_note_when_auto_invoicing():
+    # F5: posted invoice + nothing shipped -> full credit note (when the backend invoices)
+    for states in ([], None, ["assigned"], ["confirmed", "waiting"], ["cancel"],
+                   ["assigned", "cancel"]):
+        assert mapping.cancel_action("sale", states, True, auto_credit_note=True) \
+            == "credit_note", states
+        # no posted invoice -> plain cancel, as in F3
+        assert mapping.cancel_action("sale", states, False, auto_credit_note=True) \
+            == "cancel", states
+    # shipped still wins: Ops handles the return, Accounting the credit note by hand
+    for states in (["done"], ["done", "assigned"], ["cancel", "done"]):
+        assert mapping.cancel_action("sale", states, True, auto_credit_note=True) \
+            == "alert_shipped", states
+    # repeated webhook after the credit note + cancel: nothing again
+    for inv in (False, True):
+        assert mapping.cancel_action("cancel", ["cancel"], inv, auto_credit_note=True) == "none"
+        assert mapping.cancel_action("sale", [], inv, already_handled=True,
+                                     auto_credit_note=True) == "none"
+    # already fully credited (caller passes has_posted_invoice=False) -> cancel only
+    assert mapping.cancel_action("sale", ["assigned"], False, auto_credit_note=True) == "cancel"
+
+
 if __name__ == "__main__":
     for fn in [test_signature_valid, test_signature_wrong_secret,
                test_signature_tampered_one_byte, test_signature_missing_or_empty_header,
@@ -2613,7 +2952,22 @@ if __name__ == "__main__":
                test_ship_push_only_confirmed_orders, test_ship_push_garbage_never_raises,
                test_status_payload, test_is_permanent_error, test_push_next_try_bounded,
                test_cancel_action_not_shipped_cancels, test_cancel_action_shipped_alerts_only,
-               test_cancel_action_posted_invoice_alerts, test_cancel_action_idempotent]:
+               test_cancel_action_posted_invoice_alerts, test_cancel_action_idempotent,
+               # F5: invoices, payments, credit notes
+               test_payment_journal_key_salla_payments, test_payment_journal_key_bnpl,
+               test_payment_journal_key_unknown_no_payment,
+               test_payment_journal_key_overrides, test_parse_method_overrides_tolerant,
+               test_should_auto_invoice, test_upload_kind,
+               test_upload_decision_invoice_zatca_required,
+               test_upload_decision_zatca_off_staging,
+               test_upload_decision_never_twice_never_draft,
+               test_upload_decision_credit_note_follows_invoice,
+               test_upload_decision_cancelled_before_upload,
+               test_status_before_upload_never_backwards, test_pdf_filename_safe,
+               test_public_base_url, test_invoice_pdf_url, test_invoice_upload_payload,
+               test_uploaded_invoice_id, test_salla_invoice_kind, test_adopt_uploaded_invoice,
+               test_invoice_total_check_tolerance_zero,
+               test_cancel_action_credit_note_when_auto_invoicing]:
         fn()
         print(fn.__name__, "OK")
     print("all passed")

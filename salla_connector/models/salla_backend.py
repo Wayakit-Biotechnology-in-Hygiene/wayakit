@@ -136,7 +136,9 @@ class SallaBackend(models.Model):
         help="Endpoint to paste in the Salla app's webhook settings. Defaults to "
              "web.base.url + /sl/webhook, editable because on odoo.sh web.base.url often "
              "points at another build. Use the domain, and on a Cloudflare-fronted domain "
-             "add the Skip rule for /sl/webhook first (same trap as Trendyol).",
+             "add the Skip rule for /sl/webhook first (same trap as Trendyol). Its https "
+             "origin is also where Salla downloads the uploaded invoice PDFs "
+             "(/sl/invoice/...): the Skip rule must cover that path too.",
     )
     log_payloads = fields.Boolean(
         string="Log Full Webhook Payloads", groups=SECRET_GROUP,
@@ -181,6 +183,58 @@ class SallaBackend(models.Model):
         help="Sent with every status Odoo pushes (send_status_sms): Salla notifies the "
              "customer of the new status. On by default: customer messages come from "
              "Salla, not Odoo. Off = the status changes silently.")
+    # --- F5: invoices (proposal C: Odoo is the only ZATCA issuer), payments ---
+    # Opt-in: every invoice posted in INV goes to ZATCA for good, so a module upgrade
+    # must never start posting on its own. Switched on deliberately at go-live.
+    auto_invoice = fields.Boolean(
+        string="Invoice Confirmed Orders", default=False,
+        help="Create and post the customer invoice of every confirmed Salla order whose "
+             "total matches Salla's, register its payment, and turn a cancellation "
+             "before shipping into a credit note. Off = Accounting invoices by hand "
+             "(posted invoices of Salla orders are still uploaded to Salla).")
+    invoice_from = fields.Datetime(
+        string="Invoice Orders Confirmed From", default=fields.Datetime.now, copy=False,
+        help="UTC. The invoice cron only invoices hand-confirmed orders confirmed after "
+             "this (set when the backend, or this field, was created): an upgrade never "
+             "invoices older orders in bulk, each posted invoice goes to ZATCA for good.")
+    invoice_journal_id = fields.Many2one(
+        "account.journal", string="Invoice Journal",
+        domain="[('type', '=', 'sale'), ('company_id', '=', company_id)]",
+        default=lambda self: self._default_invoice_journal(),
+        help="ZATCA-enabled sales journal the invoices are posted in (KSA: INV). Every "
+             "invoice posted here is reported to ZATCA and cannot be undone: never test "
+             "in the production database.")
+    salla_payments_journal_id = fields.Many2one(
+        "account.journal", string="Salla Payments Journal",
+        domain="[('type', 'in', ('bank', 'cash')), ('company_id', '=', company_id)]",
+        help="Payments by mada, credit card and Apple Pay (settled by Salla Payments).")
+    tabby_journal_id = fields.Many2one(
+        "account.journal", string="Tabby Journal",
+        domain="[('type', 'in', ('bank', 'cash')), ('company_id', '=', company_id)]")
+    tamara_journal_id = fields.Many2one(
+        "account.journal", string="Tamara Journal",
+        domain="[('type', 'in', ('bank', 'cash')), ('company_id', '=', company_id)]")
+    payment_method_overrides = fields.Text(
+        string="Payment Method Mapping",
+        help="Extra Salla payment method slugs, one \"slug = journal\" per line, journal "
+             "being salla_payments, tabby or tamara (e.g. \"stc_pay = salla_payments\"). "
+             "Known slugs (mada, credit_card, apple_pay, tabby_*, tamara_*) need no "
+             "line. An unknown method registers no payment and alerts Accounting. Cash on "
+             "delivery and bank transfers are never mapped, whatever this says.")
+    upload_invoices = fields.Boolean(
+        string="Upload Invoices to Salla", default=True,
+        help="Upload every posted invoice / credit note of a Salla order to Salla (the "
+             "customer gets it there; Odoo never emails it).")
+    require_zatca_before_upload = fields.Boolean(
+        string="Require ZATCA Acceptance Before Upload", default=True,
+        help="MUST stay on in production: only an invoice ZATCA accepted reaches the "
+             "customer. Turn it off only on staging, which cannot get ZATCA acceptance.")
+    accounting_alert_user_ids = fields.Many2many(
+        "res.users", "salla_backend_accounting_alert_user_rel", "backend_id", "user_id",
+        string="Accounting Alerts",
+        help="Get a To-Do activity when an invoice, payment, credit note or upload to "
+             "Salla needs a human. Empty = Notify on New Order users.",
+        domain=[("share", "=", False)])
     shipping_product_id = fields.Many2one(
         "product.product", domain="[('company_id', 'in', [company_id, False])]",
         string="Shipping Product",
@@ -216,6 +270,38 @@ class SallaBackend(models.Model):
         return self.env["product.pricelist"].search(
             [("currency_id", "=", company.currency_id.id),
              ("company_id", "in", [company.id, False])], limit=1)
+
+    @api.model
+    def _default_invoice_journal(self):
+        Journal = self.env["account.journal"]
+        domain = [("type", "=", "sale"), ("company_id", "=", self.env.company.id)]
+        return Journal.search(domain + [("code", "=", "INV")], limit=1) \
+            or Journal.search(domain, limit=1)
+
+    def _payment_journal(self, key):
+        """Journal for a mapping.payment_journal_key() key, empty if not configured."""
+        self.ensure_one()
+        field = {"salla_payments": "salla_payments_journal_id", "tabby": "tabby_journal_id",
+                 "tamara": "tamara_journal_id"}.get(key)
+        return self[field] if field else self.env["account.journal"]
+
+    def _invoice_config_problem(self):
+        """Why this backend cannot invoice, or ""."""
+        self.ensure_one()
+        journal = self.invoice_journal_id
+        if not journal:
+            return _("no Invoice Journal on the Salla backend")
+        if journal.type != "sale" or journal.company_id != self.company_id:
+            return _("the Invoice Journal %s is not a sales journal of %s") % (
+                journal.display_name, self.company_id.name)
+        return ""
+
+    def _public_base_url(self):
+        """Origin Salla downloads the invoice PDFs from (mapping.public_base_url)."""
+        self.ensure_one()
+        return mapping.public_base_url(
+            self.webhook_url,
+            self.env["ir.config_parameter"].sudo().get_param("web.base.url", ""))
 
     @api.model
     def _default_webhook_url(self):
@@ -488,10 +574,16 @@ class SallaBackend(models.Model):
         return self._notify(_("Token valid until %s UTC.") % tokens["token_expires_at"])
 
     # ------------------------------------------------------------------ HTTP
-    def _request(self, method, path, params=None, payload=None):
+    def _request(self, method, path, params=None, payload=None, idempotent=True):
         """Bearer request. Retries 429 (Retry-After / X-RateLimit-Reset) and 5xx/network
         with backoff; refreshes the token proactively near expiry and once on a 401.
-        See the transaction rules above _set_token_cache before calling it."""
+        See the transaction rules above _set_token_cache before calling it.
+
+        idempotent=False (a POST that creates something, e.g. an invoice upload): only
+        what Salla certainly did not process is retried (401 refresh, 429, connect
+        timeout). A read timeout, any other network error or a 5xx raises at once
+        (SallaApiError, http_status None = transient): Salla may have created it, and
+        the caller must check before sending it again."""
         self.ensure_one()
         backend = self.sudo()  # tokens/URLs are system-only fields; never exposed here
         if not mapping.is_allowed_salla_url(backend.base_url):
@@ -525,6 +617,10 @@ class SallaBackend(models.Model):
                                         allow_redirects=False)
             except requests.RequestException as e:
                 last_err = type(e).__name__
+                if not idempotent and not isinstance(e, requests.ConnectTimeout):
+                    raise SallaApiError(_(
+                        "Salla did not answer %s (%s); it may have processed it.") % (
+                        path, last_err), None)
                 attempt += 1
                 if attempt < MAX_RETRIES:
                     time.sleep(mapping.retry_delay(None, {}, attempt - 1))
@@ -549,6 +645,9 @@ class SallaBackend(models.Model):
                 refreshed = True
                 continue
             delay = mapping.retry_delay(resp.status_code, resp.headers, attempt)
+            if delay is not None and not idempotent and resp.status_code != 429:
+                raise SallaApiError(_("Salla answered %s on %s; it may have processed "
+                                      "it.") % (resp.status_code, path), None)
             if delay is not None:
                 last_err = "HTTP %s" % resp.status_code
                 attempt += 1

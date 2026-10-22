@@ -1091,21 +1091,24 @@ def push_next_try(attempts, now, permanent=False):
     return now + timedelta(minutes=PUSH_RETRY_MINUTES[int(attempts) - 1])
 
 
-def cancel_action(order_state, out_picking_states, has_posted_invoice, already_handled=False):
+def cancel_action(order_state, out_picking_states, has_posted_invoice, already_handled=False,
+                  auto_credit_note=False):
     """What Odoo does when Salla says an order we have is cancelled/refunded/returned.
-    -> "none" | "cancel" | "alert_shipped" | "alert_invoiced"
+    -> "none" | "cancel" | "credit_note" | "alert_shipped" | "alert_invoiced"
 
     "none": handled before (repeated / reordered webhook) or already cancelled in Odoo.
     "alert_shipped": an outgoing picking is done, the goods left: nothing changes in
-    Odoo, Ops handles the return. "alert_invoiced": nothing shipped but a posted invoice
-    exists: cancelling needs a credit note (F5), a human does it. "cancel": cancel the
-    order and its open deliveries automatically."""
+    Odoo, Ops handles the return. Nothing shipped and a posted invoice not yet credited
+    (`has_posted_invoice`): "credit_note" (F5: full credit note, then cancel the order
+    and its open deliveries) when `auto_credit_note` (the backend auto-invoices), else
+    "alert_invoiced" (a human does it). "cancel": cancel the order and its open
+    deliveries automatically."""
     if already_handled or text(order_state) == "cancel":
         return "none"
     if any(text(s) == "done" for s in (out_picking_states or [])):
         return "alert_shipped"
     if has_posted_invoice:
-        return "alert_invoiced"
+        return "credit_note" if auto_credit_note else "alert_invoiced"
     return "cancel"
 
 
@@ -1500,3 +1503,220 @@ def pick_partner(candidates, ref=""):
     pool.sort(key=lambda c: (not (ref and clean_id(c.get("salla_customer_id")) == ref),
                              not c.get("active", True), bool(c.get("parent_id")), c["id"]))
     return pool[0]["id"], len(pool)
+
+
+# ================================================================== F5: invoices, payments
+# Proposal C (team meeting 2026-10-22): Odoo is the only ZATCA issuer. It invoices the
+# confirmed Salla order, registers the payment in the journal of the provider that
+# collected it, and uploads the ZATCA-accepted PDF to Salla (POST /orders/invoices,
+# validated on the demo store 2026-10-22). Payment method slugs are from the docs and
+# NOT yet seen on a real paid order: unknown -> no payment + alert, never a guess.
+PAYMENT_JOURNAL_KEYS = ("salla_payments", "tabby", "tamara")
+# Salla Payments (mada, Visa/Mastercard, Apple Pay): settled by Salla every 48 h.
+SALLA_PAYMENTS_METHODS = {"mada", "credit_card", "creditcard", "card", "bank_card",
+                          "debit_card", "visa", "mastercard", "master_card", "apple_pay",
+                          "applepay"}
+# Tabby/Tamara settle on their own accounts. Matched as a substring: the docs show
+# tabby_installment / tamara_installment, and a pay-later variant must not fall
+# through to "unknown".
+_BNPL_MARKERS = (("tabby", "tabby"), ("tamara", "tamara"))
+TAX_INVOICE = "tax_invoice"
+CREDIT_NOTE = "credit_note"
+# GET /orders/invoices `slug`: 1 = tax invoice, 2 = credit note (demo store).
+_INVOICE_SLUGS = {"1": TAX_INVOICE, "2": CREDIT_NOTE}
+# Salla refuses an invoice while the order waits for review (422 "the order status does
+# not allow creating an invoice now", demo 2026-10-22): moved to in_progress first.
+# Only these: every other status is either already past it (never moved back) or not
+# paid (payment_pending must never be marked as being prepared).
+PRE_UPLOAD_STATUSES = {"under_review"}
+IN_PROGRESS_STATUS = "in_progress"
+INVOICE_PDF_ROUTE = "/sl/invoice"
+_FILENAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def parse_method_overrides(value):
+    """Backend "Payment Method Mapping" text -> ({slug: journal key}, [bad entries]).
+
+    One "slug = key" per line (commas work too), key in PAYMENT_JOURNAL_KEYS, e.g.
+    "stc_pay = salla_payments". Lets Accounting map a slug seen on a real order without a
+    code change. Bad entries are returned, not raised: the caller reports them."""
+    mapping_, bad = {}, []
+    for raw in re.split(r"[\n,;]+", text(value)):
+        entry = raw.strip()
+        if not entry:
+            continue
+        slug, sep, key = entry.partition("=")
+        if not sep:
+            slug, sep, key = entry.partition(":")
+        slug, key = _canon_status(slug.strip()), _canon_status(key.strip())
+        if not sep or not slug or key not in PAYMENT_JOURNAL_KEYS:
+            bad.append(entry[:60])
+            continue
+        mapping_[slug] = key
+    return mapping_, bad
+
+
+def payment_journal_key(method, overrides=None):
+    """Salla payment method slug -> "salla_payments" | "tabby" | "tamara" | "".
+
+    "" = unknown, empty, cash on delivery or a bank transfer: no payment is registered,
+    Accounting is alerted. COD and transfers stay "" even if the backend mapping names
+    them: their money is not collected by a provider when the order is confirmed. Then
+    the backend override, then the known slugs."""
+    slug = _canon_status(method)
+    if not slug or is_cod(slug) or is_bank_transfer(slug):
+        return ""
+    override = (overrides or {}).get(slug)
+    if override in PAYMENT_JOURNAL_KEYS:
+        return override
+    if slug in SALLA_PAYMENTS_METHODS:
+        return "salla_payments"
+    for marker, key in _BNPL_MARKERS:
+        if marker in slug:
+            return key
+    return ""
+
+
+def should_auto_invoice(order_state, total_mismatch, invoice_status, has_invoice,
+                        auto_invoice=True, failed_before=False):
+    """Whether Odoo invoices a Salla order by itself: a confirmed sale ("sale"), its
+    total equal to Salla's, something to invoice, no invoice yet (draft included: a
+    draft left for Accounting is theirs), and no earlier automatic attempt that
+    failed (Accounting got the alert; retrying every 30 min would only repeat it)."""
+    return bool(auto_invoice) and text(order_state) == "sale" and not total_mismatch \
+        and text(invoice_status) == "to invoice" and not has_invoice and not failed_before
+
+
+def upload_kind(move_type):
+    """account.move type -> Salla invoice type, "" for anything Salla does not take."""
+    return {"out_invoice": TAX_INVOICE, "out_refund": CREDIT_NOTE}.get(text(move_type), "")
+
+
+def upload_decision(move_type, move_state, edi_state, require_zatca, salla_invoice_id="",
+                    edi_error=False, origin_state="done", cancelled_before_upload=False):
+    """Whether a Salla order's invoice / credit note goes to Salla now.
+    -> "upload" | "wait" | "skip" | "no_zatca" | "zatca_error" | "origin_failed"
+
+    "skip": never (not a customer invoice/credit note, not posted, or ALREADY uploaded:
+    Salla accepts the same order's tax invoice twice, so the stored id is the guard).
+    A tax invoice never uploaded whose order Salla cancelled and that a credit note
+    already reverses (`cancelled_before_upload`) is skipped too: the customer never got
+    it, and Salla may refuse a cancelled order's invoice; its credit note then skips as
+    well (origin "skipped"). ZATCA has both either way.
+    With `require_zatca`: edi_state "sent" (account_edi: every web-service document
+    accepted) is required; "to_send" waits, or "zatca_error" when a document is
+    blocked in error (`edi_error`); no EDI at all (edi_state empty: a journal without
+    ZATCA) is "no_zatca", it would wait forever otherwise. Credit notes follow their
+    invoice: `origin_state` = upload state of the invoice it credits ("done" uploads,
+    "pending" waits, "failed" -> "origin_failed": waits too but the caller alerts once,
+    anything else = no uploaded invoice -> "skip")."""
+    kind = upload_kind(move_type)
+    if not kind or text(move_state) != "posted" or clean_id(salla_invoice_id):
+        return "skip"
+    if kind == TAX_INVOICE and cancelled_before_upload:
+        return "skip"
+    if require_zatca:
+        edi = text(edi_state)
+        if edi in ("cancelled", "to_cancel"):
+            return "skip"
+        if edi == "to_send":
+            return "zatca_error" if edi_error else "wait"
+        if edi != "sent":
+            return "no_zatca"
+    if kind == CREDIT_NOTE:
+        origin = text(origin_state)
+        if origin == "pending":
+            return "wait"
+        if origin == "failed":
+            return "origin_failed"
+        if origin != "done":
+            return "skip"
+    return "upload"
+
+
+def status_before_upload(kind, salla_status):
+    """The status Salla must be set to before a tax invoice upload, "" for none. Only
+    forward from a pre-processing status; credit notes never move the order."""
+    if kind == TAX_INVOICE and _canon_status(salla_status) in PRE_UPLOAD_STATUSES:
+        return IN_PROGRESS_STATUS
+    return ""
+
+
+def pdf_filename(name):
+    """Move name -> a URL-safe file name ending in .pdf ("INV/2026/00012" ->
+    "INV_2026_00012.pdf"). Salla checks the URL looks like a PDF."""
+    base = _FILENAME_UNSAFE_RE.sub("_", text(name)).strip("_")[:80]
+    return "%s.pdf" % (base or "invoice")
+
+
+def public_base_url(webhook_url, fallback=""):
+    """https://host[:port] Salla can reach: the webhook URL's origin (on odoo.sh
+    web.base.url often names another build, webhook_url is kept right by hand), else
+    `fallback` (web.base.url). "" when neither is an https URL with a host."""
+    for candidate in (webhook_url, fallback):
+        try:
+            parts = urlsplit(text(candidate))
+        except ValueError:
+            continue
+        if parts.scheme == "https" and parts.hostname and not parts.username \
+                and not parts.password:
+            return "https://%s" % parts.netloc.lower()
+    return ""
+
+
+def invoice_pdf_url(base_url, move_id, token, name):
+    """Public PDF URL of a move (controller route INVOICE_PDF_ROUTE). "" without a base,
+    an id or a token."""
+    if not base_url or not move_id or not text(token):
+        return ""
+    return "%s%s/%s/%s/%s" % (base_url.rstrip("/"), INVOICE_PDF_ROUTE, int(move_id),
+                              text(token), pdf_filename(name))
+
+
+def invoice_upload_payload(order_id, kind, url):
+    """Body of POST /orders/invoices. order_id as an int (the docs type it so)."""
+    oid = clean_id(order_id)
+    return {"order_id": int(oid) if oid.isdigit() else oid, "type": kind,
+            "data_type": "url", "url": url}
+
+
+def uploaded_invoice_id(response):
+    """Salla invoice id from the POST answer {"data": {"id": ...}}, "" if absent."""
+    data = response.get("data") if isinstance(response, dict) else None
+    return clean_id(data.get("id")) if isinstance(data, dict) else ""
+
+
+def salla_invoice_kind(entry):
+    """TAX_INVOICE / CREDIT_NOTE of a GET /orders/invoices entry, "" if unreadable."""
+    if not isinstance(entry, dict):
+        return ""
+    kind = _INVOICE_SLUGS.get(text(entry.get("slug")))
+    if kind:
+        return kind
+    label = _canon_status(entry.get("type"))
+    if "credit" in label:
+        return CREDIT_NOTE
+    if "tax" in label or label == "invoice":
+        return TAX_INVOICE
+    return ""
+
+
+def adopt_uploaded_invoice(salla_invoices, kind, known_ids):
+    """Before a POST: an invoice of `kind` Salla already holds that came from an upload
+    Odoo never recorded (the POST succeeded, the commit did not). Returns its id, or ""
+    = upload. The caller only asks for a move that already attempted a POST (marker
+    committed before it): a move that never posted cannot have been lost, and must not
+    take another move's (or a hand-uploaded) document. Uploaded documents carry no invoice_number (demo 2026-10-22); Salla's own
+    invoices (store in "Salla" invoicing mode) do, and are never adopted. Ids already on
+    another Odoo move (`known_ids`) are skipped. Highest id = newest."""
+    known = {clean_id(k) for k in (known_ids or []) if clean_id(k)}
+    found = []
+    for entry in salla_invoices or []:
+        if salla_invoice_kind(entry) != kind or clean_id(entry.get("invoice_number")):
+            continue
+        sid = clean_id(entry.get("id"))
+        if sid and sid not in known:
+            found.append(sid)
+    if not found:
+        return ""
+    return max(found, key=lambda s: (s.isdigit(), int(s) if s.isdigit() else 0, s))

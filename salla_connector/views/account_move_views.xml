@@ -1,0 +1,47 @@
+<odoo>
+    <data>
+        <record id="account_move_salla_form" model="ir.ui.view">
+            <field name="name">account.move.salla.form</field>
+            <field name="model">account.move</field>
+            <field name="inherit_id" ref="account.view_move_form"/>
+            <field name="arch" type="xml">
+                <!-- Retry after a failed upload. Accounting only, re-checked in Python;
+                     it only queues the upload: the cron is the single uploader. -->
+                <xpath expr="//header" position="inside">
+                    <button name="action_salla_upload_invoice" type="object" string="Upload Invoice to Salla"
+                            groups="account.group_account_invoice"
+                            invisible="not salla_sale_order_id or salla_invoice_id or state != 'posted' or salla_upload_state == 'pending'"/>
+                </xpath>
+                <xpath expr="//page[@id='other_tab']//group[@name='sale_info_group']" position="after">
+                    <group string="Salla" name="salla_group" invisible="not salla_sale_order_id">
+                        <field name="salla_sale_order_id" readonly="1"/>
+                        <field name="salla_upload_state" readonly="1"/>
+                        <field name="salla_invoice_id" readonly="1" invisible="not salla_invoice_id"/>
+                        <field name="salla_invoice_url" readonly="1" widget="url" invisible="not salla_invoice_url"/>
+                        <field name="salla_upload_attempts" readonly="1" invisible="not salla_upload_attempts"/>
+                        <field name="salla_upload_next_try" readonly="1" invisible="salla_upload_state != 'pending'"/>
+                        <field name="salla_upload_error" readonly="1" invisible="not salla_upload_error"/>
+                        <field name="salla_payment_alerted" readonly="1" invisible="not salla_payment_alerted"/>
+                    </group>
+                </xpath>
+            </field>
+        </record>
+
+        <record id="account_move_salla_search" model="ir.ui.view">
+            <field name="name">account.move.salla.search</field>
+            <field name="model">account.move</field>
+            <field name="inherit_id" ref="account.view_account_invoice_filter"/>
+            <field name="arch" type="xml">
+                <xpath expr="//search" position="inside">
+                    <separator/>
+                    <filter name="salla_invoices" string="Salla Invoices"
+                            domain="[('salla_sale_order_id', '!=', False)]"/>
+                    <filter name="salla_upload_failed" string="Salla Upload Failed"
+                            domain="[('salla_upload_state', '=', 'failed')]"/>
+                    <filter name="salla_upload_pending" string="Salla Upload Pending"
+                            domain="[('salla_upload_state', '=', 'pending')]"/>
+                </xpath>
+            </field>
+        </record>
+    </data>
+</odoo>

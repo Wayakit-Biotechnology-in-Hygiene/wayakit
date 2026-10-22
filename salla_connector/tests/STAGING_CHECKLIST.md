@@ -1,4 +1,4 @@
-# salla_connector: staging checklist (odoo.sh `mainTest` build): F1 (A-I), F2a (J-N), F2b (O), F2a post-meeting (P), F3 (Q)
+# salla_connector: staging checklist (odoo.sh `mainTest` build): F1 (A-I), F2a (J-N), F2b (O), F2a post-meeting (P), F3 (Q), F5 (R)
 
 Manual run by a human on the odoo.sh staging build. There is no local Odoo.
 Run the standalone suite first: `python3 salla_connector/tests/test_mapping.py` must end in `all passed`.
@@ -674,3 +674,201 @@ B="$(cancel_body)"; post "$B" "$(sig "$B")"        # same body again: also ok:qu
 124. **Auto-cancel failure** (optional): if any cancel raises (e.g. a WH/OUT locked by another module), the order stays as it was, activity **"Salla: automatic cancellation failed"**, and the queue row is not stuck in error.
 125. **Delivered / completed do nothing else.** Set the step-108 order to **delivered** then **completed** in Salla: only `salla_status` changes; the order is **not** locked (lines still editable by a salesman), no push, no activity.
 126. Clean-up: backend **Base URL** back to the default (step 114), **Ops Alerts** = what prod will use is set **on production by Mafer**, not here; **Log Full Webhook Payloads** off. Record in the ticket: Salla order ids, statuses and HTTP codes only.
+
+## R. F5: invoices, payments, credit notes, upload to Salla (v17.0.4.0.0)
+
+**STAGING ONLY.** Never post a test invoice or credit note on the production database: every posting in INV is reported to ZATCA and cannot be undone. Never put a move's access token, a full PDF URL, customer data or a journal's bank details in the ticket or a chat. The helpers below print status codes and field values only, never the URL or the token.
+
+Odoo shell helpers (paste after the ones at the top of this file; `BID` = the backend id):
+```python
+import requests
+from odoo.addons.salla_connector.models import mapping
+UA = "Mozilla/5.0 (X11; Linux x86_64) SallaStagingCheck"
+b = env["salla.backend"].browse(BID)
+ORDER_ID = "<Salla order id of the demo order under test>"   # set again for each order
+def so(salla_id):
+    return env["sale.order"].search([("salla_order_id", "=", str(salla_id))])
+def moves(salla_id):  # committed state of the order's invoices / credit notes
+    with reg.cursor() as cr:
+        o = api.Environment(cr, SUPERUSER_ID, {})["sale.order"].search(
+            [("salla_order_id", "=", str(salla_id))])
+        ms = o.invoice_ids | o.invoice_ids.reversal_move_id
+        return [dict(id=m.id, name=m.name, type=m.move_type, state=m.state,
+                     edi=m.edi_state, total=m.amount_total, pay=m.payment_state,
+                     up=m.salla_upload_state, sid=m.salla_invoice_id,
+                     attempts=m.salla_upload_attempts, next_try=m.salla_upload_next_try,
+                     err=m.salla_upload_error, alerted=m.salla_upload_alerted,
+                     pay_alerted=m.salla_payment_alerted, posted_marker=m.salla_upload_posted)
+                for m in ms.sorted("id")]
+def pays(salla_id):   # payments on the order's invoices: (journal, amount, memo)
+    inv = so(salla_id).invoice_ids.filtered(lambda m: m.move_type == "out_invoice")
+    return [(p.journal_id.name, p.amount, p.ref) for p in inv._get_reconciled_payments()]
+def acts_move(move_id):
+    m = env["account.move"].browse(move_id)
+    return [(a.summary, a.user_id.login) for a in m.activity_ids]
+def run_inv():        # run the invoice/upload cron now, as the scheduler would
+    env.ref("salla_connector.ir_cron_salla_invoices").method_direct_trigger()
+    env.cr.commit()
+def salla_docs(salla_id):   # what Salla holds for the order: (id, slug, invoice_number, date)
+    res = b._request("GET", "/orders/invoices", params={"order_id": int(salla_id)}) or {}
+    return [(d.get("id"), d.get("slug"), d.get("invoice_number"), d.get("date"))
+            for d in (res.get("data") or []) if isinstance(d, dict)]
+def pdf_check(move_id, token=None, mid=None, name=None):
+    """GET the public PDF route from the server itself. Prints HTTP code, content type and
+    the first bytes only (never the URL or the token)."""
+    m = env["account.move"].browse(move_id)
+    url = mapping.invoice_pdf_url(b._public_base_url(), mid or m.id,
+                                  m.access_token if token is None else token,
+                                  m.name if name is None else name)
+    if not url:
+        return "no URL (empty base / id / token)"
+    r = requests.get(url, timeout=90, headers={"User-Agent": UA}, allow_redirects=False)
+    return r.status_code, r.headers.get("Content-Type"), r.content[:5]
+```
+
+### R.1 Build, ZATCA safety and configuration
+127. Build green; `salla_connector` upgrades to **17.0.4.0.0** with no error in the build log. Redo step 37 (Webhook URL in the Partners Portal for this build, reinstall the app on the demo store, Test Connection green). Check that the backend **Webhook URL** is the public **https** URL of this build: invoice PDF URLs are built from it.
+128. **ZATCA safety gate. Do this before ANY posting in this section.** In the shell: `env.company.l10n_sa_api_mode` and `env["res.company"].browse(1).l10n_sa_api_mode` must both be **`sandbox`** (odoo.sh neutralization sets it). If either one is `prod` or `preprod`, **STOP**: post nothing and write "R not run: ZATCA not neutralized" in the ticket.
+129. Accounting > Configuration > Journals (staging, by hand): create three **Bank** journals, **Salla Payments**, **Tabby** and **Tamara**, for company 1 (codes e.g. `SLP`, `TBY`, `TMR`). Each one needs an incoming payment method (the default "Manual" is enough).
+130. Backend form, new groups **Invoices / Upload to Salla / Payments**. Every field shows its help text. Expected defaults:
+    - **Invoice Confirmed Orders** **off** (default since review round 1).
+    - **Invoice Journal** = the KSA sales journal **INV**.
+    - **Invoice Orders Confirmed From** = about the creation/upgrade time.
+    - **Upload Invoices to Salla** on.
+    - **Require ZATCA Acceptance Before Upload** on. Its help says it **must stay on in production**.
+
+    Before turning it on, check once that with it **off** nothing is invoiced: import one **3 x P1** order, it confirms, `moves(ORDER_ID)` is empty after `run_inv()`. If you cancel it in Salla now (nothing shipped, no invoice) it is simply cancelled as in F3. Then turn **Invoice Confirmed Orders** **on**: with it off, R.2-R.6 do not apply, and a cancellation with a posted invoice only gives the F3 Ops alert **"Salla: cancelled, invoice posted"**.
+    Set the three payment journals and **Accounting Alerts** = your own user only (never Ismail, ghanimah or Hiba on staging). Then turn **Require ZATCA Acceptance Before Upload** **off** (staging cannot get ZATCA acceptance). Leave **Payment Method Mapping** empty.
+131. Settings > Technical > Scheduled Actions: **"Salla: Invoices and Upload"** exists, is active, runs every 30 min on model account.move.
+132. Salla demo dashboard: invoicing mode is still **Custom** (if it says "Salla", Salla issues its own invoice on shipping and the test is meaningless).
+
+### R.2 Confirmed order -> invoice posted + payment in the right journal
+Use **fresh** demo orders in this section: older demo orders may hold test uploads from 2026-10-22.
+133. Import a new demo order **3 x P1** with a **non-zero coupon** (e.g. TEST20) and paid shipping. It confirms (state sale). Within ~1 min, `moves(ORDER_ID)` shows exactly **one** `out_invoice`, state **posted**, in **INV**, with `total` == the Salla total to the cent (compare with `GET /orders/{id}` `amounts.total`). The invoice lines are 3 x P1 + discount + shipping, the same as the order. If it is **draft** instead: read the activity (**"Salla: invoice left in draft"** = total differs; **"Salla: invoice not posted"** = posting refused, e.g. ZATCA checks; no invoice at all: **"Salla: invoice not created"** / **"Salla: nothing to invoice"** on the order, which then shows **Salla Auto-Invoice Failed**). Write down which one happened and the order id, then continue with step 134 on another order.
+134. **Payment.** API orders on the demo store are COD (`tests/staging_api_orders.py`), and COD never registers a payment: expect an activity **"Salla: payment not registered"** saying the method `cod` is not mapped, `pay_alerted == True`, invoice still `not_paid`. Then simulate a card order on that same invoice, in the shell:
+    `o = so(ORDER_ID); o.salla_payment_method = "mada"; inv = o.invoice_ids[:1]; inv.salla_payment_alerted = False; env.cr.commit(); run_inv()`
+    Expected:
+    - `pays(ORDER_ID)` -> one payment in **Salla Payments** for the full total, memo = the Salla reference (`o.salla_reference`).
+    - Invoice `pay` = `in_payment` or `paid`.
+    - Run `run_inv()` again: still **one** payment.
+
+    Repeat on two more fresh orders with `"tabby_installment"` -> **Tabby** journal and `"Tamara-Installment"` -> **Tamara** journal. If the demo store can take a real card/Apple Pay test payment, prefer one real one and write down the slug Salla sent (`o.salla_payment_method`) in the ticket.
+135. **Unknown method + mapping.** Same simulation with `"stc_pay"`: no payment, one **"Salla: payment not registered"** activity, `run_inv()` twice -> still one activity. Then backend **Payment Method Mapping** = `stc_pay = salla_payments`, reset `inv.salla_payment_alerted = False; env.cr.commit(); run_inv()` -> payment in **Salla Payments**. Last, write `bank_transfer = salla_payments` in the mapping and simulate `"bank_transfer"` on another order: still **no** payment (COD and transfers are never mapped). Clear the mapping afterwards.
+136. **No invoice email (reviewer (d)).** On the invoice of step 133:
+    - The chatter has no "Invoice sent" / email message.
+    - Shell: `env["mail.mail"].search_count([("model","=","account.move"),("res_id","=",<invoice id>)])` == 0.
+    - `env["mail.message"].search_count([("model","=","account.move"),("res_id","=",<invoice id>),("message_type","=","email")])` == 0.
+
+    Same 0 for the sale order (`model = "sale.order"`). Write down only the counts.
+137. **Total mismatch never invoiced.** An order that came in as a quotation with **Salla Total Mismatch** (any from section K/N; else write "not run"): confirm it by hand, then `run_inv()`. Expected: **no** invoice (`moves()` empty), no activity. Accounting invoices it by hand if wanted: once posted, that invoice is uploaded like any other.
+138. **Confirmed by hand later -> invoiced by the cron sweep.** A Salla quotation **without** mismatch (e.g. a bank transfer kept as a quotation, step P; if none can be produced write "not run"): confirm it by hand. Within ~1 min or after `run_inv()`: one posted invoice as in step 133. An order confirmed **before** "Invoice Orders Confirmed From", or more than 14 days ago, is never invoiced by the cron.
+
+### R.3 Upload to Salla ("Require ZATCA" off on staging)
+139. **Under review -> in_progress -> upload.** Use the invoice of step 133 (the order still **under_review** in Salla; if it already moved, use a new order and leave it in under_review). After `run_inv()` (or ~1 min after posting):
+    - The **order** chatter has the note *order set to "in_progress" in Salla so the invoice can be uploaded*.
+    - `GET /orders/{id}` -> `status.slug == "in_progress"`.
+    - `moves()` shows the invoice with `up == "done"`, `sid` set, `posted_marker == True`, `attempts == 0`, `err` empty.
+    - The invoice chatter has *uploaded to Salla as tax_invoice (Salla id ...)*.
+    - `salla_docs(ORDER_ID)` lists exactly **one** entry with slug 1 and that id.
+    - In the Salla dashboard, the order shows the invoice. Open the **Salla Invoice File** link on the invoice (Salla's CDN copy): it is Odoo's invoice PDF with the right number and total. Write down whether the **ZATCA QR** is visible (on staging it may be missing or a placeholder: the journal's production CSID is neutralized). A rendering error instead of a PDF is a bug: report it to the developer.
+140. **Never moves Salla backwards.** Take an order already **shipped** or **delivering** in Salla (from section Q, with an invoice posted now via step 138, or invoice it by hand). After the upload, Salla's status is unchanged (no in_progress note on the order). Credit notes never change the Salla status.
+141. **Repeated cron, never a second upload.** `run_inv()` three times, then wait for one scheduled run. Expected:
+    - `salla_docs(ORDER_ID)` still shows **one** tax invoice.
+    - `sid` is unchanged and there are no new chatter notes.
+    - The **Upload Invoice to Salla** button is hidden on the uploaded invoice. If you call it from the shell (`env["account.move"].browse(<id>).action_salla_upload_invoice()`), it raises *Already uploaded to Salla*.
+142. **Button vs cron race (reviewer (c)). Run this after step 148,** on its `failed` invoice with the Webhook URL already restored (instead of step 149's single press): press **Upload Invoice to Salla** and run `run_inv()` in the shell at the same moment. Expected: `salla_docs()` lists **one** tax invoice from Odoo (the button only queues; the cron is the only uploader).
+143. **Public PDF URL (`/sl/invoice/...`, reviewer).** In the shell, on the invoice of step 133 (`MID = <its id>`), with `OTHER = <id of another posted Salla invoice>`. All three bad cases must look identical (same 404, nothing about which check failed), and the build log must never contain the token.
+    - `pdf_check(MID)` -> `(200, 'application/pdf', b'%PDF-')`.
+    - `pdf_check(MID, token="0" * 36)` -> `404` (wrong but well-formed token).
+    - `pdf_check(MID, token=env["account.move"].browse(OTHER).access_token)` -> `404` (another move's valid token).
+    - `pdf_check(MID, mid=999999999)` -> `404` (unknown move).
+    - `pdf_check(MID, name="anything")` -> `200` (the file name is cosmetic).
+    - A posted invoice that is **not** from a Salla order (e.g. a website or manual one, staging only): `pdf_check(<its id>)` -> `404`, even with its own token. A **draft** Salla invoice -> `404`.
+    - In zsh, only a status check from your own machine: `curl -sS -o /dev/null -w '%{http_code}\n' -A "$UA" "$BUILD_URL/sl/invoice/1/fake-token/x.pdf"` -> `404`, where `export BUILD_URL="https://<maintest-build-host>"`. Do **not** put a real token on the command line.
+    - After the 200 call: `env["ir.attachment"].search_count([("res_model","=","account.move"),("res_id","=",MID)])` is the same before and after (a GET must not create attachments; write down both counts).
+
+### R.4 Cancellation and credit notes
+144. **Cancel before shipping, invoice already uploaded.** A new **3 x P2** order: imported, confirmed, invoiced and uploaded (as steps 133 and 139), WH/OUT ready but **not** validated. Cancel it in the Salla dashboard. Within ~1 min:
+    - `moves()` shows one `out_refund` **posted** that reverses the invoice in full (same total). Its reference/reason says *Order ... cancelled on Salla (canceled)*.
+    - The sale order is **cancel** and its WH/OUT is **cancel** (`picks(ORDER_ID)`).
+    - One activity **"Salla: refund to make by hand"** for your user, naming the payment method.
+    - After `run_inv()`, the credit note has `up == "done"` and `sid` set. `salla_docs()` = one slug 1 + one slug 2.
+    - Salla's status stays **canceled** (not moved to in_progress).
+145. **Repeated cancel webhook (reviewer (b)).** Replay the cancel twice (commands at the top of section Q, same `ORDER_ID`), process the queue and run `run_inv()`. Expected: still **one** credit note, one "refund to make by hand" activity, `salla_docs()` unchanged, no queue error.
+146. **Cancel before the invoice was uploaded (reviewer (a)).** A new **3 x P1** order. Before it is uploaded, archive **"Salla: Invoices and Upload"** (Active off) so the invoice stays `up == "pending"`. Cancel the order in Salla and let the queue process it. Then set the cron **Active again** and `run_inv()`. Expected:
+    - Exactly **one** credit note, posted; order and WH/OUT **cancel**.
+    - The invoice ends `up == "skipped"` with the note *is not uploaded to Salla: nothing the customer needs there*. The credit note also ends `skipped`.
+    - `salla_docs()` is **empty**.
+    - No activity **"Salla: upload on hold"**, nothing left `pending`.
+
+    Optionally (shell, write down the HTTP code + Salla's message only), check what Salla answers to an invoice POST on a cancelled order: `b._request("POST", "/orders/invoices", payload={"order_id": int(ORDER_ID), "type": "tax_invoice", "data_type": "url", "url": "https://pdfobject.com/pdf/sample.pdf"})`. If it answers 200, that order now has a sample document: do not reuse it.
+146a. **Accounting already has a DRAFT credit note (reviewer NIT 3).** Use a new **3 x P1** order, invoiced and uploaded, WH/OUT not validated. Accounting opens **Reverse** on the invoice and leaves the credit note in **draft**. Then cancel the order in Salla and let the queue process. Expected:
+    - Odoo creates **no** second credit note: `moves()` shows the invoice plus only the draft credit note, still **draft** and untouched.
+    - The order stays **sale** and its WH/OUT stays open (not cancelled).
+    - There is one Ops activity **"Salla: cancelled, invoice posted"**.
+    - Replaying the webhook (step 145 commands) adds no second activity.
+147. **Cancel after shipping: unchanged F3 behaviour.** An invoiced order with its WH/OUT **done**, cancelled in Salla:
+    - The order stays **sale**, there is **no** credit note, and the activity is **"Salla: cancelled after shipping"** (Ops).
+    - Then Accounting makes the return's credit note **by hand**: Reverse the invoice with a reason, partial (e.g. 2 of the 3 units) or full, and post it. Expected: it is queued (`up == "pending"`) and uploaded as **credit_note** after `run_inv()` (`salla_docs()` gains a slug 2).
+    - Repeat with a **second** partial credit note on the same invoice: both credit notes end with **different** `sid`s.
+
+### R.5 Failure, one alert, button retries
+148. **Bad public URL (Salla cannot read the PDF).** Backend **Webhook URL** = `https://example.invalid/sl/webhook` (staging only; Salla's webhooks keep going to the URL registered in the Partners Portal). Post the invoice of a new order (or press the button on a pending one) and `run_inv()`. Expected:
+    - Salla answers 422 (`url`), which is permanent, so on the first failure: `up == "failed"`, `attempts == 1`, `err` shows the HTTP code / Salla's field message, `alerted == True`. If `err` or the activity quotes the URL, the token part must show `***`. Check this in the UI; never copy the URL into the ticket.
+    - One activity **"Salla: invoice upload failed"** for your user.
+    - The invoice appears under the **Salla Upload Failed** filter.
+    - `run_inv()` twice more: still **one** activity, no new note.
+149. **Retry.** Restore **Webhook URL** = this build's public URL. Press **Upload Invoice to Salla** on the failed invoice: a notification says it was queued. Within ~1-2 min (or `run_inv()`): `up == "done"`, `sid` set, `err` empty, `salla_docs()` lists **one** tax invoice (no duplicate from the failed attempt, which Salla refused). The button disappears. Mark the activity done by hand. Check that a user **without** Accounting > Invoicing rights does not see the button, and that calling it as that user raises *Only Accounting can upload*.
+150. **Transient failure** (optional): with backend **Base URL** = `https://api.salla.dev/admin/v2/fake-broken` (404, permanent) the alert comes at once. A real 5xx/network retry (5 -> 30 -> 120 min, alert after the 4th failure) usually cannot be produced on staging: write "not run". Timing is covered by `test_push_next_try_bounded`. Restore the Base URL exactly.
+151. **ZATCA required (staging check of the gate only, nothing is uploaded).** Turn **Require ZATCA Acceptance Before Upload** back **on** and post a new order's invoice. Expected: the upload does **not** run. `up == "pending"` and `edi` == `to_send` or with an error. After `run_inv()` there is one activity **"Salla: upload on hold"**, and `salla_docs()` is empty. Turn it **off** again only if more uploads are needed, then leave it **on** at the end of this section.
+152. Clean-up and record:
+    - Backend Webhook URL and Base URL back to the build defaults.
+    - **Accounting Alerts** stays your user on staging; production users (Ismail / Accounting) are set **on production by Mafer**.
+    - **Require ZATCA Acceptance Before Upload** is **on**.
+    - **Log Full Webhook Payloads** is off.
+    - Record in the ticket: Salla order ids, Odoo move names, statuses, HTTP codes, the payment slugs seen, and whether the QR showed in Salla's copy (step 139). No tokens, URLs with tokens, customer data or bank details.
+153. **Before production go-live (Mafer, F7, no code):**
+    - Extend the Cloudflare Skip rule to `/sl/invoice/` (path starts with) next to `/sl/webhook`, **before** the first upload. Salla's PDF fetch must reach Odoo: a 403 HTML answer means Cloudflare blocked it, and Salla would answer 422 "url does not point to a valid PDF".
+    - Create the three journals and set them on the production backend.
+    - Keep **Require ZATCA Acceptance Before Upload** on.
+    - Check **Invoice Orders Confirmed From** = the cut-over time, so no older order gets invoiced in INV.
+
+### R.6 Reviewer blockers (run after R.1-R.5, staging only)
+154. **Lost answer, no duplicate POST (BLOCKER 1).** In the odoo.sh shell (this patch lives only in that shell process; `run_inv()` runs in the same process):
+    ```python
+    import requests as _rq
+    from odoo import fields
+    _real = _rq.request
+    CALLS = []
+    def _flaky(method, url, *a, **kw):
+        resp = _real(method, url, *a, **kw)          # Salla really receives it
+        if method.upper() == "POST" and url.rstrip("/").endswith("/orders/invoices"):
+            CALLS.append(resp.status_code)
+            if len(CALLS) == 1:
+                raise _rq.ReadTimeout("staging fake timeout after Salla accepted")
+        return resp
+    _rq.request = _flaky
+    ```
+    1. Import + confirm a new **3 x P1** order with "Require ZATCA" off. Keep the cron archived until the invoice is posted, then `run_inv()` **once**. Expected:
+       - `CALLS` has exactly **one** entry: the invoice POST is never resent within one call.
+       - `moves()`: the invoice has `up == "pending"`, `attempts == 1`, `posted_marker == True`, `sid` empty.
+       - `salla_docs(ORDER_ID)` already shows **one** slug-1 entry, the one Salla created.
+    2. Make it due: `m = env["account.move"].browse(<id>); m.salla_upload_next_try = fields.Datetime.now(); env.cr.commit(); run_inv()`. Expected:
+       - `CALLS` still has **one** entry: no new POST.
+       - The invoice is `up == "done"` and `sid` = the id from `salla_docs()`.
+       - The chatter has *was already on Salla (Salla id ..., an earlier upload whose answer was lost); not uploaded again*.
+       - `salla_docs()` lists exactly **one** tax invoice.
+    3. Restore: `_rq.request = _real`. Exit the shell afterwards.
+155. **Invoicing never undoes the import (BLOCKER 2).**
+    - **Variant A** (needs an order whose payment method maps to a journal, e.g. a real demo card payment). Point **Salla Payments Journal** to a staging bank journal whose incoming payment methods were removed. Import the paid order. Expected:
+      - The sale order is created and **confirmed**, and the invoice is **posted**.
+      - There is one activity **"Salla: payment not registered"** (no incoming payment method).
+      - The queue row is **gone**: not failed, no retry, no error.
+    - **Variant B** (always possible). Settings > Technical > Automation Rules (staging only; it disappears on the next build anyway): create a rule on **Journal Entry**, trigger **On creation**, filter Journal = INV, action **Execute Code** `raise UserError("staging fake invoice failure")`. Import a new **3 x P1** order with a coupon. Expected:
+      - The sale order is created and **confirmed**.
+      - There is no invoice, and the order shows **Salla Auto-Invoice Failed**.
+      - There is one activity **"Salla: invoice not created"** with the fake message. If the failure escapes that path, the order instead has the note *automatic invoicing failed unexpectedly*: also acceptable, as long as the order stays confirmed. Write down which one happened.
+      - The queue row is **gone** and the order is not imported twice.
+      - `run_inv()` twice: no new invoice attempt, no second activity.
+    - **Delete the automation rule** right after, and restore the Salla Payments Journal.
+

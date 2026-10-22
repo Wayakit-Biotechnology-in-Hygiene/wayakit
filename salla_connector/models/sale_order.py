@@ -20,6 +20,10 @@ PUSH_BATCH = 30               # orders per push cron run; it re-triggers itself 
 # Safety net for a validation whose push was never marked (the picking hook only logs):
 # the cron re-checks orders with a delivery done this recently and nothing pushed.
 PUSH_SWEEP_WINDOW = timedelta(days=2)
+# F5: orders confirmed by hand (mismatch fixed, bank transfer checked) are invoiced by the
+# invoice cron when confirmed this recently. Bounded so a first run never invoices old
+# orders in bulk (each posted invoice goes to ZATCA and cannot be undone).
+INVOICE_SWEEP_WINDOW = timedelta(days=14)
 
 
 class SaleOrder(models.Model):
@@ -62,6 +66,11 @@ class SaleOrder(models.Model):
         string="Salla Push Failure Alerted", readonly=True, copy=False,
         help="Ops already got the activity for this failure; reset on the next attempt "
              "cycle (a new validation or the button).")
+    salla_invoice_failed = fields.Boolean(
+        string="Salla Auto-Invoice Failed", readonly=True, copy=False,
+        help="Odoo could not create the invoice automatically and Accounting was alerted. "
+             "The invoice cron no longer retries it: invoice the order by hand (it is "
+             "then uploaded to Salla as usual).")
     salla_total = fields.Monetary(string="Salla Total", readonly=True, copy=False,
                                   currency_field="currency_id")
     salla_total_mismatch = fields.Boolean(
@@ -607,7 +616,27 @@ class SaleOrder(models.Model):
                 "remove the extra line.") % {"a": mapping.fmt_money(total_before),
                                               "b": mapping.fmt_money(self.amount_total),
                                               "c": mapping.fmt_money(self.salla_total)})
+            return True
+        # F5: right after the confirmation, never inside it.
+        self._salla_auto_invoice_safe()
         return True
+
+    def _salla_auto_invoice_safe(self):
+        """_salla_auto_invoice in a savepoint with a catch-all: it runs inside the import
+        (anything escaping would roll back the paid order) and in the cron sweep. A crash
+        marks the order salla_invoice_failed (no endless retries) and leaves a note."""
+        self.ensure_one()
+        try:
+            with self.env.cr.savepoint():
+                return self._salla_auto_invoice()
+        except Exception as e:
+            _logger.warning("Salla order %s (%s): automatic invoicing crashed (%s)",
+                            self.salla_order_id, self.name, type(e).__name__, exc_info=True)
+            self.salla_invoice_failed = True
+            self.message_post(body=_(
+                "Salla: automatic invoicing failed unexpectedly (%s). The order is confirmed; "
+                "invoice it by hand.") % type(e).__name__, subtype_xmlid="mail.mt_note")
+            return "failed"
 
     def _salla_apply_status(self, status):
         """Status of an order we already have (queue, reconcile or push cron). Only
@@ -641,55 +670,29 @@ class SaleOrder(models.Model):
 
     def _salla_handle_cancel(self, status):
         """Salla cancelled / refunded / returned the order (Ops, 2026-10-21): nothing
-        shipped -> cancel the order and its open deliveries here too; shipped (or a
-        posted invoice, or the cancel fails) -> change nothing, Ops gets an activity.
-        Once per order (salla_alerted_status): "canceled" then "restored", or the same
-        webhook three times, act once. Refunds are made by hand in the payment gateway."""
+        shipped -> cancel the order and its open deliveries here too, after a full credit
+        note when the invoice is posted (F5, backend auto-invoicing on); shipped (or the
+        cancel / credit note fails) -> change nothing, Ops gets an activity. Once per
+        order (salla_alerted_status): "canceled" then "restored", or the same webhook
+        three times, act once. Refunds are made by hand in the payment gateway."""
         self.ensure_one()
+        to_credit, drafted = self._salla_open_invoices()
         action = mapping.cancel_action(
-            self.state, self._salla_out_pickings().mapped("state"),
-            bool(self.sudo().invoice_ids.filtered(lambda m: m.state == "posted")),
-            already_handled=mapping.is_cancel_status(self.salla_alerted_status))
+            self.state, self._salla_out_pickings().mapped("state"), bool(to_credit),
+            already_handled=mapping.is_cancel_status(self.salla_alerted_status),
+            auto_credit_note=self.salla_backend_id.auto_invoice and not drafted)
         if action == "none":
             if not self.salla_alerted_status:
                 self.salla_alerted_status = status
             return action
         self.salla_alerted_status = status
-        if action == "cancel":
-            # Stock picked/packed by an internal step stays where it was put: a cancel
-            # only cancels the moves that are not done yet.
-            picked = self.sudo().picking_ids.filtered(
-                lambda p: p.state == "done" and p.picking_type_code != "outgoing")
-            try:
-                with self.env.cr.savepoint():
-                    # _action_cancel, not action_cancel: the latter can return a wizard
-                    # (draft invoices) or refuse a locked order, neither of which a cron
-                    # can answer. It cancels the open pickings and draft invoices.
-                    self.with_context(mail_notify_force_send=False)._action_cancel()
-                    if self.state != "cancel":
-                        raise UserError(_("the order is still in state %s") % self.state)
-            except Exception as e:
-                _logger.warning("Salla order %s (%s): automatic cancellation failed",
-                                self.salla_order_id, self.name, exc_info=True)
-                self._salla_ops_alert(_("Salla: automatic cancellation failed"), _(
-                    "Salla: the order is now \"%(s)s\" and nothing was shipped, but Odoo "
-                    "could not cancel it automatically (%(e)s). Cancel the order and its "
-                    "delivery by hand. Any refund is made in the payment gateway.") % {
-                        "s": status, "e": str(e)[:300]})
+        if action == "credit_note":
+            refunds = self._salla_credit_note(to_credit, status)
+            if not refunds:
                 return "failed"
-            _logger.info("Salla order %s (%s): cancelled in Odoo after Salla status %s",
-                         self.salla_order_id, self.name, status)
-            extra = ""
-            if picked:
-                extra += _(" Already picked/packed (%s): put that stock back.") % \
-                    ", ".join(picked.mapped("name"))
-            if "mrp_production_count" in self._fields and self.sudo().mrp_production_count:
-                extra += _(" Check the related manufacturing orders.")
-            self._salla_alert(_(
-                "Salla: the order is now \"%s\" and nothing was shipped, so Odoo cancelled "
-                "it and its open deliveries. Any refund is made in the payment gateway.")
-                % status + extra)
-            return action
+            return action if self._salla_cancel_now(status, credited=refunds) else "failed"
+        if action == "cancel":
+            return action if self._salla_cancel_now(status) else "failed"
         if action == "alert_shipped":
             self._salla_ops_alert(_("Salla: cancelled after shipping"), _(
                 "Salla: the order is now \"%s\" but it was already shipped from Odoo. "
@@ -701,6 +704,49 @@ class SaleOrder(models.Model):
                 "invoice, so Odoo did not cancel it: cancel it by hand with a credit "
                 "note. Any refund is made in the payment gateway.") % status)
         return action
+
+    def _salla_cancel_now(self, status, credited=None):
+        """Cancel the order and its open deliveries (F3). -> True when cancelled.
+        `credited` = the credit notes just posted (F5), named in the note."""
+        self.ensure_one()
+        # Stock picked/packed by an internal step stays where it was put: a cancel
+        # only cancels the moves that are not done yet.
+        picked = self.sudo().picking_ids.filtered(
+            lambda p: p.state == "done" and p.picking_type_code != "outgoing")
+        try:
+            with self.env.cr.savepoint():
+                # _action_cancel, not action_cancel: the latter can return a wizard
+                # (draft invoices) or refuse a locked order, neither of which a cron
+                # can answer. It cancels the open pickings and draft invoices; posted
+                # invoices and credit notes are left as they are.
+                self.with_context(mail_notify_force_send=False)._action_cancel()
+                if self.state != "cancel":
+                    raise UserError(_("the order is still in state %s") % self.state)
+        except Exception as e:
+            _logger.warning("Salla order %s (%s): automatic cancellation failed",
+                            self.salla_order_id, self.name, exc_info=True)
+            self._salla_ops_alert(_("Salla: automatic cancellation failed"), _(
+                "Salla: the order is now \"%(s)s\" and nothing was shipped, but Odoo "
+                "could not cancel it automatically (%(e)s). Cancel the order and its "
+                "delivery by hand. Any refund is made in the payment gateway.") % {
+                    "s": status, "e": str(e)[:300]})
+            return False
+        _logger.info("Salla order %s (%s): cancelled in Odoo after Salla status %s",
+                     self.salla_order_id, self.name, status)
+        extra = ""
+        if credited:
+            extra += _(" Credit note %s posted for the whole invoice.") % ", ".join(
+                credited.mapped("name"))
+        if picked:
+            extra += _(" Already picked/packed (%s): put that stock back.") % \
+                ", ".join(picked.mapped("name"))
+        if "mrp_production_count" in self._fields and self.sudo().mrp_production_count:
+            extra += _(" Check the related manufacturing orders.")
+        self._salla_alert(_(
+            "Salla: the order is now \"%s\" and nothing was shipped, so Odoo cancelled "
+            "it and its open deliveries. Any refund is made in the payment gateway.")
+            % status + extra)
+        return True
 
     def _salla_ops_alert(self, summary, body):
         """The chatter alert (notify users) plus a To-Do activity for each Ops alert
@@ -730,15 +776,16 @@ class SaleOrder(models.Model):
                 "the Salla backend's Ops Alerts.") % ", ".join(failed.mapped("name")),
                 subtype_xmlid="mail.mt_note")
 
-    def _salla_schedule_activities(self, users, summary, body):
-        """A To-Do per user, each in its own savepoint: one user who cannot be assigned
-        must not cost the others theirs, nor the caller its transaction. -> users that
-        failed."""
+    def _salla_schedule_activities(self, users, summary, body, record=None):
+        """A To-Do per user on `record` (default: the order), each in its own savepoint:
+        one user who cannot be assigned must not cost the others theirs, nor the caller
+        its transaction. -> users that failed."""
+        record = record or self
         failed = self.env["res.users"]
         for user in users:
             try:
                 with self.env.cr.savepoint():
-                    self.sudo().activity_schedule(
+                    record.sudo().activity_schedule(
                         "mail.mail_activity_data_todo", user_id=user.id,
                         summary=summary, note=body)
             except Exception:
@@ -746,6 +793,214 @@ class SaleOrder(models.Model):
                 _logger.warning("Salla order %s: activity for user %s not created",
                                 self.name, user.id, exc_info=True)
         return failed
+
+    # ------------------------------------------------------------- F5: invoices
+    def _salla_accounting_alert(self, summary, body, record=None):
+        """Accounting's version of _salla_ops_alert: a note on `record` (the invoice, or
+        the order by default) pinging the Accounting Alerts users and a To-Do for each
+        (Notify on New Order users when none is set, or when none could be assigned).
+        Also a plain note on the order when the record is an invoice, so whoever looks
+        at the order sees it. Never raises past a savepoint for the activities."""
+        self.ensure_one()
+        record = (record or self).sudo()
+        backend = self.salla_backend_id
+        users = backend.accounting_alert_user_ids or backend.notify_user_ids
+        try:
+            # The alert must not cost the caller its transaction (it often runs inside
+            # an order import); the activities below still try.
+            with self.env.cr.savepoint():
+                record.message_post(body=body, partner_ids=users.partner_id.ids,
+                                    subtype_xmlid="mail.mt_note")
+                if record._name != self._name:
+                    self.message_post(body=body, subtype_xmlid="mail.mt_note")
+        except Exception:
+            _logger.warning("Salla order %s: accounting alert note not posted: %s",
+                            self.name, summary, exc_info=True)
+        if not users:
+            _logger.warning("Salla order %s: no Accounting Alerts / Notify users on backend "
+                            "%s, no activity created: %s", self.name, backend.name, summary)
+            return
+        failed = self._salla_schedule_activities(users, summary, body, record=record)
+        if failed == users and backend.accounting_alert_user_ids and backend.notify_user_ids:
+            self._salla_schedule_activities(backend.notify_user_ids, summary, body,
+                                            record=record)
+        if failed:
+            record.message_post(body=_(
+                "Salla: the activity could not be assigned to %s. Check their access on "
+                "the Salla backend's Accounting Alerts.") % ", ".join(failed.mapped("name")),
+                subtype_xmlid="mail.mt_note")
+
+    def _salla_open_invoices(self):
+        """Posted customer invoices of the order that no POSTED credit note reverses yet:
+        what a cancellation must credit. -> (invoices, drafted): `drafted` = those of
+        them Accounting already has a draft credit note for (the cancel then only
+        alerts: _action_cancel would cancel that draft, and a second note must not be
+        made)."""
+        self.ensure_one()
+        Move = self.env["account.move"].sudo()
+        invoices = self.sudo().invoice_ids.filtered(
+            lambda m: m.move_type == "out_invoice" and m.state == "posted")
+        if not invoices:
+            return invoices, Move
+        refunds = Move.search([("reversed_entry_id", "in", invoices.ids),
+                               ("move_type", "=", "out_refund"), ("state", "!=", "cancel")])
+        open_ = invoices - refunds.filtered(lambda m: m.state == "posted").reversed_entry_id
+        return open_, open_ & refunds.filtered(lambda m: m.state == "draft").reversed_entry_id
+
+    def _salla_auto_invoice(self):
+        """Invoice a confirmed Salla order (proposal C): create the invoice in the
+        backend's ZATCA journal, check it against what the customer paid, post it and
+        register the payment. -> "posted" | "draft" | "failed" | "skip"
+
+        Each step in its own savepoint, after the confirmation: a failure never undoes
+        the confirmation, it leaves the order (or a draft invoice) for Accounting with an
+        alert. Posting raises when ZATCA's checks fail (account_edi _post): the invoice is
+        then kept as a draft. Never emails the invoice: the customer gets it on Salla."""
+        self.ensure_one()
+        backend = self.salla_backend_id
+        has_invoice = bool(self.sudo().invoice_ids.filtered(lambda m: m.state != "cancel"))
+        if not mapping.should_auto_invoice(self.state, self.salla_total_mismatch,
+                                           self.invoice_status, has_invoice,
+                                           backend.auto_invoice, self.salla_invoice_failed):
+            if mapping.should_auto_invoice(self.state, self.salla_total_mismatch,
+                                           "to invoice", has_invoice, backend.auto_invoice,
+                                           self.salla_invoice_failed):
+                # Everything allows it but Odoo sees nothing to invoice: a product
+                # invoiced on delivered quantities. Said once, never silent.
+                self.salla_invoice_failed = True
+                self._salla_accounting_alert(_("Salla: nothing to invoice"), _(
+                    "Salla: the order is confirmed and paid on Salla, but Odoo has nothing "
+                    "to invoice yet (invoice status \"%s\": a product is probably invoiced "
+                    "on delivered quantities). Invoice it by hand; it is then uploaded to "
+                    "Salla.") % self.invoice_status)
+            return "skip"
+        journal = backend.invoice_journal_id
+        problem = backend._invoice_config_problem()
+        invoice = self.env["account.move"]
+        if not problem:
+            try:
+                with self.env.cr.savepoint():
+                    if self.journal_id != journal:
+                        self.journal_id = journal
+                    moves = self.with_context(mail_notify_force_send=False)._create_invoices()
+                    if len(moves) != 1 or moves.move_type != "out_invoice":
+                        raise UserError(_("expected one invoice, got %s") % len(moves))
+                    invoice = moves
+            except Exception as e:
+                _logger.warning("Salla order %s (%s): invoice not created",
+                                self.salla_order_id, self.name, exc_info=True)
+                problem = str(e)[:300]
+        if problem:
+            self.salla_invoice_failed = True
+            self._salla_accounting_alert(_("Salla: invoice not created"), _(
+                "Salla: Odoo could not create the invoice of this order (%s). Nothing was "
+                "posted. Create the invoice by hand: once posted it is uploaded to Salla "
+                "as usual.") % problem)
+            return "failed"
+        verdict, diff = mapping.total_check(invoice.amount_total, self.salla_total, 0)
+        if verdict != "ok":
+            _logger.warning("Salla order %s (%s): invoice %s total %s vs Salla %s, left draft",
+                            self.salla_order_id, self.name, invoice.id,
+                            mapping.fmt_money(invoice.amount_total),
+                            mapping.fmt_money(self.salla_total))
+            self._salla_accounting_alert(_("Salla: invoice left in draft"), _(
+                "Salla: the invoice total %(i)s differs from what the customer paid on "
+                "Salla (%(s)s), so it was NOT posted. Correct it and post it by hand (it "
+                "is then uploaded to Salla).") % {
+                    "i": mapping.fmt_money(invoice.amount_total),
+                    "s": mapping.fmt_money(self.salla_total)}, record=invoice)
+            return "draft"
+        try:
+            with self.env.cr.savepoint():
+                invoice.with_context(mail_notify_force_send=False).action_post()
+                if invoice.state != "posted":
+                    raise UserError(_("the invoice is still in state %s") % invoice.state)
+        except Exception as e:
+            _logger.warning("Salla order %s (%s): invoice %s not posted",
+                            self.salla_order_id, self.name, invoice.id, exc_info=True)
+            self._salla_accounting_alert(_("Salla: invoice not posted"), _(
+                "Salla: the invoice was created but could not be posted, it stays in "
+                "draft. Fix the cause and post it by hand (it is then uploaded to Salla "
+                "and its payment registered). Error: %s") % str(e)[:300], record=invoice)
+            return "draft"
+        _logger.info("Salla order %s (%s): invoice %s posted", self.salla_order_id,
+                     self.name, invoice.name)
+        try:
+            # Own savepoint: a payment problem must never take the posted invoice back.
+            with self.env.cr.savepoint():
+                invoice._salla_register_payment()
+        except Exception:
+            _logger.warning("Salla order %s (%s): payment registration crashed; the cron "
+                            "retries it", self.salla_order_id, self.name, exc_info=True)
+        return "posted"
+
+    @api.model
+    def _salla_invoice_sweep(self, now, limit):
+        """Invoice the Salla orders confirmed outside the import (by hand after a total
+        mismatch or a transfer check, or a confirmation retried by a status webhook that
+        failed to invoice inline). Orders that already have an invoice, failed before or
+        are not to invoice never match. -> orders processed."""
+        orders = self.search([
+            ("salla_order_id", "!=", False), ("salla_backend_id.active", "=", True),
+            ("salla_backend_id.auto_invoice", "=", True), ("state", "=", "sale"),
+            ("salla_total_mismatch", "=", False), ("salla_invoice_failed", "=", False),
+            ("invoice_status", "=", "to invoice"),
+            ("date_order", ">=", now - INVOICE_SWEEP_WINDOW)], order="id", limit=limit)
+        # date_order is the confirmation time once confirmed (sale's action_confirm).
+        return orders.filtered(lambda o: o.date_order >= (
+            o.salla_backend_id.invoice_from or now) and not o.invoice_ids.filtered(
+            lambda m: m.state != "cancel"))
+
+    def _salla_credit_note(self, invoices, status):
+        """Full credit note of each of `invoices` (posted, not yet reversed), posted.
+        Through Odoo's reversal wizard, as Accounting would do it: it carries the
+        reason that ZATCA requires on a Saudi credit note (l10n_sa_edi refuses a refund
+        without reason/origin) and keeps the sale order link. All or nothing in one
+        savepoint. -> the credit notes, or an empty recordset after alerting (Ops and
+        Accounting: the order is then NOT cancelled, nothing must ship)."""
+        self.ensure_one()
+        Move = self.env["account.move"].sudo()
+        refunds = Move
+        reason = _("Order %(ref)s cancelled on Salla (%(s)s)") % {
+            "ref": self.salla_reference or self.name, "s": status}
+        try:
+            with self.env.cr.savepoint():
+                for invoice in invoices.sudo():
+                    wizard = self.env["account.move.reversal"].sudo().with_context(
+                        active_model="account.move", active_ids=invoice.ids).create({
+                            "reason": reason,
+                            "journal_id": invoice.journal_id.id,
+                        })
+                    wizard.reverse_moves()
+                    refund = wizard.new_move_ids
+                    if len(refund) != 1:
+                        raise UserError(_("the reversal produced %s moves") % len(refund))
+                    refund.with_context(mail_notify_force_send=False).action_post()
+                    if refund.state != "posted":
+                        raise UserError(_("credit note still in state %s") % refund.state)
+                    refunds |= refund
+        except Exception as e:
+            _logger.warning("Salla order %s (%s): credit note failed", self.salla_order_id,
+                            self.name, exc_info=True)
+            body = _(
+                "Salla: the order is now \"%(s)s\" and nothing was shipped, but Odoo could "
+                "not create the credit note of its posted invoice (%(e)s). The order was NOT "
+                "cancelled: do not ship it. Accounting: issue the credit note by hand, then "
+                "cancel the order. Any refund is made in the payment gateway.") % {
+                    "s": status, "e": str(e)[:300]}
+            self._salla_ops_alert(_("Salla: cancelled, credit note failed"), body)
+            self._salla_accounting_alert(_("Salla: credit note failed"), body)
+            return Move
+        _logger.info("Salla order %s (%s): credit note(s) %s posted after Salla status %s",
+                     self.salla_order_id, self.name, refunds.mapped("name"), status)
+        methods = self.salla_payment_method or _("unknown")
+        self._salla_accounting_alert(_("Salla: refund to make by hand"), _(
+            "Salla: the order was cancelled on Salla before shipping. Credit note %(cn)s "
+            "was posted for the whole invoice and goes to Salla once ZATCA accepts it. "
+            "The refund itself must be made by hand in the payment gateway that collected "
+            "it (payment method \"%(m)s\"), then registered on the credit note.") % {
+                "cn": ", ".join(refunds.mapped("name")), "m": methods}, record=refunds[:1])
+        return refunds
 
     # ------------------------------------------------------------- F3: push status
     def _salla_ship_decision(self):

@@ -50,5 +50,20 @@
             <field name="interval_type">minutes</field>
             <field name="numbercall">-1</field>
         </record>
+
+        <!-- F5: invoices confirmed by hand, payments of hand-posted invoices, and the
+             upload of ZATCA-accepted invoices / credit notes to Salla. Woken by every
+             posting and by the "Upload Invoice to Salla" button; the 30 min interval
+             re-checks ZATCA acceptance and runs the retries (5 / 30 / 120 min). -->
+        <record id="ir_cron_salla_invoices" model="ir.cron">
+            <field name="name">Salla: Invoices and Upload</field>
+            <field name="model_id" ref="account.model_account_move"/>
+            <field name="state">code</field>
+            <field name="code">model.cron_salla_invoices()</field>
+            <field name="user_id" ref="base.user_root"/>
+            <field name="interval_number">30</field>
+            <field name="interval_type">minutes</field>
+            <field name="numbercall">-1</field>
+        </record>
     </data>
 </odoo>

@@ -2,7 +2,8 @@ import json
 import logging
 
 from odoo import http, SUPERUSER_ID
-from odoo.http import request
+from odoo.http import content_disposition, request
+from odoo.tools import consteq
 
 from ..models import mapping
 
@@ -83,3 +84,33 @@ class SallaWebhookController(http.Controller):
             _logger.exception("Salla webhook %s processing failed for backend %s",
                               event, backend.name)
             return request.make_response("error", status=500)
+
+    # F5: Salla downloads the invoice PDF from here when Odoo uploads it (POST
+    # /orders/invoices with data_type=url) and keeps its own copy on its CDN, so this only
+    # has to answer at upload time. "/sl/", never the marketplace name; on the prod domain
+    # it needs the same Cloudflare Skip rule as /sl/webhook. Token = the move's portal
+    # access token, created at posting (never here: a GET must not write). Every refusal
+    # is the same 404, and nothing here logs the token.
+    @http.route("/sl/invoice/<int:move_id>/<string:token>/<string:filename>", type="http",
+                auth="public", methods=["GET"], csrf=False)
+    def salla_invoice_pdf(self, move_id, token, filename, **kwargs):
+        move = request.env["account.move"].sudo().browse(move_id).exists()
+        if not move or not move.access_token or not token \
+                or not consteq(move.access_token, token) \
+                or move.state != "posted" \
+                or move.move_type not in ("out_invoice", "out_refund") \
+                or not move.salla_sale_order_id.salla_order_id:
+            return request.not_found()
+        try:
+            pdf = move.with_user(SUPERUSER_ID)._salla_invoice_pdf()
+        except Exception:
+            _logger.exception("Salla invoice PDF: rendering failed for move %s", move_id)
+            return request.make_response("error", status=500)
+        return request.make_response(pdf, headers=[
+            ("Content-Type", "application/pdf"),
+            ("Content-Length", len(pdf)),
+            ("Content-Disposition", content_disposition(mapping.pdf_filename(move.name),
+                                                        disposition_type="inline")),
+            ("X-Robots-Tag", "noindex"),
+            ("Cache-Control", "private, no-store"),
+        ])

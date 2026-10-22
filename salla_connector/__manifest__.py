@@ -3,9 +3,10 @@
     "summary": "Direct Salla (KSA) integration for Wayakit, no middleware: OAuth app "
                "authorization, signed webhooks, SKU reconciliation and order import "
                "(webhook queue + reconcile cron), \"shipped\" pushed back to Salla and "
-               "Salla cancellations applied.",
+               "Salla cancellations applied, ZATCA invoices/credit notes created, paid and "
+               "uploaded to Salla.",
     "category": "Sales",
-    "version": "17.0.3.0.0",
+    "version": "17.0.4.0.0",
     "author": "Wayakit",
     "website": "https://wayakit.com",
     "license": "LGPL-3",
@@ -14,7 +15,9 @@
     # (odoo_salla_*, models tecfysalla.*): this replaces them and must survive their
     # uninstall. website_sale: backend.website_id (empty by default since
     # 2.1.2, can still be set) and the website fields on imported orders.
-    "depends": ["sale_management", "sale_stock", "website_sale"],
+    # account_edi (F5): edi_state = ZATCA acceptance, required before an upload to Salla
+    # (installed in prod through l10n_sa_edi).
+    "depends": ["sale_management", "sale_stock", "website_sale", "account_edi"],
     "external_dependencies": {"python": ["requests"]},
     "data": [
         "security/ir.model.access.csv",
@@ -22,6 +25,7 @@
         "views/salla_backend_views.xml",
         "views/salla_order_queue_views.xml",
         "views/sale_order_views.xml",
+        "views/account_move_views.xml",
         "data/salla_cron.xml",
     ],
     "application": False,

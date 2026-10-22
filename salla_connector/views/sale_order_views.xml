@@ -19,6 +19,7 @@
                     <field name="salla_push_next_try" readonly="1" invisible="not salla_push_pending"/>
                     <field name="salla_push_error" readonly="1" invisible="not salla_push_error"/>
                     <field name="salla_alerted_status" readonly="1" invisible="not salla_alerted_status"/>
+                    <field name="salla_invoice_failed" readonly="1" invisible="not salla_invoice_failed"/>
                 </xpath>
                 <!-- Ops retry after a failed push. Rights are re-checked in Python. -->
                 <xpath expr="//header" position="inside">

@@ -90,6 +90,26 @@
                                 <field name="send_status_sms"/>
                             </group>
                         </group>
+                        <!-- F5, proposal C: Odoo is the only ZATCA issuer; the customer gets
+                             the invoice through Salla only. -->
+                        <group>
+                            <group string="Invoices">
+                                <field name="auto_invoice"/>
+                                <field name="invoice_journal_id"/>
+                                <field name="invoice_from"/>
+                                <field name="accounting_alert_user_ids" widget="many2many_tags"/>
+                            </group>
+                            <group string="Upload to Salla">
+                                <field name="upload_invoices"/>
+                                <field name="require_zatca_before_upload"/>
+                            </group>
+                            <group string="Payments">
+                                <field name="salla_payments_journal_id"/>
+                                <field name="tabby_journal_id"/>
+                                <field name="tamara_journal_id"/>
+                                <field name="payment_method_overrides" placeholder="stc_pay = salla_payments"/>
+                            </group>
+                        </group>
                     </sheet>
                 </form>
             </field>
