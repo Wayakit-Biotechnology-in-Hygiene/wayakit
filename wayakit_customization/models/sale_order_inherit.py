@@ -2,6 +2,7 @@
 import logging
 
 from odoo import fields, models
+from odoo.exceptions import UserError
 
 from .review_text import DEFAULT_BASE_URL, REVIEW_ANCHOR, build_review_text
 
@@ -99,3 +100,75 @@ class SaleOrder(models.Model):
             # Template 38 applies to sale.order: send on the order itself, it is
             # what resolves phone_field 'partner_id.mobile' and {{1}} 'partner_id.name'.
             order._wayakit_send_whatsapp(template, [text])
+
+    def _wayakit_carwash_note(self, text):
+        """Chatter note with a fixed prefix so sales can filter them."""
+        self.message_post(body="Car Wash Loyalty: %s" % text)
+
+    def _wayakit_apply_carwash_reward(self, card):
+        """Claim the free Exterior wash of `card` on this draft booking SO.
+
+        Called by the booking controller when the customer came through the
+        WhatsApp link /carwash/reward/<code>. Same result as the manual process:
+        apply the product reward, then remove the booked wash so the customer
+        does not pay it twice. Every exit leaves a "Car Wash Loyalty:" note.
+        Raises UserError if the reward does not survive the recompute; the
+        caller runs this in a savepoint so the booking itself is never lost.
+        """
+        self.ensure_one()
+        if not card:
+            return False
+        if card.partner_id.commercial_partner_id != self.partner_id.commercial_partner_id:
+            self._wayakit_carwash_note(
+                "WhatsApp reward link of card %s (%s) used by another customer, "
+                "reward not applied." % (card.code, card.partner_id.display_name))
+            return False
+
+        rewards = card.program_id.reward_ids.filtered(lambda r: r.reward_type == 'product')
+        booked_line = self.order_line.filtered(
+            lambda l: not l.reward_id and l.product_id in rewards.reward_product_id)[:1]
+        if not booked_line:
+            self._wayakit_carwash_note(
+                "customer came from the WhatsApp reward link but booked a "
+                "non-eligible wash, check manually.")
+            return False
+        reward = rewards.filtered(lambda r: r.reward_product_id == booked_line.product_id)[:1]
+
+        # card.points, not _get_real_points_for_coupon: the latter also counts
+        # the point this booking would earn, and that point disappears with
+        # the booked line we remove below.
+        if card.points < reward.required_points:
+            self._wayakit_carwash_note(
+                "card %s has %s points, %s needed; reward not applied."
+                % (card.code, card.points, reward.required_points))
+            return False
+
+        self._update_programs_and_rewards()
+        claimable = self._get_claimable_rewards(forced_coupons=card)
+        if reward not in claimable.get(card, self.env['loyalty.reward']):
+            self._wayakit_carwash_note(
+                "%s is not claimable with card %s (%s points), reward not applied."
+                % (reward.description, card.code, card.points))
+            return False
+
+        # Core only auto-loads cards whose partner_id is exactly the SO
+        # partner, and action_confirm recomputes rewards dropping lines whose
+        # card is not on the order (sale_loyalty/models/sale_order.py:868).
+        self.applied_coupon_ids |= card
+        result = self._apply_program_reward(reward, card)
+        if result.get('error'):
+            self._wayakit_carwash_note("reward not applied: %s" % result['error'])
+            return False
+
+        if booked_line.product_uom_qty > 1:
+            booked_line.product_uom_qty -= 1
+        else:
+            booked_line.unlink()
+        # The free wash earns no point: refresh this order's point entry
+        self._update_programs_and_rewards()
+        if reward not in self.order_line.reward_id:
+            raise UserError("Car Wash Loyalty: reward line dropped after removing the booked wash on %s" % self.name)
+
+        self._wayakit_carwash_note(
+            "Free %s applied from WhatsApp reward link." % reward.reward_product_id.display_name)
+        return True
