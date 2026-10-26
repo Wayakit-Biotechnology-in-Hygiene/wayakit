@@ -229,6 +229,11 @@ class CustomAppointmentController(AppointmentController):
                     customer_partner,  # Use the created/updated customer
                     product
                 )
+                # Customer came through the WhatsApp free-wash link
+                # (carwash_reward.py): claim the reward on this draft SO
+                card_id = request.session.pop('carwash_reward_card_id', None)
+                if sale_order and card_id:
+                    self._apply_carwash_reward(sale_order, card_id)
 
         # "Deep cleaning" service selection always forces a fixed 2-hour
         # slot, regardless of the appointment type's configured duration.
@@ -434,6 +439,17 @@ class CustomAppointmentController(AppointmentController):
         }
 
         return request.env['sale.order'].sudo().create(order_vals)
+
+    def _apply_carwash_reward(self, sale_order, card_id):
+        """Apply the loyalty free wash; never block the booking on it"""
+        try:
+            with request.env.cr.savepoint():
+                sale_order.sudo()._wayakit_apply_carwash_reward(
+                    request.env['loyalty.card'].sudo().browse(card_id).exists())
+        except Exception:
+            _logger.exception("Car wash reward failed on %s", sale_order.name)
+            sale_order.sudo()._wayakit_carwash_note(
+                "the WhatsApp reward could not be applied automatically, check manually.")
 
     def _create_curtain_furniture_sale_order(self, appointment_type, customer_partner, answer_input_values):
         """Create a sale order for HOME Deep Cleaning Care (formerly Curtain and Furniture Care) appointment type"""
