@@ -8,6 +8,10 @@ from .review_text import DEFAULT_BASE_URL, REVIEW_ANCHOR, build_review_text
 
 _logger = logging.getLogger(__name__)
 
+# "Car Wash Loyalty – Buy 4 Get 1 Free". Created in the UI, no xmlid, so
+# matched by ID (same in prod and staging copies)
+CARWASH_LOYALTY_PROGRAM_ID = 13
+
 
 class SaleOrder(models.Model):
     _inherit = 'sale.order'
@@ -100,6 +104,22 @@ class SaleOrder(models.Model):
             # Template 38 applies to sale.order: send on the order itself, it is
             # what resolves phone_field 'partner_id.mobile' and {{1}} 'partner_id.name'.
             order._wayakit_send_whatsapp(template, [text])
+
+    def _get_reward_values_product(self, reward, coupon, product=None, **kwargs):
+        """One free wash per booking in the car wash program.
+
+        Core claims every multiple of required_points at once
+        (sale_loyalty/models/sale_order.py:145): 8 points gave 2 free washes
+        and spent all 8. Cap to one reward so the rest stays on the card.
+        Also applies when sales claims the reward by hand, and survives the
+        recompute in action_confirm, which calls this same method.
+        """
+        vals_list = super()._get_reward_values_product(reward, coupon, product=product, **kwargs)
+        if reward.program_id.id == CARWASH_LOYALTY_PROGRAM_ID and not reward.clear_wallet:
+            for vals in vals_list:
+                vals['product_uom_qty'] = reward.reward_product_qty
+                vals['points_cost'] = reward.required_points
+        return vals_list
 
     def _wayakit_carwash_note(self, text):
         """Chatter note with a fixed prefix so sales can filter them."""
