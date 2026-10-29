@@ -53,6 +53,12 @@ HOME_DEEP_CLEANING_TYPE_ID = 3
 HOME_DEEP_CLEANING_NAMES = {"home deep cleaning care", "curtain and furniture care"}
 MIN_PHONE_DIGITS = 8
 
+# Car Wash Care for Al Khozama hotel guests (KAUST), reached by QR. Duplicate
+# of the Car Wash Care type with its own location and schedule; its orders get
+# the MOU guest discount and the "Al Khozama" tag the hotel commission is read from.
+ALKHOZAMA_TYPE_ID = 15
+ALKHOZAMA_DISCOUNT = 10.0
+
 
 def _is_home_deep_cleaning(appointment_type):
     """True for the HOME Deep Cleaning Care appointment type"""
@@ -62,6 +68,12 @@ def _is_home_deep_cleaning(appointment_type):
         return True
     name = (appointment_type.with_context(lang='en_US').name or '').lower()
     return name in HOME_DEEP_CLEANING_NAMES
+
+
+def _is_car_wash(appointment_type):
+    """True for the public Car Wash Care type and the Al Khozama one"""
+    return (appointment_type.id == ALKHOZAMA_TYPE_ID
+            or appointment_type.name.lower() == "car wash care")
 
 
 # Kitchen Steam Deep Cleaning: one appointment question per house group,
@@ -232,7 +244,7 @@ class CustomAppointmentController(AppointmentController):
                 # Customer came through the WhatsApp free-wash link
                 # (carwash_reward.py): claim the reward on this draft SO
                 card_id = request.session.pop('carwash_reward_card_id', None)
-                if sale_order and card_id:
+                if sale_order and card_id and appointment_type.id != ALKHOZAMA_TYPE_ID:
                     self._apply_carwash_reward(sale_order, card_id)
 
         # "Deep cleaning" service selection always forces a fixed 2-hour
@@ -400,7 +412,7 @@ class CustomAppointmentController(AppointmentController):
 
     def _get_selected_service_product(self, appointment_type, answer_input_values):
         """Return the service product variant selected in the booking form, if any"""
-        if appointment_type.name.lower() != "car wash care":
+        if not _is_car_wash(appointment_type):
             return None
 
         try:
@@ -421,22 +433,28 @@ class CustomAppointmentController(AppointmentController):
     def _create_appointment_sale_order(self, appointment_type, customer_partner, product):
         """Create a sale order from appointment data with proper product matching"""
         # Only process if this is a Car Wash Care appointment
-        if appointment_type.name.lower() != "car wash care":
+        if not _is_car_wash(appointment_type):
             return False
 
+        line_vals = {
+            'product_id': product.id,
+            'name': product.name,
+            'product_uom_qty': 1,
+            'price_unit': product.list_price,
+        }
         # Create the sales order with the customer partner (not logged-in user)
         order_vals = {
             'partner_id': customer_partner.id,  # Use the customer from form
             'user_id': request.env.user.id,  # Keep logged-in user as salesperson
             'date_order': fields.Datetime.now(),
             'origin': f"Appointment: {appointment_type.name}",
-            'order_line': [(0, 0, {
-                'product_id': product.id,
-                'name': product.name,
-                'product_uom_qty': 1,
-                'price_unit': product.list_price,
-            })]
+            'order_line': [(0, 0, line_vals)]
         }
+        if appointment_type.id == ALKHOZAMA_TYPE_ID:
+            # List price kept on the line so the monthly report shows list,
+            # discount and net; the hotel commission is 10% of the net
+            line_vals['discount'] = ALKHOZAMA_DISCOUNT
+            order_vals['tag_ids'] = [(4, request.env.ref('wayakit_customization.crm_tag_alkhozama').id)]
 
         return request.env['sale.order'].sudo().create(order_vals)
 

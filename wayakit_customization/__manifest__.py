@@ -17,7 +17,7 @@
     # Check https://github.com/odoo/odoo/blob/16.0/odoo/addons/base/data/ir_module_category_data.xml
     # for the full list
     'category': 'Uncategorized',
-    'version': '1.0.48',
+    'version': '1.0.49',
     # any module necessary for this one to work correctly
     'depends': ['base', 'product', 'appointment', 'website_appointment', 'appointment_account_payment', 'price_intelligence', 'website', 'website_sale', 'sale', 'stock', 'whatsapp', 'rating', 'website_sale_loyalty'],
 
@@ -29,6 +29,7 @@
         'data/loyalty_review_coupon_data.xml',
         'data/whatsapp_review_data.xml',
         'data/whatsapp_channel_name_data.xml',
+        'data/alkhozama_data.xml',
         'views/website_sale_hide_fields.xml',
         'views/views.xml',
         'views/templates.xml',
