@@ -105,6 +105,19 @@ class SaleOrder(models.Model):
             # what resolves phone_field 'partner_id.mobile' and {{1}} 'partner_id.name'.
             order._wayakit_send_whatsapp(template, [text])
 
+    def _get_program_domain(self):
+        """Al Khozama hotel bookings stay out of the car wash 4+1 loyalty.
+
+        Agreed with KSA: guests already get the MOU discount. Every program
+        lookup in sale_loyalty goes through this domain, so the order neither
+        earns points nor claims the reward.
+        """
+        domain = super()._get_program_domain()
+        tag = self.env.ref('wayakit_customization.crm_tag_alkhozama', raise_if_not_found=False)
+        if tag and tag in self.tag_ids:
+            domain = domain + [('id', '!=', CARWASH_LOYALTY_PROGRAM_ID)]
+        return domain
+
     def _get_reward_values_product(self, reward, coupon, product=None, **kwargs):
         """One free wash per booking in the car wash program.
 
