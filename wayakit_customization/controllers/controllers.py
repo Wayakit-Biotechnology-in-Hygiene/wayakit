@@ -284,6 +284,9 @@ class CustomAppointmentController(AppointmentController):
             )
             if event:
                 event.sale_order_id = sale_order.id
+                if appointment_type.id == ALKHOZAMA_TYPE_ID:
+                    # The hotel commission counts in the month the wash is done
+                    sale_order.commitment_date = event.start
 
         return result
 
