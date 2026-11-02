@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Anchored on the notify_user_ids field rather than on the "tocontrol" div:
+         our local enterprise copy is older than production, field names are the
+         safer bet. -->
+    <record id="whatsapp_account_view_form_inherit_channel_prefix" model="ir.ui.view">
+        <field name="name">whatsapp.account.view.form.inherit.channel.prefix</field>
+        <field name="model">whatsapp.account</field>
+        <field name="inherit_id" ref="whatsapp.whatsapp_account_view_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='notify_user_ids']/.." position="after">
+                <setting help="Shown as [PREFIX] in front of this account's conversations in Discuss.">
+                    <field name="channel_prefix" placeholder="e.g. KSA"/>
+                </setting>
+            </xpath>
+        </field>
+    </record>
+</odoo>

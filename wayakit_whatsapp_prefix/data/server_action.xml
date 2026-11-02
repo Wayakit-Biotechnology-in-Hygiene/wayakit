@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Retroactive run on demand (Action menu of the account). Saving the prefix
+         already does it; this is for re-checking after a deploy. Idempotent. -->
+    <record id="action_apply_channel_prefix" model="ir.actions.server">
+        <field name="name">Apply channel prefix to existing conversations</field>
+        <field name="model_id" ref="whatsapp.model_whatsapp_account"/>
+        <field name="binding_model_id" ref="whatsapp.model_whatsapp_account"/>
+        <field name="groups_id" eval="[(4, ref('whatsapp.group_whatsapp_admin'))]"/>
+        <field name="state">code</field>
+        <field name="code">records._wayakit_apply_channel_prefix()</field>
+    </record>
+</odoo>
