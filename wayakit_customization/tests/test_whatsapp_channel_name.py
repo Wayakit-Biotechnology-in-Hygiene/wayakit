@@ -81,6 +81,17 @@ def test_strips_whitespace():
     assert channel_name(NUMBER, '  Ghamer Agency  ') == '+966583851020 · Ghamer Agency'
 
 
+def test_leading_tag_is_kept_in_front():
+    # wayakit_whatsapp_prefix puts "[KSA] " before the number.
+    once = '[KSA] +966583851020 · Ghamer Agency (S02125)'
+    assert channel_name(NUMBER, once) == once
+    assert channel_name(NUMBER, '[KSA] Ghamer Agency') == '[KSA] +966583851020 · Ghamer Agency'
+    assert channel_name(NUMBER, '[KSA] 966583851020') == '[KSA] +966583851020'
+    # Bracketed text that is not a short tag stays behind the number.
+    assert channel_name(NUMBER, '[Ghamer Agency] Bob') == \
+        '+966583851020 · [Ghamer Agency] Bob'
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_'):

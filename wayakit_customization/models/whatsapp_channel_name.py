@@ -12,7 +12,16 @@ KSA copies that number to follow up once the 24h WhatsApp window closes, so we
 put it back in front.
 """
 
+import re
+
 SEPARATOR = " · "  # middle dot; parentheses are taken by Odoo's record_name
+
+# "[KSA] " put in front by wayakit_whatsapp_prefix. Peeled off before looking for
+# the number: otherwise the number no longer leads, gets prepended again, the
+# prefix module re-prefixes, and both grow by one per deploy. Kept as narrow as
+# the prefixes that module accepts (1-6 letters/digits), so a push name such as
+# "[Company] Bob" still gets the number in front.
+_LEADING_TAG = re.compile(r"^(\[[A-Za-z0-9]{1,6}\])\s*")
 
 
 def _digits(text):
@@ -57,6 +66,10 @@ def channel_name(number, current_name):
     wanted = _digits(number)
     if not wanted:
         return label
+    tag = _LEADING_TAG.match(label)
+    if tag:
+        rest = channel_name(number, label[tag.end():])
+        return "%s %s" % (tag.group(1), rest) if rest else tag.group(1)
     cut = _leading_number_end(label, wanted)
     if cut:
         return number + label[cut:]     # already leads: just normalise the number
