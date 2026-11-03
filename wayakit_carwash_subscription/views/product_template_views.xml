@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="product_template_form_view_carwash" model="ir.ui.view">
+        <field name="name">product.template.form.carwash.subscription</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_form_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//notebook" position="inside">
+                <page string="Car Wash Subscription" name="carwash_subscription"
+                      groups="sales_team.group_sale_salesman">
+                    <group>
+                        <group>
+                            <field name="cw_is_subscription"/>
+                            <field name="cw_tier" invisible="not cw_is_subscription" required="cw_is_subscription"/>
+                            <field name="cw_period_days" invisible="not cw_is_subscription"/>
+                            <field name="cw_reward_validity_days" invisible="not cw_is_subscription"/>
+                        </group>
+                        <group invisible="not cw_is_subscription">
+                            <field name="cw_streak_periods" invisible="cw_tier != 'regular'"/>
+                            <field name="cw_grace_days" invisible="cw_tier != 'regular'"/>
+                            <field name="cw_gift_product_id"/>
+                            <field name="cw_gift_qty" invisible="not cw_gift_product_id"/>
+                        </group>
+                    </group>
+                    <field name="cw_entitlement_ids" invisible="not cw_is_subscription">
+                        <tree editable="bottom">
+                            <field name="sequence" widget="handle"/>
+                            <field name="product_tmpl_id" column_invisible="1"/>
+                            <field name="kind"/>
+                            <field name="product_id" optional="show" options="{'no_create': True}"/>
+                            <field name="program_id" options="{'no_create': True}"/>
+                            <field name="quantity"/>
+                        </tree>
+                    </field>
+                </page>
+            </xpath>
+        </field>
+    </record>
+</odoo>

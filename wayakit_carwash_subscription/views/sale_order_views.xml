@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_order_form_carwash" model="ir.ui.view">
+        <field name="name">sale.order.form.carwash.periods</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//div[@name='button_box']" position="inside">
+                <button name="action_view_cw_periods" type="object" class="oe_stat_button"
+                        icon="fa-car" invisible="cw_period_count == 0"
+                        groups="sales_team.group_sale_salesman">
+                    <field name="cw_period_count" widget="statinfo" string="Car Wash"/>
+                </button>
+            </xpath>
+        </field>
+    </record>
+</odoo>

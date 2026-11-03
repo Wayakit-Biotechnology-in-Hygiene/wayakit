@@ -1,0 +1,5 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_cw_period_user,cw.period.user,model_carwash_subscription_period,sales_team.group_sale_salesman,1,1,0,0
+access_cw_period_manager,cw.period.manager,model_carwash_subscription_period,sales_team.group_sale_manager,1,1,1,1
+access_cw_entitlement_user,cw.entitlement.user,model_carwash_subscription_entitlement,sales_team.group_sale_salesman,1,0,0,0
+access_cw_entitlement_manager,cw.entitlement.manager,model_carwash_subscription_entitlement,sales_team.group_sale_manager,1,1,1,1

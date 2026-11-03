@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_carwash_period_tree" model="ir.ui.view">
+        <field name="name">carwash.subscription.period.tree</field>
+        <field name="model">carwash.subscription.period</field>
+        <field name="arch" type="xml">
+            <tree decoration-muted="state == 'expired'">
+                <field name="order_id"/>
+                <field name="partner_id"/>
+                <field name="product_id"/>
+                <field name="tier"/>
+                <field name="period_start"/>
+                <field name="period_end"/>
+                <field name="streak"/>
+                <field name="services_left"/>
+                <field name="gift_product_id" optional="show"/>
+                <field name="gift_delivered" widget="boolean_toggle"/>
+                <field name="state" widget="badge" decoration-success="state == 'active'"/>
+                <field name="company_id" groups="base.group_multi_company" optional="hide"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_carwash_period_form" model="ir.ui.view">
+        <field name="name">carwash.subscription.period.form</field>
+        <field name="model">carwash.subscription.period</field>
+        <field name="arch" type="xml">
+            <form create="false">
+                <header>
+                    <button name="action_mark_gift_delivered" type="object" string="Mark gift delivered"
+                            class="btn-primary" invisible="gift_delivered or not gift_product_id"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="order_id"/>
+                            <field name="root_order_id"/>
+                            <field name="partner_id"/>
+                            <field name="product_id"/>
+                            <field name="tier"/>
+                            <field name="invoice_id"/>
+                        </group>
+                        <group>
+                            <field name="period_start"/>
+                            <field name="period_end"/>
+                            <field name="payment_date"/>
+                            <field name="streak"/>
+                            <field name="services_left"/>
+                        </group>
+                    </group>
+                    <group string="Monthly gift" invisible="not gift_product_id">
+                        <field name="gift_product_id"/>
+                        <field name="gift_qty"/>
+                        <field name="gift_delivered"/>
+                        <field name="gift_delivered_date"/>
+                        <field name="gift_delivered_by"/>
+                    </group>
+                    <field name="card_ids" readonly="1">
+                        <tree>
+                            <field name="cw_kind"/>
+                            <field name="program_id"/>
+                            <field name="code"/>
+                            <field name="partner_id"/>
+                            <field name="points" string="Uses left"/>
+                            <field name="expiration_date"/>
+                        </tree>
+                    </field>
+                </sheet>
+                <div class="oe_chatter">
+                    <field name="message_follower_ids"/>
+                    <field name="message_ids"/>
+                </div>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_carwash_period_search" model="ir.ui.view">
+        <field name="name">carwash.subscription.period.search</field>
+        <field name="model">carwash.subscription.period</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="partner_id"/>
+                <field name="order_id"/>
+                <field name="product_id"/>
+                <filter name="active_periods" string="Active" domain="[('state', '=', 'active')]"/>
+                <filter name="gift_pending" string="Gift pending"
+                        domain="[('gift_product_id', '!=', False), ('gift_delivered', '=', False)]"/>
+                <separator/>
+                <filter name="regular" string="Regular Care" domain="[('tier', '=', 'regular')]"/>
+                <filter name="premium" string="Premium Care" domain="[('tier', '=', 'premium')]"/>
+                <group expand="0" string="Group By">
+                    <filter name="group_product" string="Plan" context="{'group_by': 'product_id'}"/>
+                    <filter name="group_customer" string="Customer" context="{'group_by': 'partner_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_carwash_period" model="ir.actions.act_window">
+        <field name="name">Car Wash Periods</field>
+        <field name="res_model">carwash.subscription.period</field>
+        <field name="view_mode">tree,form</field>
+        <field name="context">{'search_default_active_periods': 1}</field>
+    </record>
+
+    <menuitem id="menu_carwash_period" name="Car Wash Periods"
+              parent="sale.sale_order_menu" action="action_carwash_period" sequence="60"/>
+</odoo>
