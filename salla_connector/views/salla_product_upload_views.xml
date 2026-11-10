@@ -12,7 +12,8 @@
                         re-running updates them, nothing is ever deleted or published.
                         A product hidden in Salla stays hidden (Salla publishes it by itself
                         when a variant gets stock; the uploader puts it back). English option
-                        and value names are entered by hand in Salla.
+                        and value names (option*_name_en, option*_value_en) are sent as
+                        Salla's English translation; the Arabic names are never changed.
                         Dry Run only reads Salla. Apply needs an administrator.
                     </div>
                     <group>

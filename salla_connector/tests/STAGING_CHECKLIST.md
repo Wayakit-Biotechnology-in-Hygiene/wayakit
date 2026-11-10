@@ -872,7 +872,7 @@ Use **fresh** demo orders in this section: older demo orders may hold test uploa
       - `run_inv()` twice: no new invoice attempt, no second activity.
     - **Delete the automation rule** right after, and restore the Salla Payments Journal.
 
-## S. F8: product upload (v17.0.5.0.0)
+## S. F8: product upload (v17.0.5.0.0; option/value English v17.0.5.0.2)
 
 **DEMO STORE ONLY (`461067869`).** Nothing in this section touches the real store: the real
 run (second backend, `Import Orders` off, spec `claude-docs/14-product-upload.md` §1) comes
@@ -885,19 +885,28 @@ names, costs, tokens or customer data in the test sheet, the ticket or a chat.
 Run the standalone suite first: `python3 salla_connector/tests/test_mapping.py` must end in
 `all passed` (F8 tests: `test_read_*`, `test_parse_*`, `test_upload_*`, `test_text_to_html`,
 `test_flagged_claims_*`, `test_product_payload_*`, `test_translation_*`,
-`test_option_en_writes_removed`, `test_english_kept`, `test_image_size_*`, `test_norm_label`,
+`test_option_en_writes_lang_ar_translations_only`, `test_option_en_keys_from_spike_run4`,
+`test_option_translation_payloads_*`, `test_option_english_names_*`, `test_detail_option_name`,
+`test_english_kept`, `test_image_size_*`, `test_norm_label`,
 `test_match_variants_*`, `test_variant_payload_*`, `test_images_to_attach`,
-`test_detail_helpers`, `test_create_weight_*`). 253 tests on 2026-11-10.
+`test_detail_helpers`, `test_create_weight_*`). 274 tests on 2026-11-10 (v17.0.5.0.2).
 
 **Rules after the spike of 2026-11-10** (`claude-docs/14-product-upload.md` §7):
 - Salla publishes a product **by itself** when a variant gets stock (hidden/out -> `sale`).
   The uploader puts back to hidden only a product it **created** in the run or that was
   **hidden before** the run; any other existing product's status is never written (a change
   Salla made is only reported). The uploader only ever POSTs `hidden`.
-- Option / value names are **never** written in English (the EN PUT overwrote the Arabic
-  ones): every options product gets *English option/value names must be entered by hand in
-  Salla*. Caveat: that run had English **disabled** in the demo store; the spike (step 164,
-  finding `5 ...`) re-tests it with English enabled. The rule stays until it says otherwise.
+- Option / value English names (v17.0.5.0.2, spike run 4 with English **enabled**): written
+  ONLY as `PUT /products/options/{id}` and `PUT /products/options/values/{id}` with lang
+  **`ar`** and body `{"name": <Salla's current Arabic name>, "translations": {"en":
+  {"option_name" | "option_details_name": <EN>}}}`. Never a lang `en` PUT there (it wrote
+  over the Arabic), never `values` / price / quantity in that body, never `translations.en.name`
+  (Salla ignores it). The first option and the first value of each run are read back in
+  Arabic (moved -> restored, error, no more option English in the run) and in English (not
+  shown -> *Salla did not keep the English option names; enter them by hand*). Names left
+  out (English empty, equal to the Arabic, different English on rows of one value, option or
+  value not found / found twice in Salla) get *English option/value names must be entered by
+  hand in Salla: <reason>*.
 - English product texts are read back with lang `en`; if Salla does not show them, the run
   warns *Salla did not keep the English (check that English is enabled in the store's
   languages)...* once and stops EN writes for the rest of the run.
@@ -934,6 +943,31 @@ def sl_options(pid):  # option / value names as Salla shows them in Arabic
     d = (b._request("GET", "/products/%s" % pid, lang="ar") or {}).get("data") or {}
     return [(o.get("name"), [v.get("name") for v in o.get("values") or []])
             for o in d.get("options") or []]
+def sl_options_en(pid):  # names with lang en + translations.en of each option / value
+    d = (b._request("GET", "/products/%s" % pid, lang="ar",
+                    params={"with": "translations"}) or {}).get("data") or {}
+    e = (b._request("GET", "/products/%s" % pid, lang="en") or {}).get("data") or {}
+    en = {str(x.get("id")): x.get("name") for o in e.get("options") or []
+          for x in [o] + list(o.get("values") or [])}
+    def tr(x, key):
+        t = x.get("translations") if isinstance(x.get("translations"), dict) else {}
+        return (t.get("en") or {}).get(key) if isinstance(t.get("en"), dict) else None
+    return [(o.get("id"), o.get("name"), en.get(str(o.get("id"))), tr(o, "option_name"),
+             [(v.get("id"), v.get("name"), en.get(str(v.get("id"))),
+               tr(v, "option_details_name")) for v in o.get("values") or []])
+            for o in d.get("options") or []]
+def sl_spy(w, handles, mode):  # run the wizard, return the Salla calls (method, path, lang)
+    B = type(w.backend_id); req = B._request; calls = []
+    def spy(self, method, path, *a, **k):
+        calls.append((method, path, k.get("lang"))); return req(self, method, path, *a, **k)
+    B._request = spy
+    try:
+        w.handles = handles; w.mode = mode; w.action_run(); env.cr.commit()
+    finally:
+        B._request = req
+    return calls
+def opt_calls(calls):  # only the option / value calls
+    return [c for c in calls if "/options" in c[1]]
 def sl_find(keyword="STG-F8"):   # every Salla product whose SKUs match: duplicates show here
     res = b._request("GET", "/products", params={"keyword": keyword}) or {}
     return [(p.get("id"), mapping.detail_status(p), mapping.product_skus(p))
@@ -995,9 +1029,10 @@ def last_wiz():
     | `5 option/value EN writes` | SKIPPED: English not active | Expected only when `0 English active` is not `yes`; otherwise a bug in the spike: tell the tester |
     | `5 option/value EN writes` | SKIPPED: spike option not found as created | The spike product's option is not the one step 1 created (wrong option name or value, or no option read back): no EN write was sent. Tell the developer (paste the line: it shows the option and value read) |
     | `5 values kept` / `5 variants kept` | False (either one) | **STOP**: an option/value PUT changed the option's values or the product's variants (the line shows the value ids, or the variant count, before the EN PUTs, after them and after the Arabic restore; `5 values (id, name)` has the names). **Never re-enable option/value EN writes in the uploader**, whatever `5 option EN shown` says. Tell the developer and check the spike product's variants in the dashboard |
-    | `5 option AR survived` / `5 value AR survived` | True, and `5 option EN shown` / `5 value EN shown` True | With English enabled the EN option/value write works: developer may bring back option/value EN writes in the uploader (today it never writes them and warns *English option/value names must be entered by hand*) |
-    | `5 option AR survived` / `5 value AR survived` | False | Confirmed even with English enabled: lang `en` overwrites the Arabic. Keep the uploader as is (never writes them). `5 AR restored` must be True for both |
-    | `5 option EN shown` / `5 value EN shown` | False, AR survived True | Salla ignored the EN write: keep the uploader as is |
+    | `5 option AR survived` / `5 value AR survived` | True, and `5 option EN shown` / `5 value EN shown` True | Unexpected (run 4, 2026-11-10: lang `en` overwrote the Arabic): write it down; the uploader keeps the 5b method anyway |
+    | `5b option ...` / `5b value ...` | `AR kept` True, `EN shown` True, `values kept` / `variants kept` True | Expected (run 4, 2026-11-10, English enabled): the method the uploader uses since v17.0.5.0.2 (lang ar + `translations.en.option_name` / `option_details_name`). Any of them False: **STOP S.5 option English** (do not Apply an options product), tell the developer; until fixed, option English is entered by hand |
+    | `5 option AR survived` / `5 value AR survived` | False | Expected (run 4): lang `en` overwrites the Arabic; the uploader never sends that. `5 AR restored` must be True for both |
+    | `5 option EN shown` / `5 value EN shown` | False, AR survived True | Salla ignored the lang `en` write: no change for the uploader (it uses the 5b body) |
     | `5 AR restore FAILED` | any | Put the Arabic option/value names back by hand on the spike product (names in the line) and tell the developer |
     | `5 ?with=translations (lang ...)` | translations shown per option/value | Write it down: tells how Salla stores option translations |
     | `6 Pillow WebP support on this server` | False | Convert WebP is refused (169b). Same probe as step 157 and the wizard: it must agree with step 157; if not, tell the developer |
@@ -1028,7 +1063,7 @@ def last_wiz():
 168. **Dry Run, Step Everything** (as admin). Before: `sl_find()` -> write down (expected empty). Expected result:
     - `stg-f8-simple` and `stg-f8-options`: *would create it hidden with 1 / 4 variant(s)*, *would attach image(s) ...*.
     - `stg-f8-options`: warning *images stop: stg-f8-4.jpg not in the ZIP* (images 1-3 only) and a warning that `stg-f8-3.png` is not square.
-    - `stg-f8-options`: warning *English option/value names must be entered by hand in Salla (the uploader never writes them: Salla wrote them over the Arabic)*. `stg-f8-simple` (no options) does **not** get it.
+    - `stg-f8-options`: *would set English option/value names: 6* (2 options + 4 values, counted from the sheet: the product is new) and **no** *English option/value names must be entered by hand* warning. `stg-f8-simple` (no options) has neither line.
     - `stg-f8-2.webp`: **no** message at all (1200 x 1200 read from its header even though Pillow on odoo.sh cannot open WebP). Never *not a readable image* and never *size not checked*.
     - `stg-f8-broken`: error starting with `Row N:` (N = its sheet row) about the price; it is skipped.
     - `stg-f8-noweight`: action **would not create**, error *Salla requires a weight to create a product: fill weight (and weight_unit) in the sheet*; no "would create" / "would attach" line for it.
@@ -1068,7 +1103,13 @@ def last_wiz():
         - shown -> no English warning (English enabled and kept);
         - not shown (the demo on 2026-11-10) -> the **first** product with EN texts has *Salla did not keep the English (check that English is enabled in the store's languages); enter it by hand (no more English writes in this run)*, and every later product with EN texts has *English must be entered by hand in Salla* (no EN PUT for them). Write down `sl_tr(<id>)` for both products.
     - In the dashboard the Arabic description of both products is intact (not the English one): the uploader re-writes the Arabic texts after a lost English. If instead the result has *the Arabic texts could not be written again after the English write ...*: an error, tell the developer.
-    - `stg-f8-options`: warning *English option/value names must be entered by hand in Salla ...*; `sl_options(<id>)` shows the **Arabic** names (`الحجم` with 500 مل / 1 لتر, `الرائحة` with لافندر / ليمون): nothing in English. The build log shows **no** `PUT /products/options` call.
+    - `stg-f8-options` option/value English (needs English **ON** in the demo, as in step 164; v17.0.5.0.2):
+        - the result has *English option/value names set: 6* and **no** *English option/value names must be entered by hand*, *Salla wrote the English over the Arabic*, *Salla did not keep the English option names* or *not verified* line. If any of those appears: copy it, **STOP S.5 option English**, developer.
+        - `sl_options(<id>)` still shows the **Arabic** names, unchanged: `الحجم` with 500 مل / 1 لتر, `الرائحة` with لافندر / ليمون (never `Size`, `500 ml`...).
+        - `sl_options_en(<id>)`: for each option / value, the lang `en` name and the `translations.en` name are the sheet English: `Size` (500 ml / 1 L), `Scent` (Lavender / Lemon). Write down the ids.
+        - Values and variants kept: the option value ids in `sl_options_en(<id>)` are 2 + 2 and `sl(<id>)["variants"]` still has the 4 variant ids, SKUs, prices 30 / 32 / 45 / 47 and stock 4 / 0 / 12 / 3.
+        - **Salla dashboard, English view** (switch the dashboard language to English, or open the product and pick the English tab of the options): options read `Size` / `Scent` with values `500 ml`, `1 L`, `Lavender`, `Lemon`. Switch back to Arabic: `الحجم` / `الرائحة` with the Arabic values. Write down what each view shows.
+        - If English is **OFF** in the demo: the result says *English option/value names must be entered by hand in Salla: English writes stopped earlier in this run* (no options PUT). That is not the expected run: enable English and repeat 170 on a new handle.
     - `stg-f8-2.webp`: attached as image 2 if the spike said Salla accepts WebP (`6 attach webp (embedded 64x64)` ok). If the spike said Salla refuses WebP: the result reports image 2 failed and images stop there (3 is not attached); convert it to JPEG on a laptop, re-zip, and Step Images (175) attaches 2 and 3.
     - `sl_find()` lists exactly **two** products.
     - Build log: one summary line per product (handle, Salla id, action, counts). **No request bodies, no marketing copy, no token.**
@@ -1079,6 +1120,17 @@ def last_wiz():
 172. **Apply again**, same files (also once with the result sheet of 170 as input, `salla_product_id` filled). Expected:
     - Both products *update #id*; `sl_find()` still lists exactly **two** (no duplicates).
     - Images count unchanged (3): nothing re-attached. Variant values unchanged; no variant PUT reported when nothing changed.
+    - **Option English already set:** Dry Run first: `stg-f8-options` says *would set English option/value names: 0 (6 already set)*. Then Apply through the spy (shell, wizard `w` = `last_wiz()` with the same file): `calls = sl_spy(w, "stg-f8-options", "apply"); print(opt_calls(calls))` -> `[]` (**no** `/products/options` PUT) and no *English option/value names set* line in the result. `sl_options(<id>)` and `sl_options_en(<id>)` unchanged from 170.
+172b. **Option English: one change, one PUT, always lang ar** (v17.0.5.0.2). In the sheet set `option2_value_en` of **every** ليمون row (`STG-F8-012`, `STG-F8-014`) to `Lime`.
+    - **Dry Run:** *would set English option/value names: 1 (5 already set)*.
+    - **Apply via the spy:** `calls = sl_spy(w, "stg-f8-options", "apply"); print(opt_calls(calls))` -> exactly **one** call `("PUT", "/products/options/values/<ليمون value id>", "ar")` (plus no other `/options` call; the lang is `ar`, **never** `en`, never a DELETE). Result: *English option/value names set: 1*.
+    - `sl_options(<id>)`: Arabic unchanged (`ليمون` still `ليمون`). `sl_options_en(<id>)`: that value shows `Lime` with lang en and in `translations.en`; the other 5 unchanged. `sl(<id>)["variants"]`: same 4 ids, prices and stock as before. Dashboard English view shows `Lime`.
+    - Put `Lemon` back on both rows and Apply: one PUT again, `Lemon` shown.
+172c. **Option English left out with a reason, nothing sent** (Dry Run and Apply via the spy, `stg-f8-options` only; restore the sheet after each case):
+    - Different English on rows of one value: row of `STG-F8-013` `option2_value_en` = `Lavande` (row of `STG-F8-011` stays `Lavender`). Expected: warning *English option/value names must be entered by hand in Salla: option2 value لافندر: different English on rows N, M (Lavender, Lavande)* (N, M = the sheet rows); `opt_calls(calls)` has no PUT for the لافندر value id; Salla still shows `Lavender` for it.
+    - Empty English: clear `option1_name_en` (first row). Expected: warning *... option1 الحجم: option1_name_en is empty*; no PUT for the الحجم option id; Salla keeps `Size` (an empty cell never clears Salla's English).
+    - English equal to the Arabic: `option2_name_en` = `الرائحة`. Expected: warning *... option2 الرائحة: the English name is the same as the Arabic*; no PUT for that option.
+    - In all three: the Arabic names in `sl_options(<id>)` are unchanged and no *Salla wrote the English over the Arabic* line.
 172a. **Existing product: no weight needed to update.** Clear `weight` and `weight_unit` of `stg-f8-simple` in the sheet, change its `stock` to 7, Apply. Expected: *update #id* (no *Salla requires a weight* error), stock 7 in `sl(<id>)`, its weight in Salla **unchanged** (0.5: an empty cell never clears it). Restore the sheet (weight 0.5 kg, stock 12) and Apply again.
 171b. **Existing hidden product + new stock stays hidden.** Both products are hidden (171). In the sheet change the stock of `STG-F8-012` from 0 to 5 (the variant with no stock) and of `STG-F8-001` from 12 to 9 (simple product: its stock goes in the product PUT). Before, write down `sl(<options id>)["status"]` and `sl(<simple id>)["status"]` (both `hidden`).
     - **Dry Run:** both say *hidden in Salla: kept hidden (Salla publishes a product by itself when a variant gets stock; Apply puts it back to hidden)*; no write (statuses still hidden).

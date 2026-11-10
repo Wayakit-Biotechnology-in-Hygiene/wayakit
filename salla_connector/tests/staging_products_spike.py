@@ -21,6 +21,14 @@
 # English is active: lang en PUT {"name"} (never "values"), read back ar / en /
 # ?with=translations, and the Arabic names are ALWAYS put back if they changed.
 #
+# Round 4 (2026-11-10, after run 3 with English enabled): a lang en PUT {"name"} on an
+# option or value OVERWRITES its Arabic name, while a product PUT with lang ar and
+# {"translations": {"en": {"name"}}} keeps the Arabic and stores the English (step 11).
+# Step 5b tries that `translations` body on the option and on one value (spike product
+# only, lang ar, Arabic name kept in the body, never "values"), with a fallback key
+# (option_name / option_details_name, the keys ?with=translations shows), and puts the
+# Arabic back at once if it moved.
+#
 # Copy only the FINDINGS block into the ticket (ids, statuses, HTTP codes, Salla error
 # messages). No tokens, no customer data.
 
@@ -47,10 +55,12 @@ OPTION_AR = "الحجم"
 VALUES_AR = ["صغير", "كبير"]
 OPTION_EN = "Size"          # step 5, lang en, spike product only
 VALUE_EN = "Small"
-# Step 5 runs only when GET /languages shows `en` active. If /languages cannot tell (HTTP
-# error, no status field) and Settings > Languages in the dashboard shows English ON, set
-# this to True and paste again (a new spike product is created each run).
-FORCE_EN_EXPERIMENTS = False
+OPTION_EN_TR = "Size EN"    # step 5b, `translations` body with lang ar: told apart from 5
+VALUE_EN_TR = "Small EN"
+# Steps 5 and 5b run only when GET /languages shows `en` active, or with this flag. If
+# /languages cannot tell (HTTP error, no status field) and Settings > Languages in the
+# dashboard shows English ON, keep it True (a new spike product is created each run).
+FORCE_EN_EXPERIMENTS = True  # demo store English enabled 2026-11-10; /languages answers 401 (scope)
 EN_BANNER = "ENGLISH NOT ACTIVE IN THIS STORE: English results below are not meaningful"
 # Complete 64x64 lossy WebP (110 bytes, a white square on blue), made with Pillow 10.2 and
 # checked with Pillow + libwebp dwebp: no Pillow WebP support is needed to upload it.
@@ -308,7 +318,16 @@ def _translated_options(d, oid, vid):
     return "option #%s not in the answer (keys %s)" % (oid, sorted(d or {})[:12])
 
 
+# Step 5 (lang en name PUTs) was settled by run 3 (English ON): it overwrites the Arabic.
+# Off by default so the 5b run does not put the Arabic through another overwrite+restore.
+RUN_STEP5 = False
+
+
 def step_option_english(pid):
+    if not RUN_STEP5:
+        F["5 option/value EN writes"] = "not run (RUN_STEP5 = False): run 3 proved lang en " \
+            "PUTs overwrite the Arabic option/value names"
+        return
     # Experiment on THIS spike product only (created by this run): option/value EN writes,
     # re-tested with English enabled. The Arabic names are always put back if they moved.
     if not (STATE["en_active"] is True or FORCE_EN_EXPERIMENTS):
@@ -382,6 +401,123 @@ def step_option_english(pid):
     else:
         F["5 AR restored"] = "not needed (Arabic names unchanged)"
     track(pid, "5", "the option/value EN PUTs")
+
+
+def _option_parts(d, oid, vid):
+    """(option dict, value dict) for these ids in a detail ({} when missing)."""
+    for o in (d or {}).get("options") or []:
+        if isinstance(o, dict) and o.get("id") == oid:
+            return o, next((v for v in o.get("values") or [] if isinstance(v, dict)
+                            and v.get("id") == vid), {})
+    return {}, {}
+
+
+def _attempt_5b(pid, n, target, ids, payload, ar, en, base):
+    """One 5b attempt on the spike option (target "option") or value ("value").
+    Returns (en_shown_and_ar_kept, safe_to_go_on)."""
+    oid, vid = ids
+    which = 0 if target == "option" else 1
+    tmpl = "/products/options/%s" if target == "option" else "/products/options/values/%s"
+    path = tmpl % (oid if which == 0 else vid)
+    # English before this attempt: an English stored by an earlier attempt (a or c) must
+    # not be credited to this one (b or d).
+    en_before = _names_by_id(get(pid, "en"), oid, vid)[which]
+    F["5b %s EN before" % n] = repr(en_before)
+    ok, d, st = call("PUT", path, lang="ar", payload=payload)
+    F["5b %s PUT" % n] = "%s lang ar %s: %s" % (
+        tmpl % "<id>", _short(payload, 120), "ok" if ok else "HTTP %s: %s" % (st, _short(d, 200)))
+    after_ar, after_en = get(pid, "ar"), get(pid, "en")
+    ar_now = _names_by_id(after_ar, oid, vid)[which]
+    en_now = _names_by_id(after_en, oid, vid)[which]
+    ar_kept, en_shown = ar_now == ar, en_now == en
+    stored_here = en_shown and en_before != en
+    F["5b %s AR kept" % n] = "%s (lang ar %r)" % (ar_kept, ar_now)
+    F["5b %s EN shown" % n] = "%s (lang en %r)%s" % (
+        en_shown, en_now, "" if stored_here or not en_shown else
+        " -- already there before this attempt: NOT credited to it")
+    in_tr = False
+    for lang in ("ar", "en"):
+        ok2, d2, st2 = call("GET", "/products/%s" % pid, lang=lang,
+                            params={"with": "translations"})
+        if not ok2 or not isinstance(d2, dict):
+            F["5b %s translations (lang %s)" % (n, lang)] = "HTTP %s: %s" % (st2, _short(d2, 200))
+            continue
+        part = _option_parts(d2, oid, vid)[which]
+        tr = part.get("translations", "<none>") if part else "<%s not in the answer>" % target
+        in_tr = in_tr or en in repr(tr)
+        F["5b %s translations (lang %s)" % (n, lang)] = _short(tr, 120)
+    F["5b %s EN in translations" % n] = in_tr
+    vals = [v_id for v_id, _ in _option_values(after_ar, oid)]
+    F["5b %s values kept" % n] = "%s (before %s, after %s)" % (vals == base[0], base[0], vals)
+    count = len(_skus(after_ar))
+    F["5b %s variants kept" % n] = "%s (%s -> %s)" % (count == base[1], base[1], count)
+    if ar_kept:
+        return stored_here, True
+    # The Arabic moved: put it back at once, lang ar, name only (never "values").
+    ok3, d3, st3 = call("PUT", path, lang="ar", payload={"name": ar})
+    again = _names_by_id(get(pid, "ar"), oid, vid)[which]
+    F["5b %s AR restored" % n] = "%s (lang ar %r, %s)" % (
+        again == ar, again, "ok" if ok3 else "HTTP %s: %s" % (st3, _short(d3)))
+    # Does the English survive re-sending the Arabic? Then "translations body + re-send
+    # the Arabic name" would be a usable two-call recipe.
+    F["5b %s EN after AR restore" % n] = repr(_names_by_id(get(pid, "en"), oid, vid)[which])
+    if again != ar:
+        F["5b AR restore FAILED"] = "fix by hand in the dashboard: product #%s %s #%s " \
+            "Arabic name %r; 5b stopped" % (pid, target, oid if which == 0 else vid, ar)
+        return False, False
+    return False, True
+
+
+def step_option_translations(pid):
+    # Experiment on THIS spike product only: English option/value names through a
+    # `translations` body sent with lang ar, the Arabic name kept in the same body.
+    # Independent of step 5 (reads its own state); same gating.
+    if not (STATE["en_active"] is True or FORCE_EN_EXPERIMENTS):
+        F["5b option/value translations body"] = "SKIPPED: English not active in this " \
+            "store (%s)" % STATE["en_why"]
+        return
+    before = get(pid, "ar")
+    oid, o_ar, vid, v_ar = _option_names(before)
+    # Only the names this run created are sent back as "Arabic": if step 5 left an English
+    # name in Arabic, sending it would make that permanent.
+    if not oid or not vid or o_ar != OPTION_AR or v_ar not in VALUES_AR:
+        F["5b option/value translations body"] = "SKIPPED: spike option not as created " \
+            "(option #%s %r, value #%s %r); see '5 AR restored'" % (oid, o_ar, vid, v_ar)
+        return
+    F["5b Arabic before"] = "option #%s %r, value #%s %r" % (oid, o_ar, vid, v_ar)
+    base = ([v_id for v_id, _ in _option_values(before, oid)], len(_skus(before)))
+    ids = (oid, vid)
+    attempts = (
+        ("option", (("a", {"name": o_ar, "translations": {"en": {"name": OPTION_EN_TR}}}),
+                    ("b", {"name": o_ar,
+                           "translations": {"en": {"option_name": OPTION_EN_TR}}})),
+         o_ar, OPTION_EN_TR),
+        ("value", (("c", {"name": v_ar, "translations": {"en": {"name": VALUE_EN_TR}}}),
+                   ("d", {"name": v_ar,
+                          "translations": {"en": {"option_details_name": VALUE_EN_TR}}})),
+         v_ar, VALUE_EN_TR),
+    )
+    go_on = True
+    for target, tries, ar, en in attempts:
+        if not go_on:
+            F["5b %s works with" % target] = "not tried: 5b stopped (Arabic restore failed)"
+            continue
+        works = None
+        for n, payload in tries:
+            done, go_on = _attempt_5b(pid, n, target, ids, payload, ar, en, base)
+            if done:                        # EN shows with AR kept: no further variants
+                works = n
+                break
+            if not go_on:
+                break
+        if works:
+            F["5b %s works with" % target] = "attempt %s %s" % (works,
+                                                                _short(dict(tries)[works], 120))
+        elif not go_on:
+            F["5b %s works with" % target] = "unknown: stopped after attempt %s" % n
+        else:
+            F["5b %s works with" % target] = "none of %s" % ", ".join(n for n, _ in tries)
+    track(pid, "5b", "the translations-body option/value PUTs")
 
 
 def _is_on(value):
@@ -647,7 +783,8 @@ def run_spike():
         try:
             # step_languages FIRST: every English result depends on it (step 5 needs it).
             for step in (step_languages, step_variants, step_lookups, step_english,
-                         step_option_english, step_with_translations,
+                         step_option_english, step_option_translations,
+                         step_with_translations,
                          step_translations_body, step_images, step_status):
                 try:
                     step(pid)
@@ -673,9 +810,9 @@ def run_spike():
         print("  %s (%s)" % (EN_BANNER, STATE["en_why"]))
     seen = list(F)
 
-    def _order(key):    # by step number ("10" after "9"), then in the order found
-        head = key.split(" ", 1)[0]
-        return (int(head) if head.isdigit() else 999, seen.index(key))
+    def _order(key):    # by step number ("10" after "9", "5b" after "5"), then as found
+        m = re.match(r"^(\d+)([a-z]?)$", key.split(" ", 1)[0])
+        return (int(m.group(1)) if m else 999, m.group(2) if m else "", seen.index(key))
 
     for key in sorted(F, key=_order):
         print("  %s: %s" % (key, F[key]))

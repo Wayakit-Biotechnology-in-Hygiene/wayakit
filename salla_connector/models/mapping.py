@@ -2920,6 +2920,161 @@ def english_kept(name_en, detail_en):
         norm_label(name_en) == norm_label(detail_name(detail_en, "en"))
 
 
+# Key of the English name inside `translations.en` of a Salla option / option value
+# (spike run 4, 2026-11-10, English enabled): PUT .../options/{id} with lang ar and
+# {"name": <Arabic>, "translations": {"en": {"option_name": EN}}} keeps the Arabic and
+# shows EN with lang en; same for values with "option_details_name". The key "name"
+# inside translations.en is silently ignored, and a lang en {"name": EN} PUT writes
+# OVER the Arabic: never send that.
+OPTION_EN_KEYS = {"option": "option_name", "value": "option_details_name"}
+
+
+def _lang_label(value, lang="ar"):
+    """A Salla name: a string, or {ar, en} on a multilingual answer."""
+    if isinstance(value, dict):
+        value = value.get(lang)
+    return text(value)
+
+
+def _current_english(item, kind):
+    """English name of a Salla option / value from its `translations` (a detail read
+    with ?with=translations), "" when unknown."""
+    entries = item.get("translations") if isinstance(item, dict) else None
+    entry = entries.get("en") if isinstance(entries, dict) else None
+    return text(entry.get(OPTION_EN_KEYS[kind])) if isinstance(entry, dict) else ""
+
+
+def option_english_names(product):
+    """Sheet side of the English option / value names -> (names, skipped).
+
+    names = [(kind, slot, ar, en)] in sheet order, each option followed by its values:
+    kind "option" (option `slot`, 0-based, named `ar`) or "value" (value `ar` of
+    option `slot`, each Arabic value once, by norm_label). Option names are product
+    level (first row of the handle, like the Arabic). A value's English is taken from
+    any row that has it: rows left empty inherit it, rows that disagree skip it.
+    skipped = reasons for the names left out: English empty, the same as the Arabic
+    (the read-back could not tell a kept Arabic from an overwrite), or different
+    English for one Arabic value."""
+    names, skipped = [], []
+    for slot, option in enumerate((product or {}).get("options") or []):
+        label = "option%d %s" % (slot + 1, text(option.get("ar")))
+        en = text(option.get("en"))
+        if not en:
+            skipped.append("%s: option%d_name_en is empty" % (label, slot + 1))
+        elif norm_label(en) == norm_label(option.get("ar")):
+            skipped.append("%s: the English name is the same as the Arabic" % label)
+        else:
+            names.append(("option", slot, text(option.get("ar")), en))
+        values, order = {}, []
+        for variant in product.get("variants") or []:
+            pairs = variant.get("values") or []
+            if slot >= len(pairs):
+                continue
+            ar = text(pairs[slot].get("ar"))
+            key = norm_label(ar)
+            if not key:
+                continue
+            if key not in values:
+                values[key] = {"ar": ar, "en": {}, "rows": []}
+                order.append(key)
+            value_en = text(pairs[slot].get("en"))
+            if value_en:
+                values[key]["en"].setdefault(norm_label(value_en), value_en)
+                values[key]["rows"].append(variant.get("row"))
+        for key in order:
+            value = values[key]
+            where = "option%d value %s" % (slot + 1, value["ar"])
+            if not value["en"]:
+                skipped.append("%s: option%d_value_en is empty on every row" % (
+                    where, slot + 1))
+            elif len(value["en"]) > 1:
+                skipped.append("%s: different English on rows %s (%s)" % (
+                    where, ", ".join(map(str, value["rows"])),
+                    ", ".join(value["en"].values())))
+            else:
+                en = next(iter(value["en"].values()))
+                if norm_label(en) == key:
+                    skipped.append("%s: the English name is the same as the Arabic" % where)
+                else:
+                    names.append(("value", slot, value["ar"], en))
+    return names, skipped
+
+
+def option_translation_payloads(product, detail):
+    """English option / value names to write -> (writes, skipped, unchanged).
+
+    `detail` = the Salla product read with lang "ar" (ideally ?with=translations, which
+    gives the current English). writes = [(kind, salla_id, body)] in sheet order:
+    kind "option" -> PUT /products/options/{id}, "value" -> PUT
+    /products/options/values/{id}, both sent with lang "ar". body = {"name": <Salla's
+    CURRENT Arabic name>, "translations": {"en": {<OPTION_EN_KEYS[kind]>: EN}}}: the
+    Arabic comes from Salla, never from the sheet, so the write can never change it.
+    Never values / price / quantity (an option PUT with "values" may rebuild the
+    variants). Matching by Arabic name (norm_label), like match_variants; a Salla
+    option or value that is missing or matches twice is skipped. unchanged = names
+    whose current Salla English already equals the sheet's (nothing to do).
+    skipped = option_english_names reasons + the matching ones."""
+    names, skipped = option_english_names(product)
+    options = _detail_options(detail)
+    sheet_options = (product or {}).get("options") or []
+    found, problem = {}, {}
+    for slot, option in enumerate(sheet_options):
+        key = norm_label(option.get("ar"))
+        hits = [o for o in options if norm_label(_lang_label(o.get("name"))) == key]
+        label = "option%d %s" % (slot + 1, text(option.get("ar")))
+        if not hits:
+            problem[slot] = "%s: not in the Salla product" % label
+        elif len(hits) > 1:
+            problem[slot] = "%s: matches %s Salla options" % (label, len(hits))
+        else:
+            found[slot] = hits[0]
+    for slot in sorted(problem):
+        if any(s == slot for kind, s, ar, en in names):
+            skipped.append(problem[slot] + " (its English names are not sent)")
+    writes, unchanged = [], 0
+    for kind, slot, ar, en in names:
+        option = found.get(slot)
+        if option is None:
+            continue
+        if kind == "option":
+            item, where = option, "option%d %s" % (slot + 1, ar)
+        else:
+            where = "option%d value %s" % (slot + 1, ar)
+            hits = [v for v in _option_values(option)
+                    if norm_label(_lang_label(v.get("name"))) == norm_label(ar)]
+            if len(hits) != 1:
+                skipped.append("%s: %s" % (where, "not in the Salla option" if not hits
+                                           else "matches %s Salla values" % len(hits)))
+                continue
+            item = hits[0]
+        item_id, salla_ar = clean_id(item.get("id")), _lang_label(item.get("name"))
+        if not item_id or not salla_ar:
+            skipped.append("%s: the Salla %s has no id or Arabic name" % (where, kind))
+            continue
+        current = _current_english(item, kind)
+        if current and norm_label(current) == norm_label(en):
+            unchanged += 1
+            continue
+        writes.append((kind, item_id, {
+            "name": salla_ar, "translations": {"en": {OPTION_EN_KEYS[kind]: en}}}))
+    return writes, skipped, unchanged
+
+
+def detail_option_name(detail, kind, item_id, lang="ar"):
+    """Name of the option (kind "option") or option value ("value") `item_id` in a
+    Salla product read with `lang`; None when it is not in the detail."""
+    item_id = clean_id(item_id)
+    for option in _detail_options(detail):
+        if kind == "option":
+            if clean_id(option.get("id")) == item_id:
+                return _lang_label(option.get("name"), lang)
+            continue
+        for value in _option_values(option):
+            if clean_id(value.get("id")) == item_id:
+                return _lang_label(value.get("name"), lang)
+    return None
+
+
 # JPEG start-of-frame markers (baseline, progressive, lossless...): they carry the size.
 # C4 / C8 / CC are DHT / JPG / DAC, not frames.
 _JPEG_SOF = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}

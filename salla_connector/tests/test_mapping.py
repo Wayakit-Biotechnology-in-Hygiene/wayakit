@@ -4,6 +4,7 @@ Run:  python3 salla_connector/tests/test_mapping.py
 
 All secrets/tokens below are obviously fake test values.
 """
+import ast
 import hashlib
 import hmac
 import inspect
@@ -3885,21 +3886,377 @@ def _wizard_requests():
     return src, _REQUEST_RE.findall(src)
 
 
-def test_option_en_writes_removed():
-    # Spike 2026-11-10: PUT /products/options[/values]/{id} with lang en wrote OVER the
-    # Arabic option / value names. The pure builder is gone and the wizard never calls
-    # those endpoints (read as text: it imports odoo).
-    assert not hasattr(mapping, "option_translation_payloads")
-    src, calls = _wizard_requests()
-    assert calls, "no _request calls found: regex out of date"
-    for method, path in calls:
-        assert "/options" not in path, (method, path)
-        assert method in ("GET", "POST", "PUT"), (method, path)      # never DELETE
-    # (the docstring may still name the endpoint: only _request paths count)
+def _wizard_tree():
+    with open(_WIZARD_SRC, encoding="utf-8") as fh:
+        return ast.parse(fh.read())
+
+
+def _enclosing_functions(tree):
+    """{id(node): FunctionDef} for every node inside a function of the wizard."""
+    owner = {}
+    for fn in ast.walk(tree):
+        if isinstance(fn, ast.FunctionDef):
+            for node in ast.walk(fn):
+                owner[id(node)] = fn          # inner defs walked later override: fine
+    return owner
+
+
+def _is_option_path_call(node):
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+        and node.func.attr == "_option_path"
+
+
+def _assigned_from_option_path(fn, name):
+    return any(isinstance(n, ast.Assign) and _is_option_path_call(n.value)
+               and any(isinstance(t, ast.Name) and t.id == name for t in n.targets)
+               for n in ast.walk(fn))
+
+
+def _str_constants(node):
+    return [n.value for n in ast.walk(node)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+
+
+def test_option_en_writes_lang_ar_translations_only():
+    # Spike run 4 (2026-11-10, English enabled): option / value English goes ONLY through
+    # PUT /products/options[/values]/{id} with lang "ar" + {"name": <Salla's Arabic>,
+    # "translations": {"en": {...}}}. A lang "en" PUT there wrote OVER the Arabic. The
+    # wizard imports odoo, so it is read with ast (the path is a variable: a regex on
+    # literal paths cannot see these calls).
+    tree = _wizard_tree()
+    owner = _enclosing_functions(tree)
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute) and n.func.attr == "_request"]
+    assert len(calls) >= 8, "too few _request calls found: ast walk out of date"
+    option_calls = []
+    for call in calls:
+        assert call.args and isinstance(call.args[0], ast.Constant), ast.unparse(call)
+        method = call.args[0].value
+        assert method in ("GET", "POST", "PUT"), ast.unparse(call)       # never DELETE
+        path = call.args[1]
+        lang = {k.arg: k.value for k in call.keywords}.get("lang")
+        lang = lang.value if isinstance(lang, ast.Constant) else lang
+        fn = owner.get(id(call))
+        is_option = _is_option_path_call(path) or (
+            isinstance(path, ast.Name) and fn is not None
+            and _assigned_from_option_path(fn, path.id))
+        # no literal options path anywhere: every one goes through _option_path
+        assert not any("option" in c for c in _str_constants(path)), ast.unparse(call)
+        if not is_option:
+            continue
+        option_calls.append(call)
+        assert method == "PUT", ast.unparse(call)
+        assert lang == "ar", ("option write without lang ar", ast.unparse(call))
+        payload = {k.arg: k.value for k in call.keywords}.get("payload")
+        assert payload is not None, ast.unparse(call)
+        if isinstance(payload, ast.Dict):        # the Arabic restore: name only
+            keys = {k.value for k in payload.keys}
+            assert keys == {"name"}, ("option restore body", keys)
+        else:                                    # the write: body built by the mapping
+            assert isinstance(payload, ast.Name), ast.unparse(call)
+            assert "option_translation_payloads" in ast.unparse(fn), fn.name
+    # the translations write + the Arabic restore
+    assert len(option_calls) >= 2, [ast.unparse(c) for c in option_calls]
+    # every _option_path use is the path of one of those calls, or assigned to a name
+    # that is (path = self._option_path(...); _request("PUT", path, lang="ar", ...))
+    for use in (n for n in ast.walk(tree) if _is_option_path_call(n)):
+        direct = any(use is c.args[1] for c in option_calls)
+        fn = owner.get(id(use))
+        targets = [t.id for a in ast.walk(fn) if isinstance(a, ast.Assign) and a.value is use
+                   for t in a.targets if isinstance(t, ast.Name)] if fn else []
+        via_name = targets and all(
+            any(isinstance(c.args[1], ast.Name) and c.args[1].id == t and owner.get(id(c)) is fn
+                for c in option_calls) for t in targets)
+        assert direct or via_name, ("_option_path used outside a lang ar PUT",
+                                    ast.unparse(use))
+    # _option_path only builds the two endpoints of the spike
+    option_path = next(n for n in ast.walk(tree)
+                       if isinstance(n, ast.FunctionDef) and n.name == "_option_path")
+    paths = {c for c in _str_constants(option_path) if "/" in c}
+    assert paths == {"/products/options/%s", "/products/options/values/%s"}, paths
+    # the option English code never names values / price / quantity / status
+    for name in ("_apply_option_english", "_option_english_kept", "_option_path"):
+        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
+        for c in _str_constants(fn):
+            assert c not in ("values", "price", "quantity", "sale_price", "status"), (name, c)
     # every status write is "hidden", never "sale"
+    src, _ = _wizard_requests()
     statuses = re.findall(r'payload=\{\s*"status":\s*"([^"]*)"', src)
     assert statuses and set(statuses) == {"hidden"}, statuses
     assert '"status": "sale"' not in src and "'status': 'sale'" not in src
+
+
+def _fc_detail(**over):
+    """Salla detail (lang ar, ?with=translations) of the fake floor cleaner, no English."""
+    detail = {"id": 555, "options": [
+        {"id": 11, "name": "الحجم", "values": [{"id": 111, "name": "500 مل"},
+                                               {"id": 112, "name": "1 لتر"}]},
+        {"id": 22, "name": "الرائحة", "values": [{"id": 221, "name": "لافندر"},
+                                                 {"id": 222, "name": "ليمون"}]}]}
+    detail.update(over)
+    return detail
+
+
+def _assert_option_bodies(writes):
+    """Every body: exactly name + translations.en.<kind key>; never values / price /
+    quantity / lang / an English name in "name"."""
+    for kind, salla_id, body in writes:
+        assert kind in ("option", "value"), kind
+        assert isinstance(salla_id, str) and salla_id, salla_id
+        assert set(body) == {"name", "translations"}, body
+        assert set(body["translations"]) == {"en"}, body
+        assert set(body["translations"]["en"]) == {mapping.OPTION_EN_KEYS[kind]}, body
+        en = body["translations"]["en"][mapping.OPTION_EN_KEYS[kind]]
+        assert mapping.norm_label(body["name"]) != mapping.norm_label(en), body
+        keys = set(_all_keys(body))
+        for bad in ("values", "price", "sale_price", "quantity", "stock", "lang", "status",
+                    "sku", "skus"):
+            assert bad not in keys, (bad, body)
+        assert "name" not in body["translations"]["en"], body     # silently ignored by Salla
+        _assert_clean_body(body)
+
+
+def test_option_en_keys_from_spike_run4():
+    assert mapping.OPTION_EN_KEYS == {"option": "option_name", "value": "option_details_name"}
+
+
+def test_option_translation_payloads_full_product():
+    p = _p(_options_rows(), _FC)
+    writes, skipped, unchanged = mapping.option_translation_payloads(p, _fc_detail())
+    assert skipped == [] and unchanged == 0, (skipped, unchanged)
+    assert writes == [
+        ("option", "11", {"name": "الحجم", "translations": {"en": {"option_name": "Size"}}}),
+        ("value", "111", {"name": "500 مل",
+                          "translations": {"en": {"option_details_name": "500 ml"}}}),
+        ("value", "112", {"name": "1 لتر",
+                          "translations": {"en": {"option_details_name": "1 L"}}}),
+        ("option", "22", {"name": "الرائحة", "translations": {"en": {"option_name": "Scent"}}}),
+        ("value", "221", {"name": "لافندر",
+                          "translations": {"en": {"option_details_name": "Lavender"}}}),
+        ("value", "222", {"name": "ليمون",
+                          "translations": {"en": {"option_details_name": "Lemon"}}}),
+    ], writes
+    _assert_option_bodies(writes)
+    # four rows, two values per option: each value written once
+    assert len([w for w in writes if w[0] == "value"]) == 4
+
+
+def test_option_translation_payloads_arabic_from_salla_not_sheet():
+    # Salla spells the Arabic differently (Arabic-Indic digits, a dict name, extra
+    # spaces): matched by norm_label, but the body carries SALLA's text, so the write
+    # cannot change the Arabic.
+    p = _p(_options_rows(), _FC)
+    detail = _fc_detail(options=[
+        {"id": 11, "name": {"ar": "الحجم", "en": "Old size"},
+         "values": [{"id": 111, "name": "٥٠٠ مل"}, {"id": 112, "name": "1  لتر"}]},
+        {"id": 22, "name": "الرائحة", "values": [{"id": 221, "name": {"ar": "لافندر"}},
+                                                 {"id": 222, "name": "ليمون"}]}])
+    writes, skipped, unchanged = mapping.option_translation_payloads(p, detail)
+    assert skipped == [] and unchanged == 0, skipped
+    by_id = {i: body["name"] for kind, i, body in writes}
+    assert by_id["111"] == "٥٠٠ مل", by_id          # not the sheet's "500 مل"
+    assert by_id["112"] == mapping.text("1  لتر"), by_id
+    assert by_id["11"] == "الحجم", by_id             # .ar of a dict name, never .en
+    assert by_id["221"] == "لافندر", by_id
+    assert all(not isinstance(n, dict) for n in by_id.values()), by_id
+    _assert_option_bodies(writes)
+
+
+def test_option_translation_payloads_empty_en_skipped():
+    rows = _options_rows()
+    rows[0]["option1_name_en"] = ""                       # option name EN empty
+    for row in rows:
+        if row["option2_value_ar"] == "ليمون":
+            row["option2_value_en"] = ""                  # value EN empty on every row
+    p = _p(rows, _FC)
+    writes, skipped, unchanged = mapping.option_translation_payloads(p, _fc_detail())
+    ids = [i for kind, i, body in writes]
+    assert ids == ["111", "112", "22", "221"], ids        # option 11 and value 222 not sent
+    assert "option1 الحجم: option1_name_en is empty" in skipped, skipped
+    assert "option2 value ليمون: option2_value_en is empty on every row" in skipped, skipped
+    assert len(skipped) == 2 and unchanged == 0, skipped
+    _assert_option_bodies(writes)
+
+
+def test_option_translation_payloads_en_inherited_from_other_rows():
+    # 500 مل has its English on row 2 only (rows 3 empty): taken from row 2.
+    rows = _options_rows()
+    rows[1]["option1_value_en"] = ""
+    rows[3]["option2_value_en"] = "  "                    # blank, not a conflict
+    p = _p(rows, _FC)
+    writes, skipped, _ = mapping.option_translation_payloads(p, _fc_detail())
+    en = {i: b["translations"]["en"].get("option_details_name") for k, i, b in writes}
+    assert en["111"] == "500 ml" and en["222"] == "Lemon", en
+    assert skipped == [], skipped
+
+
+def test_option_translation_payloads_conflicting_en_skipped():
+    rows = _options_rows()
+    rows[2]["option2_value_en"] = "Lavande"               # row 4: لافندر -> other EN
+    p = _p(rows, _FC)
+    writes, skipped, _ = mapping.option_translation_payloads(p, _fc_detail())
+    assert "221" not in [i for k, i, b in writes], writes
+    assert skipped == ["option2 value لافندر: different English on rows 2, 4 "
+                       "(Lavender, Lavande)"], skipped
+    # only case / spacing differs -> the same English, not a conflict
+    rows = _options_rows()
+    rows[2]["option2_value_en"] = "  LAVENDER "
+    p = _p(rows, _FC)
+    writes, skipped, _ = mapping.option_translation_payloads(p, _fc_detail())
+    assert skipped == [], skipped
+    assert ("value", "221", {"name": "لافندر", "translations": {
+        "en": {"option_details_name": "Lavender"}}}) in writes, writes
+
+
+def test_option_translation_payloads_en_same_as_arabic_skipped():
+    rows = _options_rows()
+    rows[0]["option2_name_en"] = "الرائحة"
+    for row in rows:
+        if row["option1_value_ar"] == "500 مل":
+            row["option1_value_en"] = "٥٠٠ مل"            # same as the Arabic (norm_label)
+    p = _p(rows, _FC)
+    writes, skipped, _ = mapping.option_translation_payloads(p, _fc_detail())
+    ids = [i for k, i, b in writes]
+    assert "22" not in ids and "111" not in ids, ids
+    assert "option2 الرائحة: the English name is the same as the Arabic" in skipped, skipped
+    assert "option1 value 500 مل: the English name is the same as the Arabic" in skipped, \
+        skipped
+    _assert_option_bodies(writes)
+
+
+def test_option_translation_payloads_missing_salla_option_or_value():
+    p = _p(_options_rows(), _FC)
+    # option 2 not in Salla: none of its names sent, one reason; option 1 still sent
+    detail = _fc_detail()
+    detail["options"] = detail["options"][:1]
+    writes, skipped, _ = mapping.option_translation_payloads(p, detail)
+    assert [i for k, i, b in writes] == ["11", "111", "112"], writes
+    assert skipped == ["option2 الرائحة: not in the Salla product (its English names are "
+                       "not sent)"], skipped
+    # one value missing in the Salla option
+    detail = _fc_detail()
+    detail["options"][0]["values"] = detail["options"][0]["values"][:1]
+    writes, skipped, _ = mapping.option_translation_payloads(p, detail)
+    assert "112" not in [i for k, i, b in writes], writes
+    assert skipped == ["option1 value 1 لتر: not in the Salla option"], skipped
+
+
+def test_option_translation_payloads_ambiguous_match_skipped():
+    p = _p(_options_rows(), _FC)
+    # two Salla values with the same Arabic in one option
+    detail = _fc_detail()
+    detail["options"][1]["values"].append({"id": 229, "name": " لافندر "})
+    writes, skipped, _ = mapping.option_translation_payloads(p, detail)
+    ids = [i for k, i, b in writes]
+    assert "221" not in ids and "229" not in ids, ids
+    assert skipped == ["option2 value لافندر: matches 2 Salla values"], skipped
+    # two Salla options with the same Arabic name
+    detail = _fc_detail()
+    detail["options"].append({"id": 33, "name": "الحجم", "values": []})
+    writes, skipped, _ = mapping.option_translation_payloads(p, detail)
+    assert [i for k, i, b in writes] == ["22", "221", "222"], writes
+    assert skipped == ["option1 الحجم: matches 2 Salla options (its English names are "
+                       "not sent)"], skipped
+
+
+def test_option_translation_payloads_no_id_or_no_arabic_skipped():
+    p = _p(_options_rows(), _FC)
+    detail = _fc_detail()
+    detail["options"][0]["values"][0]["id"] = None
+    detail["options"][1]["id"] = "None"                   # str(None) upstream
+    writes, skipped, _ = mapping.option_translation_payloads(p, detail)
+    ids = [i for k, i, b in writes]
+    assert ids == ["11", "112", "221", "222"], ids
+    assert "option1 value 500 مل: the Salla value has no id or Arabic name" in skipped
+    assert "option2 الرائحة: the Salla option has no id or Arabic name" in skipped
+    assert all(i not in ("None", "") for i in ids)
+
+
+def test_option_translation_payloads_already_in_salla_nothing():
+    p = _p(_options_rows(), _FC)
+    detail = _fc_detail()
+    en = {"11": "Size", "111": "500 ml", "112": "1 l", "22": "SCENT", "221": "Lavender",
+          "222": " Lemon "}
+    for option in detail["options"]:
+        option["translations"] = {"en": {"option_name": en[str(option["id"])]},
+                                  "ar": {"option_name": option["name"]}}
+        for value in option["values"]:
+            value["translations"] = {"en": {"option_details_name": en[str(value["id"])]}}
+    writes, skipped, unchanged = mapping.option_translation_payloads(p, detail)
+    assert writes == [] and skipped == [] and unchanged == 6, (writes, skipped, unchanged)
+    # one different English -> only that one written, the rest unchanged
+    detail["options"][1]["values"][1]["translations"]["en"]["option_details_name"] = "Lime"
+    writes, skipped, unchanged = mapping.option_translation_payloads(p, detail)
+    assert [(k, i) for k, i, b in writes] == [("value", "222")] and unchanged == 5, writes
+    # English under the WRONG key ("name" is ignored by Salla) is not "already set"
+    detail = _fc_detail()
+    detail["options"][0]["translations"] = {"en": {"name": "Size"}}
+    detail["options"][0]["values"][0]["translations"] = {"en": {"option_name": "500 ml"}}
+    writes, _, unchanged = mapping.option_translation_payloads(p, detail)
+    assert unchanged == 0 and len(writes) == 6, (writes, unchanged)
+    # garbage translations do not crash
+    detail = _fc_detail()
+    detail["options"][0]["translations"] = ["en"]
+    detail["options"][1]["translations"] = {"en": "Scent"}
+    writes, _, unchanged = mapping.option_translation_payloads(p, detail)
+    assert unchanged == 0 and len(writes) == 6, writes
+
+
+def test_option_translation_payloads_two_options_share_a_value_name():
+    # "عادي" in both options with different English: each goes to ITS option's value id
+    p = _overlap_product()
+    writes, skipped, unchanged = mapping.option_translation_payloads(p, _OVERLAP_DETAIL)
+    assert skipped == [] and unchanged == 0, skipped
+    values = {i: b["translations"]["en"]["option_details_name"]
+              for k, i, b in writes if k == "value"}
+    assert values == {"113": "Regular", "221": "Lavender", "223": "Unscented"}, values
+    assert [(k, i) for k, i, b in writes] == [
+        ("option", "11"), ("value", "113"), ("option", "22"), ("value", "221"),
+        ("value", "223")], writes
+    _assert_option_bodies(writes)
+
+
+def test_option_translation_payloads_no_detail_or_no_options():
+    p = _p(_options_rows(), _FC)
+    for detail in (None, {}, {"options": None}, {"options": "x"}, [], "garbage"):
+        writes, skipped, unchanged = mapping.option_translation_payloads(p, detail)
+        assert writes == [] and unchanged == 0, (detail, writes)
+        assert skipped == [
+            "option1 الحجم: not in the Salla product (its English names are not sent)",
+            "option2 الرائحة: not in the Salla product (its English names are not sent)"], \
+            (detail, skipped)
+    # a simple product has no option English at all
+    simple = _p(_simple_rows(), "fake-glass-cleaner")
+    assert mapping.option_translation_payloads(simple, _fc_detail()) == ([], [], 0)
+    assert mapping.option_english_names(simple) == ([], [])
+    assert mapping.option_english_names(None) == ([], [])
+
+
+def test_option_english_names_order_and_dedup():
+    names, skipped = mapping.option_english_names(_p(_options_rows(), _FC))
+    assert skipped == []
+    assert names == [("option", 0, "الحجم", "Size"), ("value", 0, "500 مل", "500 ml"),
+                     ("value", 0, "1 لتر", "1 L"), ("option", 1, "الرائحة", "Scent"),
+                     ("value", 1, "لافندر", "Lavender"), ("value", 1, "ليمون", "Lemon")], names
+
+
+def test_detail_option_name():
+    d = _fc_detail()
+    assert mapping.detail_option_name(d, "option", "11") == "الحجم"
+    assert mapping.detail_option_name(d, "option", 22) == "الرائحة"      # int vs str id
+    assert mapping.detail_option_name(d, "value", "222") == "ليمون"
+    assert mapping.detail_option_name(d, "value", "11") is None         # option id as value
+    assert mapping.detail_option_name(d, "option", "111") is None       # value id as option
+    assert mapping.detail_option_name(d, "value", "999") is None
+    for empty in (None, {}, {"options": None}, "garbage"):
+        assert mapping.detail_option_name(empty, "option", "11") is None
+    en = {"options": [{"id": 11, "name": {"ar": "الحجم", "en": "Size"},
+                       "values": [{"id": 111, "name": {"ar": "500 مل", "en": "500 ml"}}]}]}
+    assert mapping.detail_option_name(en, "option", "11", lang="en") == "Size"
+    assert mapping.detail_option_name(en, "value", "111", lang="en") == "500 ml"
+    assert mapping.detail_option_name(en, "value", "111") == "500 مل"   # default lang ar
+    # a lang en read that answers a plain string: that string
+    assert mapping.detail_option_name(_fc_detail(), "option", "11", lang="en") == "الحجم"
 
 
 def _overlap_product():
@@ -5007,7 +5364,7 @@ if __name__ == "__main__":
                test_product_payload_create_simple, test_product_payload_create_options,
                test_product_payload_update_never_status_options_images,
                test_product_payload_empty_optionals_omitted, test_translation_payload,
-               test_option_en_writes_removed, test_norm_label,
+               test_option_en_writes_lang_ar_translations_only, test_norm_label,
                test_match_variants_set_match,
                test_match_variants_same_value_in_two_options, test_match_variants_id_types,
                test_match_variants_simple_product, test_variant_payload_full,
@@ -5038,7 +5395,22 @@ if __name__ == "__main__":
                # F8 spike follow-up (review B1/S2/S3)
                test_translation_payload_drops_en_without_ar, test_hide_marker_ref,
                test_hide_marker_left, test_hide_marker_stale, test_writes_stock,
-               test_wizard_restore_and_hide_static]:
+               test_wizard_restore_and_hide_static,
+               # F8 option / value English (spike run 4, lang ar + translations.en)
+               test_option_en_keys_from_spike_run4,
+               test_option_translation_payloads_full_product,
+               test_option_translation_payloads_arabic_from_salla_not_sheet,
+               test_option_translation_payloads_empty_en_skipped,
+               test_option_translation_payloads_en_inherited_from_other_rows,
+               test_option_translation_payloads_conflicting_en_skipped,
+               test_option_translation_payloads_en_same_as_arabic_skipped,
+               test_option_translation_payloads_missing_salla_option_or_value,
+               test_option_translation_payloads_ambiguous_match_skipped,
+               test_option_translation_payloads_no_id_or_no_arabic_skipped,
+               test_option_translation_payloads_already_in_salla_nothing,
+               test_option_translation_payloads_two_options_share_a_value_name,
+               test_option_translation_payloads_no_detail_or_no_options,
+               test_option_english_names_order_and_dedup, test_detail_option_name]:
         fn()
         print(fn.__name__, "OK")
     print("all passed")

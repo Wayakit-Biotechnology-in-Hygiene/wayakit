@@ -7,7 +7,7 @@
                "uploaded to Salla, bulk product upload from a master sheet + images ZIP "
                "(hidden, upsert by SKU, dry-run first).",
     "category": "Sales",
-    "version": "17.0.5.0.1",
+    "version": "17.0.5.0.2",
     "author": "Wayakit",
     "website": "https://wayakit.com",
     "license": "LGPL-3",

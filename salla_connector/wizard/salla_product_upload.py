@@ -62,15 +62,18 @@ TEMPLATE_HELP = (
     ("category_ids", "product", "no", "Salla category ids separated by ';' (numbers)."),
     ("product_type", "product", "no", "product (default) or group_products."),
     ("option1_name_ar/en, option2_name_ar/en", "product", "AR yes if values are used",
-     "Option names, e.g. Size, Scent. At most 2 options. The _en option names and "
-     "values are NOT sent (Salla may write them over the Arabic): enter them by hand "
-     "in Salla."),
+     "Option names, e.g. Size, Scent. At most 2 options. The _en names are sent as "
+     "Salla's English translation (the Arabic is never changed); an _en name left "
+     "empty, or the same as the Arabic, has to be entered by hand in Salla."),
     ("option1_value_ar/en, option2_value_ar/en", "variant", "AR yes when the option name "
-     "is set", "One row per combination. Salla creates EVERY combination of the option "
+     "is set", "One row per combination. The _en value is sent as Salla's English "
+     "translation of that value: give one Arabic value the same English on every row "
+     "(empty rows take it from the others). Salla creates EVERY combination of the option "
      "values (e.g. 2 sizes x 3 scents = 6 variants); a combination without a row gets the "
      "lowest price and default stock: give it a row, or disable it or set it out of stock "
-     "in Salla before publishing. The uploader never edits options of an existing "
-     "product: a new value must be added in Salla by hand."),
+     "in Salla before publishing. The uploader never adds, removes or renames options or "
+     "values of an existing product (only their English translation is sent): a new "
+     "value must be added in Salla by hand."),
     ("price", "variant", "yes", "SAR, above 0, as the store expects it (VAT setting)."),
     ("sale_price", "variant", "no", "Below price."),
     ("stock", "variant", "no", "Whole number. Blank = not sent."),
@@ -440,11 +443,17 @@ class SallaProductUpload(models.TransientModel):
         # left by earlier runs, plus the ones this run commits. hide_dates: when each
         # earlier one was last marked (a stale one is only reported). hide_marked: the
         # ones this run committed (re-marking an old one restarts its date).
+        # option_en: False once an English option / value write failed its check (no
+        # more of them in this run); option_verified: the kinds ("option", "value")
+        # whose first write of the run was read back fine. deadline: option / value
+        # English writes stop there (a product with 2 options and 8 values is 10 PUTs).
         marked = self.env["salla.product.hide"]._marked(self.backend_id)
+        budget = self._time_budget()
         state = {"en_supported": True, "claimed": {},
                  "archive": archive, "entries": entries, "item_skus": {},
-                 "hide_refs": set(marked), "hide_dates": marked, "hide_marked": set()}
-        budget = self._time_budget()
+                 "hide_refs": set(marked), "hide_dates": marked, "hide_marked": set(),
+                 "option_en": True, "option_verified": set(),
+                 "deadline": started + budget}
         results = {}
         for index, product in enumerate(products):
             if time.monotonic() - started > budget:
@@ -512,11 +521,12 @@ class SallaProductUpload(models.TransientModel):
                      res["action"] or "-", res["status"], res["variants_set"], res["images"])
 
     # --- Salla reads ---
-    def _get_product(self, product_id, lang=None):
+    def _get_product(self, product_id, lang=None, params=None):
         """GET /products/{id} -> detail dict, None on a 404."""
         try:
             response = self.backend_id._request(
-                "GET", "/products/%s" % quote(str(product_id), safe=""), lang=lang)
+                "GET", "/products/%s" % quote(str(product_id), safe=""), lang=lang,
+                params=params)
         except SallaApiError as e:
             if e.http_status == 404:
                 return None
@@ -669,8 +679,7 @@ class SallaProductUpload(models.TransientModel):
                     "them out of stock in Salla before publishing") % unlisted)
             existing = 0
         if self.step != "images":
-            if product["options"]:
-                self._flag(res, "warning", self._option_names_by_hand_message())
+            self._plan_option_english(product, detail, res)
             skip = mapping.translation_skip_reason(product)
             if skip:
                 self._flag(res, "warning", self._english_skipped_message(skip))
@@ -692,6 +701,34 @@ class SallaProductUpload(models.TransientModel):
         changes = sum(1 for variant, current in pairs if mapping.variant_payload(variant, current))
         res["messages"].append(_("would set %s of %s variant(s)") % (changes, len(pairs)))
         self._report_variant_gaps(res, missing, extra)
+
+    def _plan_option_english(self, product, detail, res):
+        """Dry run: the English option / value names Apply would send. An existing
+        product is read again with ?with=translations (a read) so names Salla already
+        has in English are not counted."""
+        if not product["options"]:
+            return
+        if not detail:
+            names, skipped = mapping.option_english_names(product)
+            todo, unchanged = len(names), 0
+        else:
+            try:
+                current = self._get_product(mapping.detail_id(detail), lang="ar",
+                                            params={"with": "translations"}) or detail
+            except Exception as e:
+                if not isinstance(e, UserError):
+                    _logger.exception("Salla upload: translations read of %s failed",
+                                      mapping.detail_id(detail))
+                current = detail          # current English unknown: counted as to do
+            writes, skipped, unchanged = mapping.option_translation_payloads(
+                product, current)
+            todo = len(writes)
+        if todo or not skipped:
+            res["messages"].append(_("would set English option/value names: %s") % todo
+                                   + (_(" (%s already set)") % unchanged if unchanged
+                                      else ""))
+        for reason in skipped:
+            self._flag(res, "warning", self._option_names_by_hand_message(reason))
 
     def _plan_simple(self, product, detail, res):
         # Apply PUTs these on the product itself; Ops keeps the stock by hand (F4), so an
@@ -1003,11 +1040,12 @@ class SallaProductUpload(models.TransientModel):
         return not missing
 
     def _apply_english(self, product, detail, res, state):
-        """EN product texts. Option / value names are never written in English: on the
-        demo store (spike 2026-11-10) PUT /products/options[/values]/{id} with the EN
-        headers replaced the ARABIC name. That store had English DISABLED then, so it
-        may not hold with English on; until the spike re-runs with it on, they are
-        entered by hand in Salla.
+        """EN product texts, then the EN option / value names."""
+        self._apply_text_english(product, detail, res, state)
+        self._apply_option_english(product, detail, res, state)
+
+    def _apply_text_english(self, product, detail, res, state):
+        """EN product texts: PUT /products/{id} with lang "en".
         After the EN PUT the product is read back twice. In Arabic: if the EN write
         replaced the Arabic, it is put back. In English: the demo (English disabled)
         answered the EN PUT with a 200, kept the Arabic, and still showed the Arabic
@@ -1016,8 +1054,6 @@ class SallaProductUpload(models.TransientModel):
         differs from name_ar (mapping.translation_skip_reason), and only the ones whose
         Arabic side is set (mapping.translation_payload): the Arabic restore / re-write
         must cover every key the EN PUT carried."""
-        if product["options"]:
-            self._flag(res, "warning", self._option_names_by_hand_message())
         backend, pid = self.backend_id, mapping.detail_id(detail)
         body = mapping.translation_payload(product)
         skip = mapping.translation_skip_reason(product)
@@ -1077,10 +1113,144 @@ class SallaProductUpload(models.TransientModel):
                 "(%s): check the Arabic description of #%s in Salla") % (
                 _error_text(e), pid))
 
+    def _apply_option_english(self, product, detail, res, state):
+        """EN option / value names (spike run 4, 2026-11-10, English enabled): PUT
+        /products/options[/values]/{id} with lang "ar" and the CURRENT Arabic name plus
+        translations.en (mapping.option_translation_payloads). A lang "en" PUT wrote
+        over the Arabic in earlier spikes, so the first option and the first value of
+        the run are read back in Arabic (unchanged, else restored and no more option
+        English in this run) and in English (shown, else no more option English).
+        Once both kinds passed, later writes only check the HTTP result, like the
+        product texts. Values / price / quantity are never sent."""
+        if not product["options"]:
+            return
+        if not state["en_supported"] or not state["option_en"]:
+            self._flag(res, "warning", self._option_names_by_hand_message(
+                _("English option names stopped earlier in this run") if state["en_supported"]
+                else _("Salla did not keep the English texts in this run (check that English "
+                       "is enabled in the store's languages)")))
+            return
+        pid = mapping.detail_id(detail)
+        try:
+            # Fresh, after the variants step: current Arabic names and English.
+            current = self._get_product(pid, lang="ar", params={"with": "translations"})
+        except Exception as e:
+            if not isinstance(e, UserError):
+                _logger.exception("Salla upload: translations read of %s failed", pid)
+            current = None
+            error = _error_text(e)
+        else:
+            error = _("product not found")
+        if not current:
+            self._flag(res, "warning", self._option_names_by_hand_message(
+                _("product not read (%s); re-run") % error))
+            return
+        writes, skipped, unchanged = mapping.option_translation_payloads(product, current)
+        for reason in skipped:
+            self._flag(res, "warning", self._option_names_by_hand_message(reason))
+        done = 0
+        for index, (kind, item_id, body) in enumerate(writes):
+            if not state["option_en"]:
+                break
+            if time.monotonic() > state["deadline"]:
+                self._flag(res, "warning", _(
+                    "time budget reached: %s English option/value name(s) not written; "
+                    "run this handle again") % (len(writes) - index))
+                break
+            path = self._option_path(kind, item_id)
+            res["wrote"] = True
+            try:
+                self.backend_id._request("PUT", path, lang="ar", payload=body)
+            except UserError as e:
+                self._flag(res, "warning", _("English %(kind)s name %(name)s not written: "
+                                             "%(error)s") % {
+                    "kind": kind, "name": body["name"], "error": _error_text(e)})
+                continue
+            if kind not in state["option_verified"] \
+                    and not self._option_english_kept(pid, kind, item_id, body, res, state):
+                continue
+            done += 1
+        if done:
+            res["messages"].append(_("English option/value names set: %s") % done)
+        if unchanged:
+            res["messages"].append(_("English option/value names already set: %s") % unchanged)
+
     @staticmethod
-    def _option_names_by_hand_message():
-        return _("English option/value names must be entered by hand in Salla (the "
-                 "uploader never writes them: Salla may write them over the Arabic)")
+    def _option_path(kind, item_id):
+        if kind == "option":
+            return "/products/options/%s" % quote(item_id, safe="")
+        return "/products/options/values/%s" % quote(item_id, safe="")
+
+    def _option_english_kept(self, pid, kind, item_id, body, res, state):
+        """First write of `kind` in the run: read back in Arabic and in English. True
+        = both fine (kind verified for the run). On a failure option English stops
+        for the run; an Arabic that moved is put back (lang ar, name only)."""
+        ar = body["name"]
+        en = body["translations"]["en"][mapping.OPTION_EN_KEYS[kind]]
+        try:
+            after = mapping.detail_option_name(self._get_product(pid, lang="ar"), kind,
+                                               item_id)
+        except Exception as e:
+            state["option_en"] = False
+            if not isinstance(e, UserError):
+                _logger.exception("Salla upload: Arabic option read-back of %s failed", pid)
+            self._flag(res, "error", _(
+                "English %(kind)s name written but its Arabic not verified (%(error)s): "
+                "check %(kind)s %(name)s of #%(pid)s in Salla (no more English option "
+                "names in this run)") % {"kind": kind, "error": _error_text(e),
+                                          "name": ar, "pid": pid})
+            return False
+        if after is None:
+            # The item is not in the answer (404, unexpected shape): no proof the Arabic
+            # moved, so no restore PUT; just stop and ask for a look.
+            state["option_en"] = False
+            self._flag(res, "error", _(
+                "English %(kind)s name written but its Arabic not verified (not in Salla's "
+                "answer): check %(kind)s %(name)s of #%(pid)s in Salla (no more English "
+                "option names in this run)") % {"kind": kind, "name": ar, "pid": pid})
+            return False
+        if not mapping.translation_kept(ar, after):
+            state["option_en"] = False
+            try:
+                self.backend_id._request("PUT", self._option_path(kind, item_id), lang="ar",
+                                         payload={"name": ar})
+            except Exception as e:
+                if not isinstance(e, UserError):
+                    _logger.exception("Salla upload: Arabic option restore of %s failed", pid)
+                self._flag(res, "error", _(
+                    "Salla wrote the English over the Arabic %(kind)s name and restoring "
+                    "it failed (%(error)s): set it back to %(name)s on #%(pid)s in Salla "
+                    "by hand (no more English option names in this run)") % {
+                    "kind": kind, "error": _error_text(e), "name": ar, "pid": pid})
+                return False
+            self._flag(res, "warning", _(
+                "Salla wrote the English over the Arabic %(kind)s name: Arabic restored; "
+                "enter the English option names by hand (no more English option names in "
+                "this run)") % {"kind": kind})
+            return False
+        try:
+            shown = mapping.detail_option_name(self._get_product(pid, lang="en"), kind,
+                                               item_id, lang="en")
+        except Exception as e:
+            if not isinstance(e, UserError):
+                _logger.exception("Salla upload: English option read-back of %s failed", pid)
+            # Not proof that English is lost: the next write of this kind is checked.
+            self._flag(res, "warning", _("English %(kind)s name written but not verified "
+                                         "(%(error)s): check it in Salla") % {
+                "kind": kind, "error": _error_text(e)})
+            return False
+        if mapping.norm_label(shown) != mapping.norm_label(en):
+            state["option_en"] = False
+            self._flag(res, "warning", _(
+                "Salla did not keep the English option names; enter them by hand (no "
+                "more English option names in this run)"))
+            return False
+        state["option_verified"].add(kind)
+        return True
+
+    @staticmethod
+    def _option_names_by_hand_message(reason):
+        return _("English option/value names must be entered by hand in Salla: %s") % reason
 
     @staticmethod
     def _english_dropped_message(product):
