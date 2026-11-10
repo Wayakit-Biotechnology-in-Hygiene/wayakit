@@ -100,8 +100,11 @@ def verify_store():
 def step_create():
     body = {"name": AR_NAME, "price": 10, "product_type": "product", "status": "hidden",
             "sku": PARENT_SKU, "description": AR_DESC, "require_shipping": True,
+            # Salla requires weight on create: without it, 422 fields.weight (demo 2026-11-10).
+            "weight": 0.5, "weight_type": "kg",
             "options": [{"name": OPTION_AR, "display_type": "text",
                          "values": [{"name": v} for v in VALUES_AR]}]}
+    F["1 create needs weight"] = "yes: 422 fields.weight without it (demo 2026-11-10)"
     ok, d, st = call("POST", "/products", payload=body, idempotent=False)
     if not ok and st is None:
         print("create: unknown outcome, looking it up by parent SKU")

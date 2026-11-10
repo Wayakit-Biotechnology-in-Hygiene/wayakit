@@ -69,7 +69,10 @@ TEMPLATE_HELP = (
     ("price", "variant", "yes", "SAR, above 0, as the store expects it (VAT setting)."),
     ("sale_price", "variant", "no", "Below price."),
     ("stock", "variant", "no", "Whole number. Blank = not sent."),
-    ("weight / weight_unit", "variant", "no", "Above 0; unit kg (default) or g."),
+    ("weight / weight_unit", "variant", "yes to create", "Above 0; unit kg (default) or g. "
+     "Salla refuses to create a product without a weight (422): a NEW product needs a "
+     "weight on at least one row (with options, the first row with a weight is sent on "
+     "the create; give every row its own). Not required to update an existing product."),
     ("barcode", "variant", "no", "Keep this column formatted as Text so leading zeros "
      "survive."),
     ("image_1 ... image_10", "product", "no", "File names inside the images ZIP, in display "
@@ -565,6 +568,10 @@ class SallaProductUpload(models.TransientModel):
                 res["action"] = "not in Salla"
                 self._flag(res, "error", _("not in Salla yet: run step Everything first"))
                 return
+            if not mapping.create_weight(product):
+                res["action"] = "would not create"
+                self._flag(res, "error", self._no_weight_message())
+                return
             res["action"] = "would create"
             res["messages"].append(_("would create it hidden with %s variant(s)") % len(
                 product["variants"]))
@@ -604,6 +611,11 @@ class SallaProductUpload(models.TransientModel):
             res["messages"].append(_("would set %s") % ", ".join(
                 "%s %s (Salla: %s)" % (label, new, current if current != "" else "?")
                 for label, new, current in changes))
+
+    @staticmethod
+    def _no_weight_message():
+        return _("Salla requires a weight to create a product: fill weight (and "
+                 "weight_unit) in the sheet")
 
     @staticmethod
     def _structure_message(pid, problem):
@@ -678,6 +690,11 @@ class SallaProductUpload(models.TransientModel):
     def _create_product(self, product, res, state):
         """POST /products. An unknown outcome (timeout, 5xx) is checked with a lookup:
         found = adopted, never posted twice."""
+        if not mapping.create_weight(product):
+            # Refused before the POST: Salla answers 422 anyway, and an existing product
+            # (update path) never gets here, so only new ones need a weight.
+            res["action"] = "not created"
+            raise UserError(self._no_weight_message())
         try:
             response = self.backend_id._request(
                 "POST", "/products", payload=mapping.product_payload(product, create=True),

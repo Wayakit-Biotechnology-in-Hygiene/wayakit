@@ -3746,6 +3746,114 @@ def test_product_payload_empty_optionals_omitted():
     assert body["quantity"] == 0, body                         # 0 is a value, not empty
 
 
+# --- create_weight: Salla requires a weight on POST /products (422 "fields.weight" on the
+# demo store, 2026-11-10) ------------------------------------------------------------------
+
+def _weighted_options_rows(*weights):
+    """_options_rows with (weight, weight_unit) per row; None = both cells empty."""
+    rows = _options_rows()
+    for row, wu in zip(rows, weights):
+        if wu is not None:
+            row["weight"], row["weight_unit"] = wu
+    return rows
+
+
+def test_create_weight_simple_product():
+    p = _p(_simple_rows(), "fake-glass-cleaner")                 # 0.5 kg, stock 12, sale 20
+    assert mapping.create_weight(p) == (0.5, "kg"), mapping.create_weight(p)
+    body = mapping.product_payload(p, True)
+    _assert_clean_body(body, _EN_TEXTS)
+    assert body["weight"] == 0.5 and body["weight_type"] == "kg", body
+    assert body["quantity"] == 12 and body["sale_price"] == 20, body   # unchanged
+    upd = mapping.product_payload(p, False)                     # simple: update still sends it
+    assert upd["weight"] == 0.5 and upd["weight_type"] == "kg", upd
+    # g unit, given in upper case in the sheet: lower-cased on create and update
+    p = _p(_simple_rows(weight="750", weight_unit="G"), "fake-glass-cleaner")
+    assert mapping.create_weight(p) == (750, "g"), mapping.create_weight(p)
+    for create in (True, False):
+        body = mapping.product_payload(p, create)
+        assert body["weight"] == 750 and body["weight_type"] == "g", (create, body)
+    # unit cell empty -> kg
+    p = _p(_simple_rows(weight="2", weight_unit=""), "fake-glass-cleaner")
+    assert mapping.create_weight(p) == (2, "kg"), mapping.create_weight(p)
+    assert mapping.product_payload(p, True)["weight_type"] == "kg"
+
+
+def test_create_weight_options_first_weighted_row():
+    # every row weighted: the first row's weight goes on the create
+    p = _p(_weighted_options_rows(("0.5", "kg"), ("0.6", "kg"), ("1.1", "kg"), ("1.2", "kg")),
+           _FC)
+    assert mapping.create_weight(p) == (0.5, "kg"), mapping.create_weight(p)
+    body = mapping.product_payload(p, True)
+    _assert_clean_body(body, _EN_TEXTS)
+    assert body["weight"] == 0.5 and body["weight_type"] == "kg", body
+    assert body["price"] == 30 and len(body["options"]) == 2, body   # rest of the create body
+    for key in ("quantity", "sale_price", "images", "barcode"):
+        assert key not in body, key
+    # first row has no weight, second is 600 g, third 1.1 kg: the second row wins (sheet
+    # order, not the lowest, not the first kg one)
+    p = _p(_weighted_options_rows(None, ("600", "g"), ("1.1", "kg"), None), _FC)
+    assert mapping.create_weight(p) == (600, "g"), mapping.create_weight(p)
+    body = mapping.product_payload(p, True)
+    _assert_clean_body(body, _EN_TEXTS)
+    assert body["weight"] == 600 and body["weight_type"] == "g", body
+    # only the last row weighted
+    p = _p(_weighted_options_rows(None, None, None, ("1.2", "KG")), _FC)
+    assert mapping.create_weight(p) == (1.2, "kg"), mapping.create_weight(p)
+    assert mapping.product_payload(p, True)["weight"] == 1.2
+
+
+def test_create_weight_none_without_any_weight():
+    p = _p(_options_rows(), _FC)                                # 4 rows, no weight anywhere
+    assert mapping.create_weight(p) is None, mapping.create_weight(p)
+    body = mapping.product_payload(p, True)
+    _assert_clean_body(body, _EN_TEXTS)
+    assert "weight" not in body and "weight_type" not in body, body
+    p = _p(_simple_rows(weight="", weight_unit="g"), "fake-glass-cleaner")   # unit alone
+    assert mapping.create_weight(p) is None, mapping.create_weight(p)
+    for create in (True, False):
+        body = mapping.product_payload(p, create)
+        assert "weight" not in body and "weight_type" not in body, (create, body)
+    # raw dicts (no parser): no variants / missing key / explicit None
+    for product in ({}, {"variants": []}, {"variants": None},
+                    {"variants": [{"sku": "FAKE-1"}, {"sku": "FAKE-2", "weight": None}]}):
+        assert mapping.create_weight(product) is None, product
+    # unit missing or None on a raw dict -> kg; upper case -> lower case
+    assert mapping.create_weight({"variants": [{"weight": 3}]}) == (3, "kg")
+    assert mapping.create_weight({"variants": [{"weight": 3, "weight_unit": None}]}) == (3, "kg")
+    assert mapping.create_weight({"variants": [{"weight": 3, "weight_unit": "G"}]}) == (3, "g")
+
+
+
+def test_create_weight_rejects_non_positive_and_non_numbers():
+    # Second line of defence behind the parser: only a real number above 0 counts.
+    for bad in (0, -1, 0.0, True, "0.5", None):
+        p = {"options": [], "variants": [{"sku": "FAKE-W-1", "weight": bad, "weight_unit": "kg"}]}
+        assert mapping.create_weight(p) is None, bad
+    p = {"options": [], "variants": [{"sku": "FAKE-W-1", "weight": 750, "weight_unit": ""}]}
+    assert mapping.create_weight(p) == (750, "kg"), mapping.create_weight(p)
+    p = {"options": [{"ar": "x", "en": "x"}], "variants": [
+        {"sku": "FAKE-W-1", "weight": 0, "weight_unit": "kg"},
+        {"sku": "FAKE-W-2", "weight": 2, "weight_unit": "G"}]}
+    assert mapping.create_weight(p) == (2, "g"), mapping.create_weight(p)
+
+def test_product_payload_update_options_never_weight():
+    # a product with options: its weight lives on the variants (variant_payload), so the
+    # product PUT never carries one, even when every row is weighted
+    p = _p(_weighted_options_rows(("600", "g"), ("0.6", "kg"), ("1.1", "kg"), ("1.2", "kg")),
+           _FC)
+    upd = mapping.product_payload(p, False)
+    _assert_clean_body(upd, _EN_TEXTS)
+    for key in ("weight", "weight_type", "status", "options", "price", "quantity"):
+        assert key not in upd, (key, upd)
+    # ... while each variant PUT still sends its own row's weight (multi-unit stock rows)
+    by_sku = {v["sku"]: v for v in p["variants"]}
+    vp = mapping.variant_payload(by_sku["FAKE-FC-001"])
+    assert vp.get("weight") == 600 and vp.get("weight_type") == "g", vp
+    vp = mapping.variant_payload(by_sku["FAKE-FC-003"])
+    assert vp.get("weight") == 1.1 and vp.get("weight_type") == "kg", vp
+
+
 def test_translation_payload():
     rows = _options_rows()
     rows[0].update(subtitle_en="Fake subtitle", promotion_title_en="Fake promo",
@@ -4493,7 +4601,13 @@ if __name__ == "__main__":
                test_parse_parent_sku_no_false_positive, test_parse_duplicate_image_names,
                test_read_csv_rows_unclosed_quote_value_error,
                test_read_xlsx_rows_encrypted_entry_value_error,
-               test_read_xlsx_rows_unsupported_compression_is_damaged]:
+               test_read_xlsx_rows_unsupported_compression_is_damaged,
+               # F8 weight required on create (demo 422, 2026-11-10)
+               test_create_weight_simple_product,
+               test_create_weight_options_first_weighted_row,
+               test_create_weight_none_without_any_weight,
+               test_create_weight_rejects_non_positive_and_non_numbers,
+               test_product_payload_update_options_never_weight]:
         fn()
         print(fn.__name__, "OK")
     print("all passed")

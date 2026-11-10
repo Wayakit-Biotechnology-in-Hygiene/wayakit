@@ -886,7 +886,11 @@ Run the standalone suite first: `python3 salla_connector/tests/test_mapping.py` 
 `all passed` (F8 tests: `test_read_*`, `test_parse_*`, `test_upload_*`, `test_text_to_html`,
 `test_flagged_claims_*`, `test_product_payload_*`, `test_translation_*`,
 `test_option_translation_*`, `test_norm_label`, `test_match_variants_*`, `test_variant_payload_*`,
-`test_images_to_attach`, `test_detail_helpers`).
+`test_images_to_attach`, `test_detail_helpers`, `test_create_weight_*`).
+
+**Weight is required on create** (observed on the demo store 2026-11-10: `POST /products`
+without `weight` -> 422 `{"message":"alert.invalid_fields","fields":{"weight":[...]}}`). A NEW
+handle needs a weight on at least one row; an existing product (update / images) does not.
 
 Odoo shell helpers (paste after the ones at the top of this file; `BID` = the DEMO backend id).
 They print ids, statuses and numbers only:
@@ -948,6 +952,7 @@ def last_wiz():
 
     | Finding | If it says | Then |
     |---|---|---|
+    | `1 create needs weight` | yes (422 `fields.weight` without it) | Expected (demo 2026-11-10): the uploader sends the weight on create and refuses a new handle without one (168, 170, 171a) |
     | `1 parent sku kept` | False | Lookup by parent SKU cannot work: developer |
     | `1 variants created` | not 2, or prices not 10 | Options create shape is wrong: developer, **STOP S** |
     | `2 variant PUT with weight_type` | 422 | Developer drops `weight_type` from `variant_payload` |
@@ -966,13 +971,15 @@ def last_wiz():
 166. **Download Template.** It downloads an .xlsx with a **Products** sheet (the header row + 2 fake example rows: one simple product, one Size x Scent product) and an **Instructions** sheet. It opens in Excel/Numbers with the Arabic readable.
 167. **Test files** (make them from the template, all values fake):
     - `stg-f8-simple`: one row, SKU `STG-F8-001`, price 25, **sale_price 20**, stock 12, weight 0.5 kg, barcode `000123456789`, `image_1 = stg-f8-1.jpg`, AR + EN name/description.
-    - `stg-f8-options`: Size (500 مل / 1 لتر) x Scent (لافندر / ليمون), 4 rows `STG-F8-011` ... `STG-F8-014`, prices 30 / 32 / 45 / 47 (different on purpose), stock 4 / 0 / 12 / 3, one variant with sale_price 28 (< its price 30), `image_1..image_4 = stg-f8-1.jpg, stg-f8-2.webp, stg-f8-3.png, stg-f8-4.jpg`, `image_alt` set, `category_ids` = one demo category id (from the dashboard URL).
+    - `stg-f8-options`: Size (500 مل / 1 لتر) x Scent (لافندر / ليمون), 4 rows `STG-F8-011` ... `STG-F8-014`, prices 30 / 32 / 45 / 47 (different on purpose), stock 4 / 0 / 12 / 3, **weight 0.5 kg on all 4 rows** (Salla requires a weight to create), one variant with sale_price 28 (< its price 30), `image_1..image_4 = stg-f8-1.jpg, stg-f8-2.webp, stg-f8-3.png, stg-f8-4.jpg`, `image_alt` set, `category_ids` = one demo category id (from the dashboard URL).
     - `stg-f8-broken`: one row with price `abc`.
+    - `stg-f8-noweight`: one simple row, SKU `STG-F8-090`, price 25, stock 3, AR name/description, **weight and weight_unit empty**.
     - Images ZIP (inside a folder, as a Mac zips it): `stg-f8-1.jpg` (1200 x 1200, < 300 KB), `stg-f8-2.webp`, `stg-f8-3.png` (800 x 600). **`stg-f8-4.jpg` is left out on purpose.**
 168. **Dry Run, Step Everything** (as admin). Before: `sl_find()` -> write down (expected empty). Expected result:
     - `stg-f8-simple` and `stg-f8-options`: *would create it hidden with 1 / 4 variant(s)*, *would attach image(s) ...*.
     - `stg-f8-options`: warning *images stop: stg-f8-4.jpg not in the ZIP* (images 1-3 only) and a warning that `stg-f8-3.png` is not square.
     - `stg-f8-broken`: error starting with `Row N:` (N = its sheet row) about the price; it is skipped.
+    - `stg-f8-noweight`: action **would not create**, error *Salla requires a weight to create a product: fill weight (and weight_unit) in the sheet*; no "would create" / "would attach" line for it.
     - Warnings *SKU not found in Odoo* for the `STG-F8-*` SKUs (they are fake): expected.
     - **Download the result sheet:** the input rows plus `salla_product_id`, `salla_variant_id`, `upload_action`, `upload_status`, `upload_message`.
     - **No write in dry run:** `sl_find()` is still the same as before, and nothing new in the Salla dashboard.
@@ -980,18 +987,22 @@ def last_wiz():
 
 ### S.5 Apply with images
 170. **Mode Apply, Step Everything** (as admin), same files. Expected:
-    - `stg-f8-simple` and `stg-f8-options` **created**; `stg-f8-broken` skipped with its error. The result sheet has `salla_product_id` filled for the two.
+    - `stg-f8-simple` and `stg-f8-options` **created**; `stg-f8-broken` skipped with its error.
+    - `stg-f8-noweight`: action **not created**, the same *Salla requires a weight...* error, **no POST**: `sl_find("STG-F8-090")` is empty and nothing new in the dashboard (Salla would have answered 422 anyway; the error must be ours, not a `422`/`invalid_fields` text). The run continues with the other handles.
+    - The result sheet has `salla_product_id` filled for the two.
     - `sl(<id>)` for each: status **hidden**; parent SKU `STG-F8-001` (simple) and `STG-F8-OPTIONS` (options product: the handle in upper case), if the spike said the parent sku is kept; every variant with its own SKU, price (30 / 32 / 45 / 47, not all the lowest), sale price where set, stock 4 / 0 / 12 / 3 (the 0 is a 0, not empty), weight 0.5, barcode `000123456789` with its zeros.
     - In the dashboard: AR name and description (paragraphs and bullet lists rendered, no raw `<p>` text), options Size x Scent with the 4 combinations, images 1-3 in sheet order with image 1 as the main one and the alt text, the category set.
     - `sl_names(<id>)`: EN name shown with lang en **and** AR name intact. If the spike said AR does not survive: the result says *English must be entered by hand* and the AR name is intact.
     - `sl_find()` lists exactly **two** products.
     - Build log: one summary line per product (handle, Salla id, action, counts). **No request bodies, no marketing copy, no token.**
 171. Status after the run: both **hidden** (`sl(<id>)["status"]`). The uploader never publishes.
+171a. **Options product whose first row has no weight** (own SKU prefix so the `STG-F8` counts below do not change). Separate sheet, handle `stg-w8-options`, option Size (500 مل / 1 لتر), 2 rows `STG-W8-001` (500 مل, price 30, stock 4, **weight empty**) and `STG-W8-002` (1 لتر, price 45, stock 12, **weight 600, weight_unit g**). Dry Run: *would create it hidden with 2 variant(s)* (no weight error: one row has a weight). Apply: **created**, no 422; `sl(<id>)`: status hidden, variant `STG-W8-002` weight 600 g (or 0.6 if Salla shows kg: write down which). Write down the weight Salla shows for `STG-W8-001` (no row weight: the create sent 600 g at product level; this says whether Salla copies it to variants without their own). Leave it hidden.
 
 ### S.6 Re-run idempotence
 172. **Apply again**, same files (also once with the result sheet of 170 as input, `salla_product_id` filled). Expected:
     - Both products *update #id*; `sl_find()` still lists exactly **two** (no duplicates).
     - Images count unchanged (3): nothing re-attached. Variant values unchanged; no variant PUT reported when nothing changed.
+172a. **Existing product: no weight needed to update.** Clear `weight` and `weight_unit` of `stg-f8-simple` in the sheet, change its `stock` to 7, Apply. Expected: *update #id* (no *Salla requires a weight* error), stock 7 in `sl(<id>)`, its weight in Salla **unchanged** (0.5: an empty cell never clears it). Restore the sheet (weight 0.5 kg, stock 12) and Apply again.
 173. **Published product untouched.** In the Salla dashboard, publish `stg-f8-simple` by hand (demo only). Change its `price` to 27 in the sheet and Apply. Expected: price 27 in Salla, status still **published** (the uploader never touches the status of an existing product). Hide it again by hand afterwards.
 174. **New option value is never created by the uploader.** Add a 5th row to `stg-f8-options` with a new scent (e.g. نعناع / Mint, SKU `STG-F8-015`) and Apply. Expected: error *add the option value in Salla by hand; the uploader never edits options* for that row, the 4 existing variants untouched, no new option value in Salla. Remove the row.
 
@@ -1036,7 +1047,7 @@ def last_wiz():
 178. As a **sale manager who is not admin**: the menu and the backend button are visible; **Dry Run** works; **Apply** raises *Only an administrator can apply a product upload to Salla; run a Dry Run instead.* Same through the shell, with a wizard owned by that user (wizard records are owner-only): `src = last_wiz(); w = env["salla.product.upload"].with_user(<uid>).create({"backend_id": BID, "mode": "apply", "file": src.file, "file_name": src.file_name}); w.action_run()` -> **AccessError** with that message, and `sl_find()` unchanged.
 179. As a **salesman** (not manager): no menu, no button. Shell: `env["salla.product.upload"].with_user(<uid>).create({"backend_id": BID})` -> **AccessError** (no ACL row).
 180. Clean-up and record:
-    - The spike product and the `stg-f8-*` products stay **hidden** on the demo store. Delete them by hand in the Salla dashboard if wanted (the uploader and the spike never delete).
+    - The spike product and the `stg-f8-*` / `stg-w8-*` products stay **hidden** on the demo store. Delete them by hand in the Salla dashboard if wanted (the uploader and the spike never delete).
     - Ticket: Salla product ids, statuses, HTTP codes, the spike findings block, which steps passed / failed / were not run. No tokens, no URLs with tokens, no customer data.
 
 ### S.11 Real store: catalog-only backend BEFORE the app is installed there

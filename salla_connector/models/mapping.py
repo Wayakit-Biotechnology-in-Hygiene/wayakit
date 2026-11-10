@@ -2408,16 +2408,34 @@ def _text_fields(product, lang):
             "metadata_description": get("seo_description")}
 
 
+def create_weight(product):
+    """(weight, unit) for the POST /products of `product`, None when no row has a weight.
+
+    Salla refuses a create without a weight (422 "weight is required", demo store
+    2026-11-10), even for a product with options whose variants get their own weight
+    right after. Product without options: its only row. With options: the first row
+    in sheet order that has a weight (the variant PUTs then set each one's own).
+    A weight of 0 or less counts as none: the parser already refuses it, but a raw
+    dict must not slip past the wizard's "no weight, no POST" guard."""
+    for variant in product.get("variants") or []:
+        weight = variant.get("weight")
+        if isinstance(weight, (int, float)) and not isinstance(weight, bool) and weight > 0:
+            return weight, text(variant.get("weight_unit") or "kg").lower()
+    return None
+
+
 def product_payload(product, create):
     """Arabic body of POST /products (create=True) or PUT /products/{id} (False).
 
     Create: name, price (lowest variant price), product_type, status "hidden", sku =
-    parent_sku, texts, categories, require_shipping; a product without options also
-    quantity / sale_price / weight + weight_type (barcode is a variant-only field);
-    with options also `options` (names and values only: a value price/quantity risks a
-    422). Update: texts and categories only, plus price / sale_price / quantity / weight
-    for a product without options (its only variant has no PUT of its own); never
-    status, options, images, sku or product_type."""
+    parent_sku, texts, categories, require_shipping, weight + weight_type from
+    create_weight (Salla requires them; omitted only when no row has a weight, which
+    the wizard refuses before posting); a product without options also quantity /
+    sale_price (barcode is a variant-only field); with options also `options` (names
+    and values only: a value price/quantity risks a 422). Update: texts and categories
+    only, plus price / sale_price / quantity / weight for a product without options
+    (its only variant has no PUT of its own); never status, options, images, sku or
+    product_type."""
     variants = product.get("variants") or []
     simple = not product.get("options")
     body = {}
@@ -2443,7 +2461,7 @@ def product_payload(product, create):
             _put(body, "price", only.get("price"))
         _put(body, "quantity", only.get("stock"))
         _put(body, "sale_price", only.get("sale_price"))
-        if only.get("weight") is not None:
+        if not create and only.get("weight") is not None:
             body["weight"] = only["weight"]
             body["weight_type"] = only.get("weight_unit") or "kg"
     elif create:
@@ -2457,6 +2475,9 @@ def product_payload(product, create):
                     names.append(name)
             body["options"].append({"name": text(option.get("ar")), "display_type": "text",
                                     "values": [{"name": n} for n in names]})
+    weight = create_weight(product) if create else None
+    if weight is not None:
+        body["weight"], body["weight_type"] = weight
     return body
 
 
