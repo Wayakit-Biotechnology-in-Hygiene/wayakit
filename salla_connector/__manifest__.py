@@ -4,9 +4,10 @@
                "authorization, signed webhooks, SKU reconciliation and order import "
                "(webhook queue + reconcile cron), \"shipped\" pushed back to Salla and "
                "Salla cancellations applied, ZATCA invoices/credit notes created, paid and "
-               "uploaded to Salla.",
+               "uploaded to Salla, bulk product upload from a master sheet + images ZIP "
+               "(hidden, upsert by SKU, dry-run first).",
     "category": "Sales",
-    "version": "17.0.4.0.0",
+    "version": "17.0.5.0.0",
     "author": "Wayakit",
     "website": "https://wayakit.com",
     "license": "LGPL-3",
@@ -22,6 +23,8 @@
     "data": [
         "security/ir.model.access.csv",
         "data/salla_data.xml",
+        # Before the backend views: their "Upload Products" menu uses its action.
+        "views/salla_product_upload_views.xml",
         "views/salla_backend_views.xml",
         "views/salla_order_queue_views.xml",
         "views/sale_order_views.xml",

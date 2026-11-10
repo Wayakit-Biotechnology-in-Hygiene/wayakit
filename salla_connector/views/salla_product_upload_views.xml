@@ -1,0 +1,55 @@
+<odoo>
+    <data>
+        <!-- F8: bulk product upload. Loaded before salla_backend_views.xml, whose menu
+             "Upload Products" points at the action below. -->
+        <record id="salla_product_upload_form" model="ir.ui.view">
+            <field name="name">salla.product.upload.form</field>
+            <field name="model">salla.product.upload</field>
+            <field name="arch" type="xml">
+                <form string="Upload Products to Salla">
+                    <div class="alert alert-info" role="alert" invisible="result_html">
+                        Products are created <b>hidden</b> and matched by SKU on every run:
+                        re-running updates them, nothing is ever deleted or published.
+                        Dry Run only reads Salla. Apply needs an administrator.
+                    </div>
+                    <group>
+                        <group>
+                            <field name="backend_id" options="{'no_create': True, 'no_open': True}"/>
+                            <field name="mode" widget="radio"/>
+                            <field name="step" widget="radio"/>
+                            <field name="handles" placeholder="handle-one, handle-two"/>
+                        </group>
+                        <group>
+                            <field name="file_name" invisible="1"/>
+                            <field name="file" filename="file_name"/>
+                            <field name="images_zip_name" invisible="1"/>
+                            <field name="images_zip" filename="images_zip_name"/>
+                            <field name="convert_webp"/>
+                        </group>
+                    </group>
+                    <group string="Blocked Phrases">
+                        <field name="blocked_phrases" nolabel="1" colspan="2"/>
+                    </group>
+                    <group string="Result" invisible="not result_html">
+                        <field name="result_file_name" invisible="1"/>
+                        <field name="result_file" filename="result_file_name" invisible="not result_file"/>
+                        <field name="result_html" nolabel="1" colspan="2"/>
+                    </group>
+                    <field name="template_file" invisible="1"/>
+                    <footer>
+                        <button name="action_run" type="object" string="Run" class="btn-primary"/>
+                        <button name="action_download_template" type="object" string="Download Template"/>
+                        <button string="Close" special="cancel" class="btn-secondary"/>
+                    </footer>
+                </form>
+            </field>
+        </record>
+
+        <record id="salla_product_upload_action" model="ir.actions.act_window">
+            <field name="name">Upload Products to Salla</field>
+            <field name="res_model">salla.product.upload</field>
+            <field name="view_mode">form</field>
+            <field name="target">new</field>
+        </record>
+    </data>
+</odoo>

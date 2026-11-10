@@ -9,8 +9,10 @@
                         <button name="action_test_connection" type="object" string="Test Connection" class="btn-primary"/>
                         <button name="action_check_products" type="object" string="Check Product SKUs"/>
                         <button name="action_import_orders" type="object" string="Import Orders Now"
-                                groups="sales_team.group_sale_manager"/>
+                                groups="sales_team.group_sale_manager" invisible="not import_orders"/>
                         <button name="action_process_order_queue" type="object" string="Process Order Queue"
+                                groups="sales_team.group_sale_manager" invisible="not import_orders"/>
+                        <button name="action_open_product_upload" type="object" string="Upload Products"
                                 groups="sales_team.group_sale_manager"/>
                         <!-- System only: it spends the single-use refresh token. -->
                         <button name="action_refresh_token" type="object" string="Refresh Token Now"
@@ -49,6 +51,10 @@
                                 <field name="company_id" invisible="1"/>
                                 <field name="warehouse_id"/>
                                 <field name="active" invisible="1"/>
+                                <!-- Header buttons read import_orders: same rule as company_id.
+                                     Read-only, or a non-admin's create would send its default
+                                     and hit _check_system_write. -->
+                                <field name="import_orders" invisible="1" readonly="1"/>
                             </group>
                             <group string="Authorization (filled by app.store.authorize)">
                                 <!-- Read-only even for admins: only the authorize webhook and
@@ -69,6 +75,10 @@
                         </group>
                         <group>
                             <group string="Orders">
+                                <!-- Off = catalog-only backend (another connector imports the
+                                     store's orders). Admin-only write, enforced in write(). -->
+                                <field name="import_orders" groups="base.group_system"/>
+                                <field name="import_orders" groups="!base.group_system" readonly="1"/>
                                 <field name="website_id"/>
                                 <field name="pricelist_id"/>
                                 <field name="salesperson_id"/>
@@ -122,6 +132,7 @@
                 <tree>
                     <field name="name"/>
                     <field name="store_id"/>
+                    <field name="import_orders" optional="show"/>
                     <field name="company_id" groups="base.group_multi_company"/>
                     <field name="token_expires_at"/>
                 </tree>
@@ -134,10 +145,22 @@
             <field name="view_mode">tree,form</field>
         </record>
 
+        <!-- Section since F8 (Backends + Upload Products). On an upgraded database it
+             keeps its old action, which the navbar ignores for a menu with children. -->
         <menuitem id="menu_salla_backend"
                   name="Salla"
                   parent="sale.menu_sale_config"
-                  action="salla_backend_action"
                   sequence="91"/>
+        <menuitem id="menu_salla_backend_list"
+                  name="Backends"
+                  parent="menu_salla_backend"
+                  action="salla_backend_action"
+                  sequence="10"/>
+        <menuitem id="menu_salla_product_upload"
+                  name="Upload Products"
+                  parent="menu_salla_backend"
+                  action="salla_product_upload_action"
+                  groups="sales_team.group_sale_manager"
+                  sequence="20"/>
     </data>
 </odoo>

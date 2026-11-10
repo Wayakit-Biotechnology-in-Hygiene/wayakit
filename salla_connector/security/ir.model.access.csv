@@ -3,3 +3,5 @@ access_salla_backend_user,salla.backend.user,model_salla_backend,sales_team.grou
 access_salla_backend_manager,salla.backend.manager,model_salla_backend,sales_team.group_sale_manager,1,1,1,1
 access_salla_order_queue_user,salla.order.queue.user,model_salla_order_queue,sales_team.group_sale_salesman,1,0,0,0
 access_salla_order_queue_manager,salla.order.queue.manager,model_salla_order_queue,sales_team.group_sale_manager,1,1,1,1
+access_salla_product_upload_manager,salla.product.upload.manager,model_salla_product_upload,sales_team.group_sale_manager,1,1,1,1
+access_salla_product_upload_system,salla.product.upload.system,model_salla_product_upload,base.group_system,1,1,1,1

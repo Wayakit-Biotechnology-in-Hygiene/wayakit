@@ -1,4 +1,4 @@
-# salla_connector: staging checklist (odoo.sh `mainTest` build): F1 (A-I), F2a (J-N), F2b (O), F2a post-meeting (P), F3 (Q), F5 (R)
+# salla_connector: staging checklist (odoo.sh `mainTest` build): F1 (A-I), F2a (J-N), F2b (O), F2a post-meeting (P), F3 (Q), F5 (R), F8 (S)
 
 Manual run by a human on the odoo.sh staging build. There is no local Odoo.
 Run the standalone suite first: `python3 salla_connector/tests/test_mapping.py` must end in `all passed`.
@@ -872,3 +872,200 @@ Use **fresh** demo orders in this section: older demo orders may hold test uploa
       - `run_inv()` twice: no new invoice attempt, no second activity.
     - **Delete the automation rule** right after, and restore the Salla Payments Journal.
 
+## S. F8: product upload (v17.0.5.0.0)
+
+**DEMO STORE ONLY (`461067869`).** Nothing in this section touches the real store: the real
+run (second backend, `Import Orders` off, spec `claude-docs/14-product-upload.md` §1) comes
+only after S.1-S.10 pass and the spike findings are settled, and only through S.11 (backend
+created with Import Orders off and checked **before** the app is installed on the real store). The uploader never deletes and never
+publishes; every product it creates stays **hidden**. Every handle, SKU and barcode below is
+fake (`stg-f8-*` / `STG-F8-*`). Never put marketing copy with claims on hold, ingredient
+names, costs, tokens or customer data in the test sheet, the ticket or a chat.
+
+Run the standalone suite first: `python3 salla_connector/tests/test_mapping.py` must end in
+`all passed` (F8 tests: `test_read_*`, `test_parse_*`, `test_upload_*`, `test_text_to_html`,
+`test_flagged_claims_*`, `test_product_payload_*`, `test_translation_*`,
+`test_option_translation_*`, `test_norm_label`, `test_match_variants_*`, `test_variant_payload_*`,
+`test_images_to_attach`, `test_detail_helpers`).
+
+Odoo shell helpers (paste after the ones at the top of this file; `BID` = the DEMO backend id).
+They print ids, statuses and numbers only:
+```python
+from odoo.addons.salla_connector.models import mapping
+b = env["salla.backend"].browse(BID)
+assert b.store_id == "461067869", "S runs on the demo backend only"
+def sl(pid):        # one Salla product: status, parent sku, images, variants
+    d = (b._request("GET", "/products/%s" % pid) or {}).get("data") or {}
+    return dict(id=d.get("id"), sku=d.get("sku"), status=mapping.detail_status(d),
+                price=mapping.money(d.get("price")), images=len(mapping.detail_images(d)),
+                variants=[(v.get("id"), v.get("sku"), mapping.money(v.get("price")),
+                           mapping.money(v.get("sale_price")), v.get("stock_quantity"),
+                           v.get("weight"), v.get("barcode")) for v in d.get("skus") or []])
+def sl_names(pid):  # name as Salla shows it in AR and in EN
+    return [((b._request("GET", "/products/%s" % pid, lang=lang) or {}).get("data") or {})
+            .get("name") for lang in ("ar", "en")]
+def sl_find(keyword="STG-F8"):   # every Salla product whose SKUs match: duplicates show here
+    res = b._request("GET", "/products", params={"keyword": keyword}) or {}
+    return [(p.get("id"), mapping.detail_status(p), mapping.product_skus(p))
+            for p in res.get("data") or [] if isinstance(p, dict)]
+def last_wiz():
+    return env["salla.product.upload"].search([], order="id desc", limit=1)
+```
+
+### S.1 Build and dependencies
+156. Build green; `salla_connector` upgrades to **17.0.5.0.0** with no error or warning about the module in the build log. Redo step 37 (Webhook URL in the Partners Portal for this build, reinstall the app on the demo store, Test Connection green). Expected in the UI:
+    - Menu **Sales > Configuration > Salla > Upload Products** (admin and sale manager).
+    - Button **Upload Products** on the backend form: it opens the wizard with the backend already set.
+    - The wizard shows Master Sheet, Images ZIP, Mode (**Dry Run** by default), Step (**Everything** by default), Only Handles, Blocked Phrases (pre-filled with the 10 SAL-92 phrases, one per line), Convert WebP to JPEG (off), and the buttons **Run**, **Download Template**, Close.
+157. **openpyxl is not required.** `__manifest__.py` `external_dependencies` lists only `requests`. In the shell, write down `import importlib.util; importlib.util.find_spec("openpyxl") is not None` (either answer is fine: the reader is stdlib-only, and step 166 must read a real Excel file either way). Also write down Pillow and its WebP support (the spike and **Convert WebP to JPEG** need them): `import PIL; from PIL import features; PIL.__version__, features.check("webp")`.
+
+### S.2 Catalog-only guard (`Import Orders`)
+158. Backend form: **Import Orders** is visible, **on** by default, with its help text (*Off = catalog-only backend: ...*). As a **sale manager who is not admin**: the field is read-only, and in the shell `b.with_user(<that user id>).write({"import_orders": False})` raises **AccessError**. Nothing changes.
+159. As admin, turn **Import Orders off** on the demo backend. Expected:
+    - The header buttons **Import Orders Now** and **Process Order Queue** disappear.
+    - In the shell, `b.action_import_orders()` and `b.action_process_order_queue()` each raise a **UserError** that says the backend is catalog-only.
+    - Backstop: `b._sync_order("<id of any demo order>")` returns `("error", None, "catalog-only backend (Import Orders off): not imported")` and creates no sale order.
+160. **Webhook ignored.** Write down `env["salla.order.queue"].search_count([])` first. Then (zsh, helpers from the top of this file):
+    ```sh
+    B='{"event":"order.created","merchant":'"$STORE_ID"',"data":{"id":1000000001}}'; post "$B" "$(sig "$B")"
+    B='{"event":"order.status.updated","merchant":'"$STORE_ID"',"data":{"order":{"id":1000000001},"status":"in_progress"}}'; post "$B" "$(sig "$B")"
+    ```
+    Expected: both answer **200 `ok:ignored:catalog_only`** in well under 1 s; the queue count is unchanged; the log says *ignored (Import Orders off)*. An unsigned body still gets **401** (step 11 command).
+161. **Crons skip it.** Create a demo order (Salla dashboard, or `tests/staging_api_orders.py`), write down its id as `ORDER_ID`, then:
+    ```python
+    env.ref("salla_connector.ir_cron_salla_order_queue").method_direct_trigger()
+    env.ref("salla_connector.ir_cron_salla_reconcile_orders").method_direct_trigger()
+    env.cr.commit()
+    env["sale.order"].search_count([("salla_order_id", "=", str(ORDER_ID))])   # -> 0
+    ```
+    **Refresh Tokens still runs for it:** `print(fp(current()[0]))`, then as admin set **Token Expires At** to about 1 hour from now, `env.ref("salla_connector.ir_cron_salla_refresh_tokens").method_direct_trigger()`, `print(fp(current()[0]))`: the fingerprint **changed** and Test Connection is green.
+162. **Authorize still works.** With Import Orders still off, reinstall the app on the demo store. The webhook answers `ok:authorized` (build log), the token fingerprints change, Test Connection is green.
+163. Turn **Import Orders back on** (the demo backend is used with it on for the rest of S; the uploader does not care). Optional: run the reconcile cron and check that the order of step 161 now imports once (write down the result).
+
+### S.3 Spike: settle the open API questions (one throwaway hidden product)
+164. Paste the whole of `tests/staging_products_spike.py` into the shell. Expected: `store verified: demo 461067869`, then the **F8 SPIKE FINDINGS** block. If it prints `STOP`, nothing was sent: fix what it says (wrong backend, module not upgraded) and paste again. Copy only the findings block into the ticket. Check in the Salla dashboard that the spike product (`SPIKE-F8-...`) is **hidden**.
+165. Act on the findings **before** step 168 (tell the lead/developer; do not work around them by hand):
+
+    | Finding | If it says | Then |
+    |---|---|---|
+    | `1 parent sku kept` | False | Lookup by parent SKU cannot work: developer |
+    | `1 variants created` | not 2, or prices not 10 | Options create shape is wrong: developer, **STOP S** |
+    | `2 variant PUT with weight_type` | 422 | Developer drops `weight_type` from `variant_payload` |
+    | `2 decimal weight 0.25 kept` / `2 barcode leading zeros kept` | False | Developer + Ops (barcodes as text) |
+    | `3 GET /products/sku/<variant sku>` | 404 | Fine only if `3 ...keyword...` finds ours (fallback) |
+    | `4 AR name survived` | False | Expected handling: the uploader restores AR and says *English must be entered by hand* (check in 168) |
+    | `4 variants kept ...` / `4 price kept ...` | False | A plain PUT wipes data: developer, **STOP S** |
+    | `5 option values and variants kept` | False | Option EN writes destroy variants: developer must turn them off, **STOP S** |
+    | `6 attach webp ...` | an HTTP error | Turn **Convert WebP to JPEG** on for the real run |
+    | `8 status after images + quantity` | not `hidden` | Salla publishes by itself: developer, **STOP S** |
+    | `8 POST /products/<id>/status hidden` | an HTTP error | Developer (step 8 of the run relies on it) |
+
+    Any `... crashed` line: send it to the developer as is.
+
+### S.4 Dry run on the demo store
+166. **Download Template.** It downloads an .xlsx with a **Products** sheet (the header row + 2 fake example rows: one simple product, one Size x Scent product) and an **Instructions** sheet. It opens in Excel/Numbers with the Arabic readable.
+167. **Test files** (make them from the template, all values fake):
+    - `stg-f8-simple`: one row, SKU `STG-F8-001`, price 25, **sale_price 20**, stock 12, weight 0.5 kg, barcode `000123456789`, `image_1 = stg-f8-1.jpg`, AR + EN name/description.
+    - `stg-f8-options`: Size (500 مل / 1 لتر) x Scent (لافندر / ليمون), 4 rows `STG-F8-011` ... `STG-F8-014`, prices 30 / 32 / 45 / 47 (different on purpose), stock 4 / 0 / 12 / 3, one variant with sale_price 28 (< its price 30), `image_1..image_4 = stg-f8-1.jpg, stg-f8-2.webp, stg-f8-3.png, stg-f8-4.jpg`, `image_alt` set, `category_ids` = one demo category id (from the dashboard URL).
+    - `stg-f8-broken`: one row with price `abc`.
+    - Images ZIP (inside a folder, as a Mac zips it): `stg-f8-1.jpg` (1200 x 1200, < 300 KB), `stg-f8-2.webp`, `stg-f8-3.png` (800 x 600). **`stg-f8-4.jpg` is left out on purpose.**
+168. **Dry Run, Step Everything** (as admin). Before: `sl_find()` -> write down (expected empty). Expected result:
+    - `stg-f8-simple` and `stg-f8-options`: *would create it hidden with 1 / 4 variant(s)*, *would attach image(s) ...*.
+    - `stg-f8-options`: warning *images stop: stg-f8-4.jpg not in the ZIP* (images 1-3 only) and a warning that `stg-f8-3.png` is not square.
+    - `stg-f8-broken`: error starting with `Row N:` (N = its sheet row) about the price; it is skipped.
+    - Warnings *SKU not found in Odoo* for the `STG-F8-*` SKUs (they are fake): expected.
+    - **Download the result sheet:** the input rows plus `salla_product_id`, `salla_variant_id`, `upload_action`, `upload_status`, `upload_message`.
+    - **No write in dry run:** `sl_find()` is still the same as before, and nothing new in the Salla dashboard.
+169. Save the same sheet as **CSV UTF-8** and dry-run it: same result as 168. Also dry-run the .xlsx with **Only Handles** = `stg-f8-simple`: only that handle is listed.
+
+### S.5 Apply with images
+170. **Mode Apply, Step Everything** (as admin), same files. Expected:
+    - `stg-f8-simple` and `stg-f8-options` **created**; `stg-f8-broken` skipped with its error. The result sheet has `salla_product_id` filled for the two.
+    - `sl(<id>)` for each: status **hidden**; parent SKU `STG-F8-001` (simple) and `STG-F8-OPTIONS` (options product: the handle in upper case), if the spike said the parent sku is kept; every variant with its own SKU, price (30 / 32 / 45 / 47, not all the lowest), sale price where set, stock 4 / 0 / 12 / 3 (the 0 is a 0, not empty), weight 0.5, barcode `000123456789` with its zeros.
+    - In the dashboard: AR name and description (paragraphs and bullet lists rendered, no raw `<p>` text), options Size x Scent with the 4 combinations, images 1-3 in sheet order with image 1 as the main one and the alt text, the category set.
+    - `sl_names(<id>)`: EN name shown with lang en **and** AR name intact. If the spike said AR does not survive: the result says *English must be entered by hand* and the AR name is intact.
+    - `sl_find()` lists exactly **two** products.
+    - Build log: one summary line per product (handle, Salla id, action, counts). **No request bodies, no marketing copy, no token.**
+171. Status after the run: both **hidden** (`sl(<id>)["status"]`). The uploader never publishes.
+
+### S.6 Re-run idempotence
+172. **Apply again**, same files (also once with the result sheet of 170 as input, `salla_product_id` filled). Expected:
+    - Both products *update #id*; `sl_find()` still lists exactly **two** (no duplicates).
+    - Images count unchanged (3): nothing re-attached. Variant values unchanged; no variant PUT reported when nothing changed.
+173. **Published product untouched.** In the Salla dashboard, publish `stg-f8-simple` by hand (demo only). Change its `price` to 27 in the sheet and Apply. Expected: price 27 in Salla, status still **published** (the uploader never touches the status of an existing product). Hide it again by hand afterwards.
+174. **New option value is never created by the uploader.** Add a 5th row to `stg-f8-options` with a new scent (e.g. نعناع / Mint, SKU `STG-F8-015`) and Apply. Expected: error *add the option value in Salla by hand; the uploader never edits options* for that row, the 4 existing variants untouched, no new option value in Salla. Remove the row.
+
+### S.7 Images only
+175. Add `stg-f8-4.jpg` to the ZIP. Change `name_en` of `stg-f8-options` in the sheet, and add a new handle `stg-f8-new` (one simple row). **Step Images only, Apply.** Expected:
+    - `stg-f8-options`: exactly one image attached (sort 4); `sl(<id>)["images"]` = 4. The EN name in Salla is **not** changed (no product PUT in this step).
+    - `stg-f8-new`: error *not in Salla yet: run step Everything first*; nothing created (`sl_find()` still two).
+    - Run it again: nothing attached (4 already there).
+
+### S.8 Claims on hold block apply
+176. Put `Baby-Safe formula` in `description_en` of `stg-f8-simple` and `It won’t scratch` (curly apostrophe, as pasted from Word/Notion) in its `subtitle_en`. **Dry Run:** warnings naming the phrases found. **Apply:** error for `stg-f8-simple`, product skipped: its EN description and subtitle in Salla are unchanged (`sl_names()` and the dashboard). Remove the phrases afterwards. Also check that clearing **Blocked Phrases** to a blank line does not flag every product.
+
+### S.9 Time budget
+177. Run a Dry Run once in the UI (so the wizard record exists), then in the shell:
+    ```python
+    from odoo.addons.salla_connector.wizard import salla_product_upload as W
+    w = last_wiz(); w = w.with_user(w.create_uid)    # wizard records are owner-only
+    W.TIME_BUDGET = 0; W.TIME_BUDGET_MIN = 0   # both: on odoo.sh limit_time_real is set, so the 30 s floor would apply
+    w.handles = False; w.mode = "dry_run"; w.action_run(); print(w.result_html)
+    W.TIME_BUDGET = 240; W.TIME_BUDGET_MIN = 30
+    ```
+    Expected: *N product(s) left (time budget): run again, re-runs are idempotent.*, each product marked *time budget reached: run again*, no API write. Restore 240 / 30 (or exit the shell).
+177a. **Run continues with the remaining handles.** Stop after the **first** product (not at 0, where "remaining" = "all" and proves nothing). Same shell, same wizard, the S.4 sheet (at least 2 valid handles, e.g. `stg-f8-simple`, `stg-f8-options` in that sheet order):
+    ```python
+    import time
+    Cls = type(w); orig = Cls._run_product
+    def slow(self, product, res, state):        # each product now takes > 1 s
+        orig(self, product, res, state); time.sleep(1.5)
+    Cls._run_product = slow
+    W.TIME_BUDGET = 1; W.TIME_BUDGET_MIN = 1
+    w.handles = False; w.mode = "dry_run"; w.action_run()
+    print(w.handles); print(w.result_html)
+    ```
+    Expected:
+    - The first handle of the sheet ran (its normal dry-run result); every later one is *time budget reached: run again* and the summary says *N product(s) left*.
+    - **`w.handles` (Only Handles) lists exactly the handles left**, comma-separated, in sheet order, and **not** the one that already ran. A handle with a row error (`stg-f8-broken`) is listed only if the run stopped before it.
+    - Again with a filter: `w.handles = "stg-f8-simple,stg-f8-options"` (2 handles), run: Only Handles becomes `stg-f8-options` only (never a handle outside the original filter).
+    - Restore: `Cls._run_product = orig; W.TIME_BUDGET = 240; W.TIME_BUDGET_MIN = 30` (or exit the shell; the patch lives only in this shell process). Then `w.action_run()` with the remaining handles still in Only Handles: it runs **only** those, none is marked *time budget*, no *left* line. Same in the UI: open the wizard result, check Only Handles shows the remaining handles, press **Run**.
+    - When a run finishes without stopping, Only Handles is left as it was (a run with it empty stays empty).
+
+### S.10 Access
+178. As a **sale manager who is not admin**: the menu and the backend button are visible; **Dry Run** works; **Apply** raises *Only an administrator can apply a product upload to Salla; run a Dry Run instead.* Same through the shell, with a wizard owned by that user (wizard records are owner-only): `src = last_wiz(); w = env["salla.product.upload"].with_user(<uid>).create({"backend_id": BID, "mode": "apply", "file": src.file, "file_name": src.file_name}); w.action_run()` -> **AccessError** with that message, and `sl_find()` unchanged.
+179. As a **salesman** (not manager): no menu, no button. Shell: `env["salla.product.upload"].with_user(<uid>).create({"backend_id": BID})` -> **AccessError** (no ACL row).
+180. Clean-up and record:
+    - The spike product and the `stg-f8-*` products stay **hidden** on the demo store. Delete them by hand in the Salla dashboard if wanted (the uploader and the spike never delete).
+    - Ticket: Salla product ids, statuses, HTTP codes, the spike findings block, which steps passed / failed / were not run. No tokens, no URLs with tokens, no customer data.
+
+### S.11 Real store: catalog-only backend BEFORE the app is installed there
+Only after S.1-S.10 passed and the spike findings are settled. **Order matters.** A backend for
+the real store with **Import Orders on** makes the "Salla: Reconcile Orders" cron (every 30 min)
+import the last `DEFAULT_LOOKBACK_DAYS` (3) days of the real store's orders into staging, the
+orders **Tecfy already created in production**, and queues every real order webhook. The Store ID
+must be on the backend before the authorize arrives (routing is by exact Store ID). Never tick
+Import Orders on this backend, not even for a moment: turning it on later imports everything
+since Orders Synced Until.
+
+181. Write down: `env["sale.order"].search_count([("salla_order_id", "!=", False)])` and `env["salla.order.queue"].search_count([])`. The demo backend stays as it is (`store_id` `461067869`).
+182. **Create the real-store backend, Import Orders off, then save.** As **admin**: Sales > Configuration > Salla > New. Name e.g. `Salla REAL store (catalog only)`, company **KSA (id 1)**, warehouse **WH**, Website **empty**, **Store ID** = the real store's id, typed by hand from the real store's Salla dashboard. **Untick Import Orders before the first Save.** Save. Do not touch any token field.
+183. **Check it reads off** before going further. Reload the page (F5): the **Import Orders** box is **unticked**, and the header buttons **Import Orders Now** / **Process Order Queue** are **not shown**. In the shell (`REAL_STORE_ID` = the id typed in 182):
+    ```python
+    r = env["salla.backend"].search([("store_id", "=", REAL_STORE_ID)]); r.ensure_one()
+    r.import_orders, r.store_id, r.access_token and "SET" or "EMPTY"   # -> False, the real id, "EMPTY"
+    env["salla.backend"].search_count([("store_id", "=", "461067869")])  # -> 1 (demo untouched)
+    ```
+    If `import_orders` is **True**, the Store ID is empty or wrong, or `ensure_one()` fails: **STOP, do not install the app on the real store**; fix it and repeat 183.
+184. **Only now** install the app on the real store (Mafer, real store's Salla dashboard; on a new build, update the Webhook URL in the Partners Portal first). Expected: the build log shows `ok:authorized` for this backend; **Test Connection** on the real backend is green; Test Connection on the demo backend is still green.
+185. **Nothing imported.** Right after 184 and again ~30 min later (one cron cycle):
+    ```python
+    env.ref("salla_connector.ir_cron_salla_reconcile_orders").method_direct_trigger()
+    env.ref("salla_connector.ir_cron_salla_order_queue").method_direct_trigger()
+    env.cr.commit()
+    env["salla.order.queue"].search_count([("backend_id", "=", r.id)])   # -> 0
+    env["sale.order"].search_count([("salla_backend_id", "=", r.id)])    # -> 0
+    ```
+    and both counts of step 181 unchanged. Any real-store order event in the build log reads `ok:ignored:catalog_only`. If a single real order appears in staging: **STOP**, uninstall the app from the real store, tell the lead (do not confirm, invoice or delete it by hand).
+186. Run the upload on the real store with **this** backend picked in the wizard, Dry Run first. Leave Import Orders off for the whole real run.
+187. **Every new build** (each push to `mainTest` = clean prod DB copy, no real backend): repeat 181-185 in the same order (create with Import Orders off, check it reads off) **before** the Webhook URL is updated in the Partners Portal or the app is reinstalled on the real store.

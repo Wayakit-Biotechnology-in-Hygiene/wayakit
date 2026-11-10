@@ -7,10 +7,13 @@ All secrets/tokens below are obviously fake test values.
 import hashlib
 import hmac
 import inspect
+import io
 import json
 import math
 import os
+import re
 import sys
+import zipfile
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "models"))
@@ -2858,6 +2861,1487 @@ def test_cancel_action_credit_note_when_auto_invoicing():
     assert mapping.cancel_action("sale", ["assigned"], False, auto_credit_note=True) == "cancel"
 
 
+# ============================================================================ F8
+# Bulk product upload (spec claude-docs/14-product-upload.md §3-§4). Every handle, SKU,
+# barcode, category id and piece of copy below is obviously fake. No ingredient names,
+# no costs.
+
+# --- tiny .xlsx files built with zipfile only (no openpyxl locally) -------------------
+
+_NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_NS_PKG = "http://schemas.openxmlformats.org/package/2006/relationships"
+_XML_HEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+
+
+def _xml_text(value):
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _xlsx(sheets, shared=(), targets=None, absolute=False):
+    """A minimal but complete .xlsx. sheets: [(name, <sheetData> inner XML)] in
+    workbook order; targets: file number of each sheet (default 1, 2, ...), so a test
+    can store the first sheet in sheet2.xml as Excel does after reordering sheets;
+    absolute: relationship targets as "/xl/worksheets/..." (openpyxl style) instead of
+    "worksheets/..." (Excel / xlsxwriter style); shared: raw <si> XML strings."""
+    targets = targets or list(range(1, len(sheets) + 1))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        overrides = ['<Override PartName="/xl/workbook.xml" ContentType="application/vnd.'
+                     'openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>']
+        overrides += ['<Override PartName="/xl/worksheets/sheet%d.xml" ContentType='
+                      '"application/vnd.openxmlformats-officedocument.spreadsheetml.'
+                      'worksheet+xml"/>' % n for n in targets]
+        if shared:
+            overrides.append('<Override PartName="/xl/sharedStrings.xml" ContentType='
+                             '"application/vnd.openxmlformats-officedocument.'
+                             'spreadsheetml.sharedStrings+xml"/>')
+        z.writestr("[Content_Types].xml", _XML_HEAD +
+                   '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-'
+                   'types"><Default Extension="rels" ContentType="application/vnd.'
+                   'openxmlformats-package.relationships+xml"/><Default Extension="xml" '
+                   'ContentType="application/xml"/>%s</Types>' % "".join(overrides))
+        z.writestr("_rels/.rels", _XML_HEAD +
+                   '<Relationships xmlns="%s"><Relationship Id="rId1" Type="%s/'
+                   'officeDocument" Target="xl/workbook.xml"/></Relationships>'
+                   % (_NS_PKG, _NS_REL))
+        z.writestr("xl/workbook.xml", _XML_HEAD +
+                   '<workbook xmlns="%s" xmlns:r="%s"><sheets>%s</sheets></workbook>' % (
+                       _NS_MAIN, _NS_REL, "".join(
+                           '<sheet name="%s" sheetId="%d" r:id="rId%d"/>' % (
+                               name, i + 1, targets[i] + 10)
+                           for i, (name, _) in enumerate(sheets))))
+        prefix = "/xl/worksheets/" if absolute else "worksheets/"
+        rels = ['<Relationship Id="rId%d" Type="%s/worksheet" Target="%ssheet%d.xml"/>'
+                % (n + 10, _NS_REL, prefix, n) for n in targets]
+        if shared:
+            rels.append('<Relationship Id="rId1" Type="%s/sharedStrings" Target="%s"/>' % (
+                _NS_REL, "/xl/sharedStrings.xml" if absolute else "sharedStrings.xml"))
+        z.writestr("xl/_rels/workbook.xml.rels", _XML_HEAD +
+                   '<Relationships xmlns="%s">%s</Relationships>' % (_NS_PKG, "".join(rels)))
+        for n, (_, data) in zip(targets, sheets):
+            z.writestr("xl/worksheets/sheet%d.xml" % n, _XML_HEAD +
+                       '<worksheet xmlns="%s" xmlns:r="%s"><sheetData>%s</sheetData>'
+                       '</worksheet>' % (_NS_MAIN, _NS_REL, data))
+        if shared:
+            z.writestr("xl/sharedStrings.xml", _XML_HEAD +
+                       '<sst xmlns="%s" count="%d" uniqueCount="%d">%s</sst>' % (
+                           _NS_MAIN, len(shared), len(shared), "".join(shared)))
+    return buf.getvalue()
+
+
+def _c_s(ref, idx):          # shared string cell
+    return '<c r="%s" t="s"><v>%d</v></c>' % (ref, idx)
+
+
+def _c_in(ref, value):       # inline string cell
+    return '<c r="%s" t="inlineStr"><is><t xml:space="preserve">%s</t></is></c>' % (
+        ref, _xml_text(value))
+
+
+def _c_n(ref, raw):          # number cell, raw = the text Excel stores in <v>
+    return '<c r="%s"><v>%s</v></c>' % (ref, raw)
+
+
+def _xrow(n, *cells):
+    return '<row r="%d">%s</row>' % (n, "".join(cells))
+
+
+def _si(value):
+    return '<si><t xml:space="preserve">%s</t></si>' % _xml_text(value)
+
+
+def _si_runs(*parts):        # rich text: one <r> run per part, each with formatting
+    return "<si>%s</si>" % "".join(
+        '<r><rPr><b/><sz val="11"/></rPr><t xml:space="preserve">%s</t></r>' % _xml_text(p)
+        for p in parts)
+
+
+def _simple_sheet(sku="FAKE-XL-001", handle="fake-xl"):
+    return (_xrow(1, _c_in("A1", "handle"), _c_in("B1", "sku"), _c_in("C1", "name_ar")) +
+            _xrow(2, _c_in("A2", handle), _c_in("B2", sku), _c_in("C2", "اسم تجريبي")))
+
+
+def _by_sku(rows):
+    return {r.get("sku"): r for r in rows if r.get("sku")}
+
+
+def _csv_bytes():
+    return ("handle,sku,name_ar,description_ar,price\n"
+            "fake-csv,FAKE-CSV-001,منظف تجريبي,وصف تجريبي,25\n").encode("utf-8")
+
+
+# --- parse_upload_rows fixtures ---------------------------------------------------------
+
+def _r(n, **values):
+    row = {"_row": n}
+    row.update(values)
+    return row
+
+
+def _simple_rows(**over):
+    """One simple product, row 2. Multi-unit stock and a non-zero discount on purpose."""
+    row = _r(2, handle="fake-glass-cleaner", sku="FAKE-GC-001",
+             name_ar="منظف زجاج تجريبي", name_en="Fake Glass Cleaner",
+             description_ar="وصف تجريبي للمنتج", description_en="Fake product description",
+             price="25", sale_price="20", stock="12", weight="0.5", weight_unit="kg",
+             barcode="000123456789")
+    row.update(over)
+    return [row]
+
+
+# (size ar, size en, scent ar, scent en, price, stock)
+_FC_VARIANTS = [("500 مل", "500 ml", "لافندر", "Lavender", "30", "4"),
+                ("500 مل", "500 ml", "ليمون", "Lemon", "32", "0"),
+                ("1 لتر", "1 L", "لافندر", "Lavender", "45", "12"),
+                ("1 لتر", "1 L", "ليمون", "Lemon", "47", "3")]
+_FC = "fake-floor-cleaner"
+
+
+def _options_rows(handle=_FC, start=2, variants=None, sku="FAKE-FC"):
+    """Size x Scent product: 4 rows, product-level values on the first row only."""
+    rows = []
+    for i, (s_ar, s_en, c_ar, c_en, price, stock) in enumerate(variants or _FC_VARIANTS):
+        row = _r(start + i, handle=handle, sku="%s-%03d" % (sku, i + 1),
+                 option1_value_ar=s_ar, option1_value_en=s_en,
+                 option2_value_ar=c_ar, option2_value_en=c_en, price=price, stock=stock)
+        if i == 0:
+            row.update(name_ar="منظف أرضيات تجريبي", name_en="Fake Floor Cleaner",
+                       description_ar="سطر أول\nسطر ثان", description_en="Fake floor copy",
+                       option1_name_ar="الحجم", option1_name_en="Size",
+                       option2_name_ar="الرائحة", option2_name_en="Scent",
+                       category_ids="101;202", image_1="fake-fc-1.jpg",
+                       image_2="fake-fc-2.webp", image_alt="Fake floor cleaner bottle")
+        rows.append(row)
+    return rows
+
+
+def _parse(rows, **kw):
+    products, errors, warnings = mapping.parse_upload_rows(rows, **kw)
+    products = list(products)
+    return ({p["handle"]: p for p in products}, list(errors), list(warnings), products)
+
+
+def _all_errors(products, errors):
+    out = list(errors)
+    for p in products:
+        out += list(p.get("errors") or [])
+    return out
+
+
+def _blocked(by_handle, handle):
+    """Blocked = not offered as a product, or carrying errors (skipped in apply)."""
+    return handle not in by_handle or bool(by_handle[handle].get("errors"))
+
+
+def _err_at(msgs, rows=(), handle=None):
+    """Some message starts with "Row N: " for one of `rows`, or with "<handle>: "."""
+    prefixes = tuple("Row %d: " % n for n in rows) + ((handle + ": ",) if handle else ())
+    return any(isinstance(m, str) and m.startswith(prefixes) for m in msgs)
+
+
+def _leaves(obj, path=""):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from _leaves(v, "%s.%s" % (path, k))
+    elif isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            yield from _leaves(v, "%s[%d]" % (path, i))
+    else:
+        yield path, obj
+
+
+def _all_keys(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k
+            yield from _all_keys(v)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from _all_keys(v)
+
+
+def _assert_clean_body(body, forbidden=()):
+    """No "" / None / [] / {} anywhere, never cost_price, never status sale, none of
+    the `forbidden` texts (e.g. EN copy in an Arabic body)."""
+    assert isinstance(body, dict), body
+
+    def _check(obj, path):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                assert v is not None and not (isinstance(v, (str, list, dict)) and not v), \
+                    ("empty value sent", path + "." + str(k), body)
+                _check(v, path + "." + str(k))
+        elif isinstance(obj, (list, tuple)):
+            for i, v in enumerate(obj):
+                _check(v, "%s[%d]" % (path, i))
+        elif isinstance(obj, str):
+            assert obj.strip(), ("blank string sent", path, body)
+            for text in forbidden:
+                assert text not in obj, ("forbidden text", text, path)
+    _check(body, "")
+    assert "cost_price" not in set(_all_keys(body)), body
+    assert body.get("status") in (None, "hidden"), body
+
+
+def _p(rows, handle, **kw):
+    by, errors, _, products = _parse(rows, **kw)
+    assert not _all_errors(products, errors), _all_errors(products, errors)
+    return by[handle]
+
+
+_DETAIL_OPTIONS = [
+    {"id": 11, "name": "الحجم", "values": [{"id": 111, "name": "500 مل"},
+                                           {"id": 112, "name": "1 لتر"}]},
+    {"id": 22, "name": "الرائحة", "values": [{"id": 221, "name": "لافندر"},
+                                             {"id": 222, "name": "ليمون"}]},
+]
+
+
+def _pair_map(pairs):
+    out = {}
+    for sheet_v, salla_v in pairs:
+        out[sheet_v["sku"]] = str(salla_v.get("id") if isinstance(salla_v, dict) else salla_v)
+    return out
+
+
+def _row_numbers(missing):
+    return sorted(m if isinstance(m, int) else (m.get("row") if isinstance(m, dict) else m)
+                  for m in missing)
+
+
+# --- constants -----------------------------------------------------------------------------
+
+def test_upload_columns_and_handle_re():
+    cols = list(mapping.UPLOAD_COLUMNS)
+    assert len(cols) == len(set(cols)), "duplicate column names"
+    expected = ["handle", "sku", "name_ar", "name_en", "subtitle_ar", "subtitle_en",
+                "promotion_title_ar", "promotion_title_en", "description_ar",
+                "description_en", "seo_title_ar", "seo_title_en", "seo_description_ar",
+                "seo_description_en", "category_ids", "product_type", "option1_name_ar",
+                "option1_name_en", "option2_name_ar", "option2_name_en", "option1_value_ar",
+                "option1_value_en", "option2_value_ar", "option2_value_en", "price",
+                "sale_price", "stock", "weight", "weight_unit", "barcode", "image_alt",
+                "salla_product_id"] + ["image_%d" % i for i in range(1, 11)]
+    for col in expected:
+        assert col in cols, col
+    for col in ("image_11", "cost_price", "_row", "option3_name_ar"):
+        assert col not in cols, col
+    rx = re.compile(mapping.UPLOAD_HANDLE_RE)
+    for ok in ("ab", "fake-1", "1-fake", "fake--cleaner", "a" + "b" * 60):
+        assert rx.fullmatch(ok), ok
+    for bad in ("", "a", "-fake", "Fake-cleaner", "fake cleaner", "fake_cleaner",
+                "fake/cleaner", "fake.cleaner", "منظف", "a" + "b" * 61, "fake-١"):
+        assert not rx.fullmatch(bad), bad
+
+
+# --- read_csv_rows ---------------------------------------------------------------------
+
+def test_read_csv_rows_bom_arabic_multiline():
+    # "CSV UTF-8" from Excel: BOM, CRLF, a quoted multi-line cell. _row is the sheet row
+    # (record number + 1), not the physical line number of the file.
+    data = ("﻿Handle, SKU ,Name_AR,PRICE\r\n"
+            "fake-a, FAKE-A-001 ,منظف تجريبي ,25\r\n"
+            'fake-b,FAKE-B-001,"سطر 1\r\nسطر 2",30\r\n'
+            "fake-c,FAKE-C-001,اسم تجريبي,9.5\r\n").encode("utf-8")
+    rows = mapping.read_csv_rows(data)
+    assert len(rows) == 3, rows
+    for row in rows:
+        for key, value in row.items():
+            assert isinstance(key, str) and "﻿" not in key, key
+            if key != "_row":
+                assert isinstance(value, str), (key, value)
+    a, b, c = rows
+    assert a["handle"] == "fake-a" and a["sku"] == "FAKE-A-001", a
+    assert a["name_ar"] == "منظف تجريبي" and a["price"] == "25", a
+    assert b["name_ar"].replace("\r\n", "\n") == "سطر 1\nسطر 2", b
+    assert c["price"] == "9.5", c
+    assert [r["_row"] for r in rows] == [2, 3, 4], [r["_row"] for r in rows]
+
+
+def test_read_csv_rows_utf8_without_bom_and_cp1256_fallback():
+    text_ = "handle,sku,name_ar,description_ar\nfake-a,FAKE-A-001,منظف تجريبي,وصف عربي\n"
+    rows = mapping.read_csv_rows(text_.encode("utf-8"))
+    assert rows[0]["name_ar"] == "منظف تجريبي" and rows[0]["_row"] == 2, rows
+    legacy = text_.encode("cp1256")      # "CSV" saved by an Arabic Windows Excel
+    try:
+        legacy.decode("utf-8")
+        raise AssertionError("fixture must not be valid UTF-8")
+    except UnicodeDecodeError:
+        pass
+    rows = mapping.read_csv_rows(legacy)
+    assert len(rows) == 1, rows
+    assert rows[0]["name_ar"] == "منظف تجريبي", rows
+    assert rows[0]["description_ar"] == "وصف عربي", rows
+
+
+def test_read_csv_rows_ragged_rows_never_crash():
+    data = (b"handle,sku,name_ar\n"
+            b"fake-a,FAKE-A-001\n"                       # one cell short
+            b"fake-b,FAKE-B-001,x,extra-cell\n")         # one cell too many
+    rows = mapping.read_csv_rows(data)
+    assert len(rows) == 2, rows
+    assert rows[0].get("name_ar") in ("", None), rows[0]
+    assert rows[1]["name_ar"] == "x", rows[1]
+    for row in rows:
+        assert all(isinstance(k, str) for k in row), row      # no None key from DictReader
+
+
+# --- read_xlsx_rows --------------------------------------------------------------------
+
+def _products_sheet_fixture():
+    shared = [_si("Handle"), _si(" SKU "), _si("Name_AR"), _si("FAKE-XL-001"),
+              _si_runs("منظف ", "تجريبي"), _si("Description_AR"), _si("Barcode")]
+    data = (
+        _xrow(1, _c_s("A1", 0), _c_s("B1", 1), _c_s("C1", 2), _c_in("D1", "Price"),
+              _c_in("E1", "Stock"), _c_s("F1", 6), _c_s("AB1", 5)) +
+        _xrow(2, _c_in("A2", "fake-xl"), _c_s("B2", 3), _c_s("C2", 4), _c_n("D2", "12.0"),
+              _c_n("E2", "7"), _c_in("F2", "000123456789"), _c_in("AB2", "وصف تجريبي")) +
+        # row 3 absent (empty in Excel); E4 absent; F4 styled but empty; AB4 a formula
+        _xrow(4, _c_in("A4", "  fake-xl-two  "), _c_in("B4", "FAKE-XL-002"),
+              _c_in("C4", "اسم"), _c_n("D4", "19.95"), '<c r="F4" s="1"/>',
+              '<c r="AB4" t="str"><f>CONCAT("a","b")</f><v>ab</v></c>') +
+        _xrow(5, _c_in("A5", "fake-xl-three"), _c_in("B5", "FAKE-XL-003"),
+              _c_in("C5", "x"), _c_n("D5", "1.5E-2"), _c_n("E5", "0"),
+              _c_n("F5", "6281234567890"), '<c r="AB5" t="b"><v>1</v></c>'))
+    wrong = _xrow(1, _c_in("A1", "handle"), _c_in("B1", "sku")) + \
+        _xrow(2, _c_in("A2", "wrong-sheet"), _c_in("B2", "FAKE-WRONG-SHEET"))
+    return shared, data, wrong
+
+
+def test_read_xlsx_rows_cells():
+    shared, data, wrong = _products_sheet_fixture()
+    rows = mapping.read_xlsx_rows(_xlsx([("Instructions", wrong), ("Products", data)],
+                                        shared=shared))
+    got = _by_sku(rows)
+    assert set(got) == {"FAKE-XL-001", "FAKE-XL-002", "FAKE-XL-003"}, list(got)
+    a, b, c = got["FAKE-XL-001"], got["FAKE-XL-002"], got["FAKE-XL-003"]
+    # header normalized; shared string; rich-text runs joined with their spaces
+    assert a["handle"] == "fake-xl" and a["name_ar"] == "منظف تجريبي", a
+    assert a["price"] == "12" and a["stock"] == "7", a          # integral float -> "12"
+    assert a["barcode"] == "000123456789", a                    # text cell keeps zeros
+    assert a["description_ar"] == "وصف تجريبي", a               # column AB (past Z)
+    assert a["_row"] == 2, a
+    # stripped value; empty cells ""; formula string; real Excel row number
+    assert b["handle"] == "fake-xl-two", b
+    assert b["price"] == "19.95", b
+    assert b.get("stock") == "" and b.get("barcode") == "", b
+    assert b["description_ar"] == "ab", b
+    assert b["_row"] == 4, b
+    assert c["price"] == "0.015" and c["stock"] == "0", c
+    assert c["barcode"] == "6281234567890", c                   # not 6.28e+12, not ".0"
+    assert c["_row"] == 5, c
+    for row in rows:
+        assert row.get("sku") != "SKU" and "FAKE-WRONG-SHEET" not in row.values(), row
+
+
+def test_read_xlsx_rows_sheet_choice():
+    shared, data, wrong = _products_sheet_fixture()
+    want = {"FAKE-XL-001", "FAKE-XL-002", "FAKE-XL-003"}
+    # "Products" is chosen over the first sheet, wherever its XML part lives
+    for targets in ([1, 2], [2, 1]):
+        for absolute in (False, True):
+            raw = _xlsx([("Instructions", wrong), ("Products", data)], shared=shared,
+                        targets=targets, absolute=absolute)
+            got = set(_by_sku(mapping.read_xlsx_rows(raw)))
+            assert got == want, (targets, absolute, got)
+    # no "Products" sheet -> the FIRST sheet in workbook order (stored as sheet2.xml)
+    raw = _xlsx([("Data", _simple_sheet("FAKE-FIRST-001")),
+                 ("Other", _simple_sheet("FAKE-SECOND-001"))], targets=[2, 1])
+    assert set(_by_sku(mapping.read_xlsx_rows(raw))) == {"FAKE-FIRST-001"}
+    raw = _xlsx([("Sheet1", _simple_sheet("FAKE-ONLY-001"))])
+    rows = mapping.read_xlsx_rows(raw)
+    assert set(_by_sku(rows)) == {"FAKE-ONLY-001"} and rows[0]["name_ar"] == "اسم تجريبي"
+
+
+def test_read_xlsx_rows_not_xlsx_raises_value_error():
+    images_zip = io.BytesIO()
+    with zipfile.ZipFile(images_zip, "w") as z:
+        z.writestr("fake-1.jpg", b"\xff\xd8\xff\xe0 fake jpeg bytes")
+    good = _xlsx([("Products", _simple_sheet())])
+    for bad in (b"", _csv_bytes(), b"PK\x03\x04 not really a zip", images_zip.getvalue(),
+                good[:200], b"\x89PNG\r\n\x1a\n fake"):
+        try:
+            mapping.read_xlsx_rows(bad)
+        except ValueError as e:
+            assert str(e).strip(), "ValueError without a readable message"
+            continue
+        except Exception as e:      # BadZipFile, KeyError, ParseError... must be wrapped
+            raise AssertionError("%r raised %s, not ValueError" % (bad[:20], type(e).__name__))
+        raise AssertionError("no error for %r" % bad[:20])
+
+
+def test_read_upload_rows_dispatch():
+    xlsx = _xlsx([("Products", _simple_sheet("FAKE-XL-001"))])
+    for name in ("products.xlsx", "PRODUCTS.XLSX", "upload", "upload.csv"):
+        # extension or the PK magic: a zip is never decoded as CSV text
+        rows = mapping.read_upload_rows(xlsx, name)
+        assert set(_by_sku(rows)) == {"FAKE-XL-001"}, (name, rows)
+    for name in ("products.csv", "PRODUCTS.CSV"):
+        rows = mapping.read_upload_rows(_csv_bytes(), name)
+        assert set(_by_sku(rows)) == {"FAKE-CSV-001"}, (name, rows)
+        assert rows[0]["name_ar"] == "منظف تجريبي" and rows[0]["_row"] == 2
+
+
+# --- parse_upload_rows -----------------------------------------------------------------
+
+def test_parse_simple_product():
+    by, errors, warnings, products = _parse(_simple_rows(
+        category_ids=" 101 ; 202 ;", salla_product_id="987654321",
+        image_1="fake-gc-1.jpg", image_2="fake-gc-2.webp", image_alt="Fake bottle",
+        subtitle_ar="عنوان فرعي", seo_title_en="Fake SEO title"))
+    assert not _all_errors(products, errors), _all_errors(products, errors)
+    assert len(products) == 1
+    p = by["fake-glass-cleaner"]
+    assert p["row"] == 2 and p["parent_sku"] == "FAKE-GC-001", p
+    assert p["product_type"] == "product", p                     # default
+    assert p["name"] == {"ar": "منظف زجاج تجريبي", "en": "Fake Glass Cleaner"}, p["name"]
+    assert p["description"]["ar"] == mapping.text_to_html("وصف تجريبي للمنتج")
+    assert p["description"]["en"] == mapping.text_to_html("Fake product description")
+    assert p["subtitle"]["ar"] == "عنوان فرعي" and not p["subtitle"]["en"]
+    assert p["seo_title"]["en"] == "Fake SEO title" and not p["seo_title"]["ar"]
+    assert p["categories"] == [101, 202], p["categories"]
+    assert str(p["salla_product_id"]) == "987654321"
+    assert p["options"] == [] and p["images"] == ["fake-gc-1.jpg", "fake-gc-2.webp"]
+    assert p["image_alt"] == "Fake bottle"
+    assert not p.get("errors")
+    assert len(p["variants"]) == 1
+    v = p["variants"][0]
+    assert v["row"] == 2 and v["sku"] == "FAKE-GC-001" and v["values"] == [], v
+    assert v["price"] == 25 and v["sale_price"] == 20 and v["stock"] == 12, v
+    for key in ("price", "sale_price", "stock", "weight"):
+        assert not isinstance(v[key], str), (key, v[key])         # parsed numbers
+    assert v["weight"] == 0.5 and v["weight_unit"] == "kg", v
+    assert v["barcode"] == "000123456789", v                      # leading zeros kept
+
+
+def test_parse_stock_blank_vs_zero_and_defaults():
+    p = _p(_simple_rows(stock="", sale_price="", weight="", weight_unit="", product_type=""),
+           "fake-glass-cleaner")
+    v = p["variants"][0]
+    assert v["stock"] is None, v           # blank = not sent; never 0 (would zero stock)
+    assert not v["sale_price"] and not v["weight"], v
+    assert v["weight_unit"] == "kg", v
+    assert p["product_type"] == "product"
+    v = _p(_simple_rows(stock="0", weight="500", weight_unit="g"),
+           "fake-glass-cleaner")["variants"][0]
+    assert v["stock"] == 0 and v["stock"] is not None, v
+    assert v["weight"] == 500 and v["weight_unit"] == "g", v
+    assert _p(_simple_rows(product_type="group_products"),
+              "fake-glass-cleaner")["product_type"] == "group_products"
+
+
+def test_parse_options_size_x_scent():
+    by, errors, warnings, products = _parse(_options_rows())
+    assert not _all_errors(products, errors), _all_errors(products, errors)
+    p = by[_FC]
+    assert p["row"] == 2 and p["parent_sku"] == "FAKE-FLOOR-CLEANER", p   # handle.upper()
+    assert p["options"] == [{"ar": "الحجم", "en": "Size"},
+                            {"ar": "الرائحة", "en": "Scent"}], p["options"]
+    assert [v["sku"] for v in p["variants"]] == ["FAKE-FC-001", "FAKE-FC-002",
+                                                 "FAKE-FC-003", "FAKE-FC-004"]
+    assert [v["row"] for v in p["variants"]] == [2, 3, 4, 5]
+    assert [v["price"] for v in p["variants"]] == [30, 32, 45, 47]
+    assert [v["stock"] for v in p["variants"]] == [4, 0, 12, 3]
+    assert p["variants"][0]["values"] == [{"ar": "500 مل", "en": "500 ml"},
+                                          {"ar": "لافندر", "en": "Lavender"}]
+    assert p["variants"][3]["values"] == [{"ar": "1 لتر", "en": "1 L"},
+                                          {"ar": "ليمون", "en": "Lemon"}]
+    # product-level values come from the first row; later rows leave them empty
+    assert p["name"] == {"ar": "منظف أرضيات تجريبي", "en": "Fake Floor Cleaner"}
+    assert p["description"]["ar"] == mapping.text_to_html("سطر أول\nسطر ثان")
+    assert p["categories"] == [101, 202]
+    assert p["images"] == ["fake-fc-1.jpg", "fake-fc-2.webp"]
+    assert p["image_alt"] == "Fake floor cleaner bottle"
+    # ...or repeat them identically: still fine
+    rows = _options_rows()
+    for row in rows[1:]:
+        row.update(name_ar="منظف أرضيات تجريبي", category_ids="101;202",
+                   option1_name_ar="الحجم", option2_name_ar="الرائحة",
+                   image_1="fake-fc-1.jpg")
+    by, errors, _, products = _parse(rows)
+    assert not _all_errors(products, errors), _all_errors(products, errors)
+    assert len(by[_FC]["variants"]) == 4
+
+
+def test_parse_one_option_product():
+    rows = [_r(2, handle="fake-one-opt", sku="FAKE-OO-001", name_ar="منتج", name_en="Item",
+               description_ar="وصف", description_en="Copy", price="10", stock="5",
+               option1_name_ar="الحجم", option1_name_en="Size",
+               option1_value_ar="صغير", option1_value_en="Small"),
+            _r(3, handle="fake-one-opt", sku="FAKE-OO-002", price="15", stock="2",
+               option1_value_ar="كبير", option1_value_en="Large")]
+    p = _p(rows, "fake-one-opt")
+    assert p["parent_sku"] == "FAKE-ONE-OPT", p
+    assert p["options"] == [{"ar": "الحجم", "en": "Size"}]
+    assert [v["values"] for v in p["variants"]] == [[{"ar": "صغير", "en": "Small"}],
+                                                    [{"ar": "كبير", "en": "Large"}]]
+
+
+def test_parse_handle_order_and_blank_rows_skipped():
+    rows = _options_rows() + [_r(6, handle="", sku=""), _r(7)] + \
+        [dict(_simple_rows()[0], _row=8)]
+    by, errors, warnings, products = _parse(rows)
+    assert not _all_errors(products, errors), _all_errors(products, errors)
+    assert [p["handle"] for p in products] == [_FC, "fake-glass-cleaner"]
+    assert by["fake-glass-cleaner"]["row"] == 8
+    assert not any(isinstance(m, str) and m.startswith(("Row 6: ", "Row 7: "))
+                   for m in warnings), warnings
+
+
+def test_parse_required_values():
+    for field in ("name_ar", "description_ar", "price", "sku"):
+        by, errors, _, products = _parse(_simple_rows(**{field: ""}))
+        errs = _all_errors(products, errors)
+        assert _blocked(by, "fake-glass-cleaner"), field
+        assert _err_at(errs, rows=(2,), handle="fake-glass-cleaner"), (field, errs)
+    # a row with a SKU but no handle: error on that row, the other product unaffected
+    rows = _simple_rows() + [_r(3, handle="", sku="FAKE-ORPHAN-001", name_ar="منتج",
+                                description_ar="وصف", price="5")]
+    by, errors, _, products = _parse(rows)
+    assert _err_at(_all_errors(products, errors), rows=(3,)), _all_errors(products, errors)
+    assert not _blocked(by, "fake-glass-cleaner")
+    # a variant row without SKU blocks its product
+    rows = _options_rows()
+    rows[1]["sku"] = ""
+    by, errors, _, products = _parse(rows)
+    assert _blocked(by, _FC) and _err_at(_all_errors(products, errors), rows=(3,))
+
+
+def test_parse_en_missing_is_only_a_warning():
+    by, errors, warnings, products = _parse(_simple_rows(name_en="", description_en=""))
+    assert not _all_errors(products, errors), _all_errors(products, errors)
+    p = by["fake-glass-cleaner"]
+    assert not _blocked(by, "fake-glass-cleaner") and not p["name"]["en"]
+    assert _err_at(warnings, rows=(2,), handle="fake-glass-cleaner"), warnings
+
+
+def test_parse_unknown_columns_warned_once():
+    rows = _options_rows()
+    for row in rows:
+        row["colour_notes"] = "fake"
+    by, errors, warnings, products = _parse(rows)
+    assert not _all_errors(products, errors), _all_errors(products, errors)
+    assert sum("colour_notes" in m for m in warnings) == 1, warnings
+    assert not any("_row" in m for m in warnings + errors), warnings
+
+
+def test_parse_duplicate_sku():
+    # across handles: reported on the row where it repeats
+    rows = _simple_rows() + _options_rows(start=3)
+    rows[1]["sku"] = "FAKE-GC-001"
+    by, errors, _, products = _parse(rows)
+    errs = _all_errors(products, errors)
+    assert _err_at(errs, rows=(3,)), errs
+    assert _blocked(by, _FC), errs
+    # inside one handle
+    rows = _options_rows()
+    rows[1]["sku"] = rows[0]["sku"]
+    by, errors, _, products = _parse(rows)
+    assert _blocked(by, _FC) and _err_at(_all_errors(products, errors), rows=(3,))
+
+
+def test_parse_bad_handle():
+    for handle in ("Fake Cleaner", "-fake", "a", "fake_cleaner", "fake/cleaner", "منظف",
+                   "x" * 62):
+        by, errors, _, products = _parse(_simple_rows(handle=handle))
+        errs = _all_errors(products, errors)
+        assert _blocked(by, handle), handle
+        assert _err_at(errs, rows=(2,), handle=handle), (handle, errs)
+
+
+def test_parse_non_numeric_and_out_of_range_numbers():
+    cases = [("price", "abc"), ("price", "inf"), ("price", "nan"), ("price", "0"),
+             ("price", "-5"), ("price", "25 SAR"), ("stock", "abc"), ("stock", "2.5"),
+             ("stock", "-1"), ("weight", "abc"), ("weight", "0"), ("weight", "-0.5"),
+             ("weight", "inf"), ("sale_price", "abc")]
+    for field, value in cases:
+        rows = _options_rows()
+        rows[1][field] = value                                   # sheet row 3
+        by, errors, _, products = _parse(rows)
+        errs = _all_errors(products, errors)
+        assert _blocked(by, _FC), (field, value)
+        assert _err_at(errs, rows=(3,)), (field, value, errs)
+
+
+def test_parse_sale_price_rules():
+    # numbers, not strings: "99" < "100" and "10" > "9"
+    p = _p(_simple_rows(price="100", sale_price="99"), "fake-glass-cleaner")
+    assert p["variants"][0]["sale_price"] == 99
+    for price, sale in (("9", "10"), ("25", "25"), ("25", "25.00"), ("25", "30")):
+        by, errors, _, products = _parse(_simple_rows(price=price, sale_price=sale))
+        assert _blocked(by, "fake-glass-cleaner"), (price, sale)
+        assert _err_at(_all_errors(products, errors), rows=(2,)), (price, sale)
+    # checked per variant, against that variant's own price
+    rows = _options_rows()
+    rows[0]["sale_price"] = "28"           # 30 -> 28 fine
+    rows[1]["sale_price"] = "35"           # 32 -> 35 wrong (would pass against max 47)
+    by, errors, _, products = _parse(rows)
+    errs = _all_errors(products, errors)
+    assert _blocked(by, _FC) and _err_at(errs, rows=(3,)), errs
+    assert not _err_at(errs, rows=(2,)), errs
+
+
+def test_parse_option_name_value_pairing():
+    every = (2, 3, 4, 5)
+    # values without an option name
+    rows = _options_rows()
+    rows[0].update(option2_name_ar="", option2_name_en="")
+    by, errors, _, products = _parse(rows)
+    assert _blocked(by, _FC) and _err_at(_all_errors(products, errors), every, _FC)
+    # option name set, one row without its value
+    rows = _options_rows()
+    rows[2]["option2_value_ar"] = ""
+    rows[2]["option2_value_en"] = ""
+    by, errors, _, products = _parse(rows)
+    assert _blocked(by, _FC) and _err_at(_all_errors(products, errors), (4,))
+    # EN option name only: AR is required when values are used
+    rows = _options_rows()
+    rows[0]["option1_name_ar"] = ""
+    by, errors, _, products = _parse(rows)
+    assert _blocked(by, _FC) and _err_at(_all_errors(products, errors), every, _FC)
+    # EN value only: AR is required when the option name is set
+    rows = _options_rows()
+    rows[1]["option1_value_ar"] = ""
+    by, errors, _, products = _parse(rows)
+    assert _blocked(by, _FC) and _err_at(_all_errors(products, errors), (3,))
+
+
+def test_parse_duplicate_option_combination():
+    rows = _options_rows()
+    rows[1].update(option1_value_ar="500 مل", option2_value_ar="لافندر")   # = row 2
+    by, errors, _, products = _parse(rows)
+    assert _blocked(by, _FC) and _err_at(_all_errors(products, errors), (2, 3), _FC)
+
+
+def test_parse_duplicate_option_combination_normalized():
+    """Hardening beyond the literal spec: two rows whose AR values differ only by
+    spaces / Arabic-Indic digits would both match ONE Salla variant (match_variants
+    uses norm_label), so the second silently overwrites the first."""
+    rows = _options_rows()
+    rows[1].update(option1_value_ar="٥٠٠  مل", option2_value_ar="لافندر ")
+    by, errors, _, products = _parse(rows)
+    assert _blocked(by, _FC) and _err_at(_all_errors(products, errors), (2, 3), _FC)
+
+
+def test_parse_max_options_and_images():
+    by, errors, _, products = _parse(_options_rows(), max_options=1)
+    assert _blocked(by, _FC) and _err_at(_all_errors(products, errors), (2, 3, 4, 5), _FC)
+    ten = {"image_%d" % i: "fake-gc-%d.jpg" % i for i in range(1, 11)}
+    p = _p(_simple_rows(**ten), "fake-glass-cleaner")
+    assert p["images"] == ["fake-gc-%d.jpg" % i for i in range(1, 11)]
+    four = {"image_%d" % i: "fake-gc-%d.jpg" % i for i in range(1, 5)}
+    by, errors, _, products = _parse(_simple_rows(**four), max_images=3)
+    assert _blocked(by, "fake-glass-cleaner")
+    assert _err_at(_all_errors(products, errors), (2,), "fake-glass-cleaner")
+
+
+def test_parse_mixed_product_level_values():
+    for field, value in (("name_ar", "اسم آخر"), ("description_en", "Other fake copy"),
+                         ("image_1", "fake-other.jpg"), ("category_ids", "303"),
+                         ("option1_name_en", "Volume"), ("salla_product_id", "111"),
+                         ("product_type", "group_products")):
+        rows = _options_rows()
+        rows[1][field] = value
+        by, errors, _, products = _parse(rows)
+        errs = _all_errors(products, errors)
+        assert _blocked(by, _FC), (field, errs)
+        assert _err_at(errs, (3,), _FC), (field, errs)
+
+
+def test_parse_simple_product_with_two_rows():
+    rows = _simple_rows() + [_r(3, handle="fake-glass-cleaner", sku="FAKE-GC-002",
+                                price="30", stock="5")]
+    by, errors, _, products = _parse(rows)
+    errs = _all_errors(products, errors)
+    assert _blocked(by, "fake-glass-cleaner") and _err_at(errs, (2, 3), "fake-glass-cleaner")
+
+
+def test_parse_bad_product_type_and_categories_flagged():
+    for over in ({"product_type": "bundle"}, {"category_ids": "abc"},
+                 {"category_ids": "101;x"}, {"category_ids": "1.5"}):
+        by, errors, warnings, products = _parse(_simple_rows(**over))
+        msgs = _all_errors(products, errors) + warnings
+        assert _err_at(msgs, (2,), "fake-glass-cleaner"), (over, msgs)
+
+
+def test_upload_headers_case_and_spaces_insensitive():
+    """Spec §3: header names are case/spaces-insensitive. A header typed "Name AR" must
+    not silently become an unknown column (the product would then miss its AR name)."""
+    data = ("Handle,SKU,Name AR,Description AR,Price,Option1 Name AR\n"
+            "fake-hdr,FAKE-HDR-001,منظف تجريبي,وصف,25,\n").encode("utf-8")
+    p = _p(mapping.read_csv_rows(data), "fake-hdr")
+    assert p["name"]["ar"] == "منظف تجريبي" and p["variants"][0]["price"] == 25
+
+
+def test_upload_csv_end_to_end():
+    header = ",".join(mapping.UPLOAD_COLUMNS)
+    def line(**values):
+        return ",".join('"%s"' % values.get(c, "").replace('"', '""')
+                        for c in mapping.UPLOAD_COLUMNS)
+    body = [line(**row) for row in [
+        {k: v for k, v in r.items() if k != "_row"} for r in _options_rows()]]
+    data = ("﻿" + header + "\r\n" + "\r\n".join(body) + "\r\n").encode("utf-8")
+    by, errors, warnings, products = _parse(mapping.read_upload_rows(data, "fake.csv"))
+    assert not _all_errors(products, errors), _all_errors(products, errors)
+    assert not any("unknown" in m.lower() for m in warnings), warnings
+    p = by[_FC]
+    assert len(p["variants"]) == 4 and p["variants"][3]["stock"] == 3
+    assert p["variants"][1]["stock"] == 0 and p["categories"] == [101, 202]
+
+
+# --- text_to_html ------------------------------------------------------------------------
+
+def test_text_to_html():
+    f = mapping.text_to_html
+    assert f("") == "" and f(None) == ""
+    one = f("Fake cleaner")
+    assert "Fake cleaner" in one and one.count("<p>") == 1, one
+    esc = f('Fake "A" & B < C > D')
+    assert "&amp;" in esc and "&lt;" in esc and "&gt;" in esc and "< C" not in esc, esc
+    assert "<script>" not in f("x <script>alert(1)</script>")
+    two = f("Para one\n\nPara two")
+    assert two.count("<p>") == 2 and "<br" not in two, two
+    many = f("Para one\n\n\n\nPara two")
+    assert many.count("<p>") == 2 and "<p></p>" not in many, many
+    br = f("Line one\nLine two")
+    assert br.count("<p>") == 1 and "<br" in br, br
+    crlf = f("Line one\r\n\r\nLine two\r\nLine three")
+    assert crlf.count("<p>") == 2 and "<br" in crlf and "\r" not in crlf, crlf
+    lst = f("Intro\n- first point\n- second point\n\nOutro")
+    assert "<ul>" in lst and "</ul>" in lst and lst.count("<li>") == 2, lst
+    assert "<li>first point</li>" in lst and "- first" not in lst, lst
+    assert "Intro" in lst and "Outro" in lst, lst
+    bullet = f("• نقطة أولى\n• نقطة ثانية")
+    assert bullet.count("<li>") == 2 and "•" not in bullet and "نقطة أولى" in bullet, bullet
+    html_in = "<p>Already <b>HTML</b></p>"
+    assert f(html_in) == html_in
+    assert "منظف تجريبي" in f("منظف تجريبي")
+
+
+# --- flagged_claims ----------------------------------------------------------------------
+
+_CLAIMS = ["baby-safe", "baby safe", "SASO", "salmonella", "microbiome", "won't scratch",
+           "non-corrosive", "no allergies", "safe if licked", "lick", "آمن للرضع"]
+
+
+def test_flagged_claims_ar_en_case_insensitive():
+    p = _p(_simple_rows(
+        description_en="Gentle formula.\nBaby-Safe and won't scratch glass.",
+        subtitle_ar="آمن للرضع", seo_description_en="Tested against SALMONELLA"),
+        "fake-glass-cleaner")
+    found = mapping.flagged_claims(p, _CLAIMS)
+    # "won't" must be found although the description is already HTML (' may be escaped)
+    assert sorted(x.lower() for x in found) == sorted(
+        ["baby-safe", "won't scratch", "salmonella", "آمن للرضع"]), found
+    assert len(found) == len(set(found)), found
+    clean = _p(_simple_rows(), "fake-glass-cleaner")
+    assert mapping.flagged_claims(clean, _CLAIMS) == []
+    assert mapping.flagged_claims(clean, ["", "   "]) == []    # blank lines never match
+    assert mapping.flagged_claims(clean, []) == []
+
+
+def test_flagged_claims_every_text_field():
+    for field in ("name_ar", "name_en", "subtitle_ar", "subtitle_en", "promotion_title_ar",
+                  "promotion_title_en", "description_ar", "description_en", "seo_title_ar",
+                  "seo_title_en", "seo_description_ar", "seo_description_en"):
+        p = _p(_simple_rows(**{field: "Fake copy SaSo approved"}), "fake-glass-cleaner")
+        found = mapping.flagged_claims(p, ["saso", "microbiome"])
+        assert [x.lower() for x in found] == ["saso"], (field, found)
+
+
+def test_flagged_claims_options_and_alt():
+    """Option values and the image alt text are uploaded too: claims there count."""
+    rows = _options_rows()
+    rows[0]["image_alt"] = "Baby safe bottle"
+    p = _p(rows, _FC)
+    assert [x.lower() for x in mapping.flagged_claims(p, ["baby safe"])] == ["baby safe"]
+    rows = _options_rows()
+    for row in rows:
+        if row["option2_value_ar"] == "لافندر":
+            row["option2_value_en"] = "Non-Corrosive Lavender"
+    p = _p(rows, _FC)
+    assert [x.lower() for x in mapping.flagged_claims(p, ["non-corrosive"])] == \
+        ["non-corrosive"]
+
+
+def test_flagged_claims_typographic_apostrophe():
+    """Hardening beyond the literal spec: copy pasted from Word/Notion uses the curly
+    apostrophe; "won’t scratch" must still hit the blocked phrase "won't scratch"."""
+    p = _p(_simple_rows(description_en="It won’t scratch glass"), "fake-glass-cleaner")
+    assert [x.lower() for x in mapping.flagged_claims(p, ["won't scratch"])] == \
+        ["won't scratch"]
+
+
+# --- product_payload / translation_payload ------------------------------------------------
+
+_EN_TEXTS = ("Fake Glass Cleaner", "Fake product description", "Fake Floor Cleaner",
+             "Fake floor copy", "Size", "Scent", "Lavender", "Lemon")
+
+
+def test_product_payload_create_simple():
+    p = _p(_simple_rows(subtitle_ar="عنوان فرعي", promotion_title_ar="عرض تجريبي",
+                        seo_title_ar="عنوان سيو", seo_description_ar="وصف سيو",
+                        category_ids="101;202", weight="500", weight_unit="g",
+                        image_1="fake-gc-1.jpg"), "fake-glass-cleaner")
+    body = mapping.product_payload(p, True)
+    _assert_clean_body(body, _EN_TEXTS)
+    assert body["name"] == "منظف زجاج تجريبي"
+    assert body["price"] == 25 and body["sale_price"] == 20, body
+    assert body["quantity"] == 12, body                       # multi-unit stock
+    assert body["status"] == "hidden" and body["sku"] == "FAKE-GC-001", body
+    assert body["product_type"] == "product"
+    assert body["description"] == p["description"]["ar"]
+    assert body["subtitle"] == "عنوان فرعي" and body["promotion_title"] == "عرض تجريبي"
+    assert body["metadata_title"] == "عنوان سيو" and body["metadata_description"] == "وصف سيو"
+    assert body["categories"] == [101, 202] and body["require_shipping"] is True, body
+    assert body["weight"] == 500 and body["weight_type"] == "g", body
+    for key in ("barcode", "options", "images", "cost_price"):
+        assert key not in body, key
+
+
+def test_product_payload_create_options():
+    rows = _options_rows()
+    for row, price in zip(rows, ("100", "25", "9.5", "47")):   # min is numeric, not text
+        row["price"] = price
+    p = _p(rows, _FC)
+    body = mapping.product_payload(p, True)
+    _assert_clean_body(body, _EN_TEXTS)
+    assert body["price"] == 9.5, body
+    assert body["sku"] == "FAKE-FLOOR-CLEANER" and body["status"] == "hidden", body
+    assert body["options"] == [
+        {"name": "الحجم", "display_type": "text",
+         "values": [{"name": "500 مل"}, {"name": "1 لتر"}]},
+        {"name": "الرائحة", "display_type": "text",
+         "values": [{"name": "لافندر"}, {"name": "ليمون"}]}], body["options"]
+    for key in ("quantity", "sale_price", "images", "barcode"):
+        assert key not in body, key
+
+
+def test_product_payload_update_never_status_options_images():
+    p = _p(_simple_rows(category_ids="101"), "fake-glass-cleaner")
+    upd = mapping.product_payload(p, False)
+    _assert_clean_body(upd, _EN_TEXTS)
+    for key in ("status", "options", "images"):
+        assert key not in upd, key
+    assert upd["name"] == "منظف زجاج تجريبي" and upd["price"] == 25, upd
+    assert upd["description"] == p["description"]["ar"] and upd["categories"] == [101]
+    upd = mapping.product_payload(_p(_options_rows(), _FC), False)
+    _assert_clean_body(upd, _EN_TEXTS)
+    for key in ("status", "options", "images", "price"):
+        assert key not in upd, key
+    assert upd["name"] == "منظف أرضيات تجريبي"
+
+
+def test_product_payload_empty_optionals_omitted():
+    p = _p(_simple_rows(stock="", sale_price="", weight=""), "fake-glass-cleaner")
+    for create in (True, False):
+        body = mapping.product_payload(p, create)
+        _assert_clean_body(body, _EN_TEXTS)
+        # an empty categories list on update would wipe categories set by hand in Salla
+        for key in ("subtitle", "promotion_title", "metadata_title", "metadata_description",
+                    "categories", "quantity", "sale_price", "weight", "weight_type"):
+            assert key not in body, (create, key, body)
+    body = mapping.product_payload(_p(_simple_rows(stock="0"), "fake-glass-cleaner"), True)
+    assert body["quantity"] == 0, body                         # 0 is a value, not empty
+
+
+def test_translation_payload():
+    rows = _options_rows()
+    rows[0].update(subtitle_en="Fake subtitle", promotion_title_en="Fake promo",
+                   seo_title_en="Fake SEO", seo_description_en="Fake SEO copy",
+                   subtitle_ar="عنوان فرعي")
+    p = _p(rows, _FC)
+    tp = mapping.translation_payload(p, "en")
+    assert tp == {"name": "Fake Floor Cleaner", "description": p["description"]["en"],
+                  "subtitle": "Fake subtitle", "promotion_title": "Fake promo",
+                  "metadata_title": "Fake SEO", "metadata_description": "Fake SEO copy"}, tp
+    assert mapping.translation_payload(p) == tp                # lang defaults to "en"
+    p = _p(_simple_rows(name_en=""), "fake-glass-cleaner")
+    tp = mapping.translation_payload(p, "en")
+    assert "name" not in tp and tp["description"] == p["description"]["en"], tp
+    _assert_clean_body(tp, ("منظف", "وصف"))
+    p = _p(_simple_rows(name_en="", description_en=""), "fake-glass-cleaner")
+    assert mapping.translation_payload(p, "en") == {}
+
+
+def test_option_translation_payloads():
+    p = _p(_options_rows(), _FC)
+    detail = {"id": 555, "options": _DETAIL_OPTIONS, "skus": []}
+    out = mapping.option_translation_payloads(p, detail, "en")
+    got = {(kind, str(oid)): body for kind, oid, body in out}
+    assert got == {("option", "11"): {"name": "Size"}, ("value", "111"): {"name": "500 ml"},
+                   ("value", "112"): {"name": "1 L"}, ("option", "22"): {"name": "Scent"},
+                   ("value", "221"): {"name": "Lavender"},
+                   ("value", "222"): {"name": "Lemon"}}, got
+    assert len(out) == len(got), out                          # no duplicate writes
+    for kind, _, body in out:
+        assert "values" not in body and set(body) == {"name"}, body
+    # Salla option not in the sheet, sheet value not in Salla, EN missing -> no call
+    rows = _options_rows()
+    for row in rows:
+        if row["option2_value_ar"] == "ليمون":
+            row["option2_value_en"] = ""
+    detail = {"options": _DETAIL_OPTIONS[:1] + [
+        {"id": 22, "name": "الرائحة", "values": [{"id": 221, "name": "لافندر"},
+                                                 {"id": 222, "name": "ليمون"}]},
+        {"id": 33, "name": "اللون", "values": [{"id": 331, "name": "أزرق"}]}]}
+    got = {(k, str(i)): b for k, i, b in mapping.option_translation_payloads(
+        _p(rows, _FC), detail, "en")}
+    assert ("value", "222") not in got and ("option", "33") not in got, got
+    assert ("value", "331") not in got and got[("value", "221")] == {"name": "Lavender"}
+    for body in got.values():
+        assert body.get("name"), body                          # never {"name": ""}
+    assert mapping.option_translation_payloads(_p(_simple_rows(), "fake-glass-cleaner"),
+                                               {"options": []}, "en") == []
+
+
+def _overlap_product():
+    # the same AR value "عادي" in both options, with different EN names
+    variants = [("عادي", "Regular", "لافندر", "Lavender", "30", "4"),
+                ("عادي", "Regular", "عادي", "Unscented", "31", "6")]
+    return _p(_options_rows(handle="fake-overlap", variants=variants, sku="FAKE-OV"),
+              "fake-overlap")
+
+
+_OVERLAP_DETAIL = {"id": 556, "options": [
+    {"id": 11, "name": "الحجم", "values": [{"id": 113, "name": "عادي"}]},
+    {"id": 22, "name": "الرائحة", "values": [{"id": 221, "name": "لافندر"},
+                                             {"id": 223, "name": "عادي"}]}],
+    "skus": [{"id": 9101, "sku": "", "related_option_values": [113, 221]},
+             {"id": 9102, "sku": "", "related_option_values": [223, 113]}]}
+
+
+def test_option_translation_same_value_in_two_options():
+    got = {(k, str(i)): b for k, i, b in mapping.option_translation_payloads(
+        _overlap_product(), _OVERLAP_DETAIL, "en")}
+    assert got[("value", "113")] == {"name": "Regular"}, got
+    assert got[("value", "223")] == {"name": "Unscented"}, got
+
+
+# --- norm_label / match_variants -----------------------------------------------------------
+
+def test_norm_label():
+    n = mapping.norm_label
+    assert n("  Size  ") == n("SIZE") == n("size") == "size"
+    assert n("٥٠٠ مل") == n("500 مل") == "500 مل"              # Arabic-Indic digits
+    assert n("۵۰۰ مل") == "500 مل"                             # Extended (Persian) digits
+    assert n("500 ml") == n("500   ml") == n(" 500 ml\t") == "500 ml"
+    assert n("Straße") == n("STRASSE")                          # casefold, not lower
+    for empty in (None, "", "   ", " "):
+        assert n(empty) == "", empty
+
+
+def test_match_variants_set_match():
+    p = _p(_options_rows(), _FC)
+    detail = {"id": 555, "options": [
+        {"id": 11, "name": "الحجم ", "values": [{"id": 111, "name": "٥٠٠ مل"},
+                                                {"id": 112, "name": "1 لتر"}]},
+        {"id": 22, "name": "الرائحة", "values": [{"id": 221, "name": "لافندر "},
+                                                 {"id": 222, "name": "ليمون"}]}],
+        "skus": [{"id": 9005, "sku": "", "related_option_values": [111]},   # partial
+                 {"id": 9006, "sku": "", "related_option_values": [111, 221, 999]},
+                 {"id": 9001, "sku": "", "related_option_values": [111, 221]},
+                 {"id": 9002, "sku": "", "related_option_values": [222, 111]},  # order
+                 {"id": 9003, "sku": "FAKE-OLD", "related_option_values": [112, 221]},
+                 {"id": 9004, "sku": "", "related_option_values": [112, 222]}]}
+    pairs, missing, extra = mapping.match_variants(p, detail)
+    assert _pair_map(pairs) == {"FAKE-FC-001": "9001", "FAKE-FC-002": "9002",
+                                "FAKE-FC-003": "9003", "FAKE-FC-004": "9004"}, pairs
+    assert _row_numbers(missing) == [], missing
+    assert sorted(str(x) for x in extra) == ["9005", "9006"], extra
+    # Salla lacks one combination: that sheet row is missing, the rest still pair
+    detail["skus"] = [s for s in detail["skus"] if s["id"] not in (9004, 9005, 9006)]
+    pairs, missing, extra = mapping.match_variants(p, detail)
+    assert set(_pair_map(pairs)) == {"FAKE-FC-001", "FAKE-FC-002", "FAKE-FC-003"}
+    assert _row_numbers(missing) == [5], missing
+    assert list(extra) == [], extra
+
+
+def test_match_variants_same_value_in_two_options():
+    pairs, missing, extra = mapping.match_variants(_overlap_product(), _OVERLAP_DETAIL)
+    assert _pair_map(pairs) == {"FAKE-OV-001": "9101", "FAKE-OV-002": "9102"}, pairs
+    assert not list(missing) and not list(extra)
+
+
+def test_match_variants_id_types():
+    """Salla ids may come as int in options[] and as str in related_option_values (or
+    the reverse): a type mismatch must not turn every variant into "missing"."""
+    p = _p(_options_rows(), _FC)
+    detail = {"options": _DETAIL_OPTIONS,
+              "skus": [{"id": 9001, "related_option_values": ["111", "221"]},
+                       {"id": 9002, "related_option_values": ["111", "222"]},
+                       {"id": "9003", "related_option_values": [112, 221]},
+                       {"id": 9004, "related_option_values": ["112", 222]}]}
+    pairs, missing, extra = mapping.match_variants(p, detail)
+    assert len(pairs) == 4 and not list(missing) and not list(extra), (pairs, missing, extra)
+
+
+def test_match_variants_simple_product():
+    p = _p(_simple_rows(), "fake-glass-cleaner")
+    for detail in ({"id": 1, "options": [], "skus": []},
+                   {"id": 1, "skus": [{"id": 77, "sku": "FAKE-GC-001",
+                                       "related_option_values": []}]}):
+        pairs, missing, extra = mapping.match_variants(p, detail)
+        assert list(pairs) == [] and list(missing) == [], (pairs, missing)
+
+
+# --- variant_payload -------------------------------------------------------------------------
+
+# Spec §4 lists sku, price, sale_price, stock_quantity, weight, barcode. weight_type is
+# accepted ONLY next to weight: 500 g sent without its unit would read as 500 kg.
+_VARIANT_KEYS = {"sku", "price", "sale_price", "stock_quantity", "weight", "weight_type",
+                 "barcode"}
+
+
+def _gc_variant(**over):
+    return _p(_simple_rows(**over), "fake-glass-cleaner")["variants"][0]
+
+
+def test_variant_payload_full():
+    body = mapping.variant_payload(_gc_variant())
+    assert set(body) <= _VARIANT_KEYS, body
+    assert body["sku"] == "FAKE-GC-001" and body["price"] == 25 and body["sale_price"] == 20
+    assert body["stock_quantity"] == 12 and body["weight"] == 0.5, body
+    assert body["barcode"] == "000123456789", body
+    assert body.get("weight_type", "kg") == "kg", body
+    _assert_clean_body(body)
+    body = mapping.variant_payload(_gc_variant(stock="", sale_price="", weight="",
+                                               barcode=""))
+    assert set(body) == {"sku", "price"}, body                 # blanks never sent
+    body = mapping.variant_payload(_gc_variant(stock="0"))
+    assert body["stock_quantity"] == 0, body
+    body = mapping.variant_payload(_gc_variant(weight="500", weight_unit="g"))
+    assert (body["weight"], body.get("weight_type")) in ((500, "g"), (0.5, "kg")), body
+
+
+def test_variant_payload_diff_against_current():
+    v = _gc_variant()
+    current = {"id": 9001, "sku": "FAKE-GC-001",
+               "price": {"amount": "25.00", "currency": "SAR"},
+               "sale_price": {"amount": 20, "currency": "SAR"},
+               "stock_quantity": 12, "weight": 0.5, "barcode": "000123456789",
+               "cost_price": {"amount": 1, "currency": "SAR"}}
+    assert mapping.variant_payload(v, current) == {}
+    cur = dict(current, price=25)                              # plain number
+    assert mapping.variant_payload(v, cur) == {}
+    cur = dict(current, price={"amount": "24.99", "currency": "SAR"})
+    assert mapping.variant_payload(v, cur) == {"price": 25}, mapping.variant_payload(v, cur)
+    cur = dict(current, stock_quantity=3, barcode="123456789")   # zeros lost in Salla
+    out = mapping.variant_payload(v, cur)
+    assert out == {"stock_quantity": 12, "barcode": "000123456789"}, out
+    cur = dict(current, sku="")                                # fresh Salla variant
+    assert mapping.variant_payload(v, cur) == {"sku": "FAKE-GC-001"}
+    # a weight change never travels without its unit
+    out = mapping.variant_payload(v, dict(current, weight=0.4))
+    assert out.get("weight") == 0.5 and out.get("weight_type", "kg") == "kg", out
+    assert set(out) <= {"weight", "weight_type"}, out
+    for cur in (current, dict(current, weight=0.4), dict(current, price=1)):
+        out = mapping.variant_payload(v, cur)
+        assert ("weight_type" in out) <= ("weight" in out), out
+    # a blank sheet value is "not sent", never a diff (no clearing of Salla's value)
+    v2 = _gc_variant(stock="", sale_price="")
+    assert mapping.variant_payload(v2, dict(current, stock_quantity=99)) == {}
+    for cur in (current, dict(current, price=1), None):
+        assert "cost_price" not in mapping.variant_payload(v, cur)
+
+
+# --- images_to_attach / translation_kept / detail helpers ---------------------------------
+
+def test_images_to_attach():
+    f = mapping.images_to_attach
+    imgs = ["fake-1.jpg", "fake-2.jpg", "fake-3.webp"]
+    zip_names = ["fake-1.jpg", "fake-2.jpg", "fake-3.webp"]
+    assert f(imgs, 0, zip_names) == ([(1, "fake-1.jpg"), (2, "fake-2.jpg"),
+                                      (3, "fake-3.webp")], None)
+    assert f(imgs, 1, zip_names) == ([(2, "fake-2.jpg"), (3, "fake-3.webp")], None)
+    assert f(imgs, 3, zip_names) == ([], None)
+    assert f(imgs, 7, zip_names) == ([], None)
+    # stops at the FIRST missing image (keeps the display order), never skips over it
+    todo, reason = f(imgs, 0, ["fake-1.jpg", "fake-3.webp"])
+    assert todo == [(1, "fake-1.jpg")], todo
+    assert reason == "fake-2.jpg not in the ZIP", reason
+    todo, reason = f(imgs, 0, ["fake-1.jpg", "fake-2.jpg"])
+    assert todo == [(1, "fake-1.jpg"), (2, "fake-2.jpg")] and \
+        reason == "fake-3.webp not in the ZIP", (todo, reason)
+    # case-insensitive basename (ZIPs made on a Mac carry a folder)
+    todo, reason = f(["FAKE-1.JPG", "fake-2.jpg"], 0,
+                     ["Wave1/fake-1.jpg", "Wave1/FAKE-2.JPG", "__MACOSX/Wave1/._fake-2.jpg"])
+    assert [(s, n.lower()) for s, n in todo] == [(1, "fake-1.jpg"), (2, "fake-2.jpg")] \
+        and reason is None, (todo, reason)
+    # never more than 10 in total
+    many = ["fake-%d.jpg" % i for i in range(1, 13)]
+    todo, reason = f(many, 0, many)
+    assert [s for s, _ in todo] == list(range(1, 11)), todo
+    todo, reason = f(many, 8, many)
+    assert [s for s, _ in todo] == [9, 10], todo
+    assert f(many, 10, many)[0] == []
+    assert f([], 0, zip_names) == ([], None)
+
+
+def test_translation_kept():
+    k = mapping.translation_kept
+    assert k("منظف زجاج تجريبي", "منظف زجاج تجريبي") is True
+    assert k("منظف زجاج تجريبي", "Fake Glass Cleaner") is False   # EN wrote over AR
+    assert k("منظف زجاج تجريبي", "") is False
+    assert k("منظف زجاج تجريبي", None) is False
+
+
+def test_detail_helpers():
+    detail = {"id": 555, "status": "hidden",
+              "images": [{"id": 1, "url": "https://cdn.example.test/fake-1.jpg"},
+                         {"id": 2, "url": "https://cdn.example.test/fake-2.jpg"}]}
+    assert len(mapping.detail_images(detail)) == 2
+    assert mapping.detail_status(detail) == "hidden"
+    assert str(mapping.detail_id(detail)) == "555"
+    for empty in (None, {}, {"images": None}, "garbage"):
+        assert list(mapping.detail_images(empty)) == [], empty
+    assert mapping.detail_status(None) in ("", None)
+    assert not mapping.detail_id(None)
+
+
+# --- F8 review round 4: English overwrite guard -----------------------------------------
+
+def test_translation_skip_reason():
+    r = mapping.translation_skip_reason
+    # nothing to send -> nothing to skip
+    p = _p(_simple_rows(name_en="", description_en=""), "fake-glass-cleaner")
+    assert mapping.translation_payload(p, "en") == {}
+    assert r(p) == "" and r(p, "en") == ""
+    # EN description (or any EN text) without name_en: the overwrite would go unseen
+    p = _p(_simple_rows(name_en=""), "fake-glass-cleaner")
+    assert r(p) == "name_en is empty", r(p)
+    p = _p(_simple_rows(name_en="", description_en="", subtitle_en="Fake subtitle"),
+           "fake-glass-cleaner")
+    assert r(p) == "name_en is empty", r(p)
+    # same name on both sides once normalized (case, inner/outer spaces)
+    p = _p(_simple_rows(name_ar="WAYAKIT Gel", name_en=" wayakit  gel"), "fake-glass-cleaner")
+    assert r(p) == "name_en is the same as name_ar", r(p)
+    p = _p(_simple_rows(name_ar="FAKE Gel ٥٠٠", name_en="fake gel 500"), "fake-glass-cleaner")
+    assert r(p) == "name_en is the same as name_ar", r(p)     # Arabic-Indic digits too
+    # a real translation -> sent
+    p = _p(_simple_rows(), "fake-glass-cleaner")
+    assert r(p) == "", r(p)
+    p = _p(_simple_rows(name_ar="WAYAKIT Gel", name_en="WAYAKIT Gel 2"), "fake-glass-cleaner")
+    assert r(p) == ""
+    p = _p(_options_rows(), _FC)
+    assert r(p) == ""
+    # tolerant of a hand-built product
+    assert r({}) == ""
+    assert r({"name": None, "description": {"en": "<p>Fake</p>"}}) == "name_en is empty"
+
+
+# --- F8 review round 4: weight units ------------------------------------------------------
+
+def test_weight_kg():
+    w = mapping.weight_kg
+    assert abs(w("600", "G") - 0.6) < 1e-9, w("600", "G")
+    assert abs(w(600, "g") - 0.6) < 1e-9
+    assert w(1, "") == 1.0 and w(1, None) == 1.0 and w("1.5", "KG") == 1.5
+    assert w({"amount": "2", "currency": "x"}, "kg") == 2.0           # through money()
+    assert abs(w("1,250", "g") - 1.25) < 1e-9
+    assert w(1, "lb") is None and w(1, "oz") is None
+    for bad in (None, "", "abc", "inf", True, [1]):
+        assert w(bad, "kg") is None, bad
+
+
+def test_same_weight():
+    s = mapping.same_weight
+    assert s(600, "g", 0.6, "kg") is True
+    assert s(600, "g", 600, "") is True                       # no Salla unit: raw numbers
+    assert s(600, "g", "600.00", None) is True
+    assert s(0.6, "kg", 600, "g") is True
+    assert s(0.5, "kg", "500", "G") is True                   # unit case-insensitive
+    assert s(0.5, "kg", 0.5, " kg ") is True
+    assert s(600, "g", 0.6004, "kg") is True                  # within half a gram
+    assert s(600, "g", 0.601, "kg") is False                  # one gram off
+    assert s(600, "g", 0.6, "") is False                      # no unit: 600 != 0.6
+    assert s(1, "kg", 2.2, "lb") is False                     # unknown unit never same
+    assert s(1, "kg", None, "kg") is False
+    assert s(1, "kg", "abc", "kg") is False
+    assert s(1, "lb", 1, "kg") is False
+    assert s(0.5, "kg", 0.5, "g") is False                    # 500 g vs 0.5 g
+    # no unit and nothing on either side: same as _same_number (both unset)
+    assert s(None, "kg", None, "") is True
+    assert s(1, "kg", None, "") is False
+
+
+def test_variant_payload_weight_units():
+    v = _gc_variant(weight="600", weight_unit="g")       # stock 12, sale 20 < price 25
+    base = {"id": 9001, "sku": "FAKE-GC-001", "price": {"amount": "25.00", "currency": "SAR"},
+            "sale_price": {"amount": 20, "currency": "SAR"}, "stock_quantity": 12,
+            "barcode": "000123456789"}
+    vp = mapping.variant_payload
+    # Salla echoes 600 g as 0.6 kg: no change, no endless resend
+    assert vp(v, dict(base, weight=0.6, weight_type="kg")) == {}
+    assert vp(v, dict(base, weight="0.60", weight_type="KG")) == {}
+    assert vp(v, dict(base, weight=600, weight_type="g")) == {}
+    assert vp(v, dict(base, weight=600)) == {}                 # no unit: raw numbers
+    # a real change: weight and the SHEET unit together
+    out = vp(v, dict(base, weight=0.5, weight_type="kg"))
+    assert out == {"weight": 600, "weight_type": "g"}, out
+    out = vp(v, dict(base, weight=0.6))                       # no unit, 600 != 0.6
+    assert out == {"weight": 600, "weight_type": "g"}, out
+    out = vp(v, dict(base, weight=1.3, weight_type="lb"))     # unknown unit
+    assert out == {"weight": 600, "weight_type": "g"}, out
+    # weight_type alone differing is not a change (0.5 kg sheet, Salla 0.5 with g/none)
+    v2 = _gc_variant()                                        # 0.5 kg
+    assert vp(v2, dict(base, weight=0.5)) == {}
+    assert vp(v2, dict(base, weight=500, weight_type="g")) == {}
+    out = vp(v2, dict(base, weight=0.5, weight_type="g"))      # 0.5 g is not 0.5 kg
+    assert out == {"weight": 0.5, "weight_type": "kg"}, out
+    # other diffs still reported next to an equal weight; weight never leaks in
+    out = vp(v, dict(base, weight=0.6, weight_type="kg", stock_quantity=3,
+                     sale_price={"amount": 19, "currency": "SAR"}))
+    assert out == {"stock_quantity": 12, "sale_price": 20}, out
+    # a blank sheet weight is never sent, whatever Salla holds
+    v3 = _gc_variant(weight="", weight_unit="")
+    assert vp(v3, dict(base, weight=7, weight_type="lb")) == {}
+    for cur in (dict(base, weight=0.6, weight_type="kg"), dict(base, weight=0.4),
+                dict(base, weight=0.6, weight_type="kg", price=1)):
+        out = vp(v, cur)
+        assert ("weight" in out) == ("weight_type" in out), out
+
+
+def _gc_detail(**over):
+    detail = {"id": 555, "price": {"amount": "25.00", "currency": "SAR"},
+              "sale_price": {"amount": 20, "currency": "SAR"}, "quantity": 12,
+              "weight": 0.6, "weight_type": "kg", "options": [], "skus": []}
+    detail.update(over)
+    return detail
+
+
+def test_simple_changes_weight_units():
+    sc = mapping.simple_changes
+    p = _p(_simple_rows(weight="600", weight_unit="g"), "fake-glass-cleaner")
+    assert sc(p, _gc_detail()) == []
+    assert sc(p, _gc_detail(weight=600, weight_type="g")) == []
+    assert sc(p, _gc_detail(weight=600, weight_type=None)) == []
+    out = sc(p, _gc_detail(weight=0.5))
+    assert out == [("weight", "600 g", "0.5 kg")], out
+    out = sc(p, _gc_detail(weight=0.6, weight_type=""))
+    assert out == [("weight", "600 g", 0.6)], out
+    out = sc(p, _gc_detail(weight=1.3, weight_type="lb"))
+    assert out == [("weight", "600 g", "1.3 lb")], out
+    out = sc(p, _gc_detail(weight=None, weight_type="kg"))      # Salla has no weight
+    assert out == [("weight", "600 g", "")], out
+    # no separate weight_unit entry, ever
+    for d in (_gc_detail(), _gc_detail(weight=600, weight_type="g"), _gc_detail(weight=1)):
+        assert all(c[0] != "weight_unit" for c in sc(p, d)), sc(p, d)
+    # Salla number shown as a person reads it: 2.0 -> 2
+    p_kg = _p(_simple_rows(weight="1", weight_unit="kg"), "fake-glass-cleaner")
+    out = sc(p_kg, _gc_detail(weight=2.0, weight_type="kg"))
+    assert out == [("weight", "1 kg", "2 kg")], out
+    assert sc(p_kg, _gc_detail(weight=1000, weight_type="g")) == []
+    # multi-unit stock and a non-zero discount: the other changes next to the weight
+    out = sc(p, _gc_detail(quantity=3, sale_price={"amount": "18.00", "currency": "SAR"},
+                           price={"amount": "24.00", "currency": "SAR"}, weight=0.5))
+    assert out == [("price", 25, 24), ("sale_price", 20, 18), ("stock", 12, 3),
+                   ("weight", "600 g", "0.5 kg")], out
+    # blank sheet weight is not sent -> not a change
+    p_none = _p(_simple_rows(weight="", weight_unit=""), "fake-glass-cleaner")
+    assert sc(p_none, _gc_detail(weight=9, weight_type="lb")) == []
+    # products with options keep their values on the variants
+    assert sc(_p(_options_rows(), _FC), _gc_detail(weight=9)) == []
+
+
+def test_shown():
+    sh = mapping._shown
+    assert sh(12.0) == 12 and isinstance(sh(12.0), int)
+    assert sh("12.50") == 12.5 and sh({"amount": "7.00", "currency": "SAR"}) == 7
+    for bad in (None, "", "abc", True):
+        assert sh(bad) == "", bad
+
+
+# --- F8 review round 4: parent SKU against the file's SKUs -------------------------------
+
+def test_parse_parent_sku_collides_with_other_product_sku():
+    # options product fake-floor-cleaner -> parent SKU FAKE-FLOOR-CLEANER; a simple
+    # product further down owns that SKU in lower case (a Salla search may ignore case)
+    other = _simple_rows(sku="fake-floor-cleaner")
+    other[0]["_row"] = 6
+    rows = _options_rows() + other
+    by, errors, _, products = _parse(rows)
+    fc, gc = by[_FC], by["fake-glass-cleaner"]
+    assert fc["parent_sku"] == "FAKE-FLOOR-CLEANER", fc["parent_sku"]
+    want_fc = ("Row 2: the Salla parent SKU of fake-floor-cleaner is its handle in capitals "
+               "(FAKE-FLOOR-CLEANER), which is also the SKU of row 6: rename the handle or "
+               "that SKU")
+    want_gc = ("Row 6: SKU equals the parent SKU of handle fake-floor-cleaner (its handle "
+               "in capitals): rename the handle or this SKU")
+    assert want_fc in fc["errors"], fc["errors"]
+    assert want_gc in gc["errors"], gc["errors"]
+    assert want_fc in errors and want_gc in errors, errors
+    assert errors.count(want_fc) == 1 and errors.count(want_gc) == 1, errors
+    # the simple product listed FIRST: same result
+    other[0]["_row"] = 2
+    rows = other + _options_rows(start=3)
+    by, errors, _, products = _parse(rows)
+    assert _blocked(by, _FC) and _blocked(by, "fake-glass-cleaner")
+    assert _err_at(by[_FC]["errors"], (3,)) and _err_at(by["fake-glass-cleaner"]["errors"], (2,))
+    assert any("row 2" in m for m in by[_FC]["errors"]), by[_FC]["errors"]
+
+
+def test_parse_parent_sku_collides_with_own_variant_sku():
+    rows = _options_rows()
+    rows[2]["sku"] = "Fake-Floor-Cleaner"                   # row 4, its own variant
+    by, errors, _, products = _parse(rows)
+    fc = by[_FC]
+    want = ("Row 2: the Salla parent SKU of fake-floor-cleaner is its handle in capitals "
+            "(FAKE-FLOOR-CLEANER), which is also the SKU of row 4: rename the handle or "
+            "that SKU")
+    assert want in fc["errors"] and want in errors, (fc["errors"], errors)
+    # one error, not a second "SKU equals" on the same product
+    assert not any("SKU equals the parent SKU" in m for m in fc["errors"]), fc["errors"]
+    assert len([m for m in errors if "parent SKU" in m]) == 1, errors
+
+
+def test_parse_parent_sku_no_false_positive():
+    # a simple product's parent SKU is its own variant SKU: never a collision with itself
+    by, errors, _, products = _parse(_simple_rows(sku="FAKE-GLASS-CLEANER"))
+    assert not _all_errors(products, errors), _all_errors(products, errors)
+    # a simple product whose HANDLE in capitals is another product's SKU: no rule
+    rows = _simple_rows() + [_r(3, handle="fake-two", sku="FAKE-GLASS-CLEANER",
+                                name_ar="اسم تجريبي", description_ar="وصف تجريبي",
+                                price="10", stock="2")]
+    by, errors, _, products = _parse(rows)
+    assert not _all_errors(products, errors), _all_errors(products, errors)
+    # options product next to an unrelated SKU that only CONTAINS the handle
+    rows = _options_rows() + _simple_rows(sku="FAKE-FLOOR-CLEANER-2")
+    rows[-1]["_row"] = 6
+    by, errors, _, products = _parse(rows)
+    assert not _all_errors(products, errors), _all_errors(products, errors)
+
+
+# --- F8 review round 4: the same image twice on one handle -------------------------------
+
+def test_parse_duplicate_image_names():
+    by, errors, _, products = _parse(_simple_rows(image_1="fake-a.jpg", image_2="fake-b.jpg",
+                                                  image_3="dir/FAKE-A.JPG"))
+    want = "Row 2: image_3 repeats image_1 (dir/FAKE-A.JPG)"
+    assert want in by["fake-glass-cleaner"]["errors"] and want in errors, errors
+    by, errors, _, products = _parse(_simple_rows(image_2="fake-a.jpg",
+                                                  image_5="C:\\photos\\Fake-A.jpg"))
+    want = "Row 2: image_5 repeats image_2 (C:\\photos\\Fake-A.jpg)"
+    assert want in errors, errors
+    # exact same name, and a third copy reported against the FIRST one
+    by, errors, _, products = _parse(_simple_rows(image_1="fake-a.jpg", image_2="fake-a.jpg",
+                                                  image_4="fake-a.jpg"))
+    assert "Row 2: image_2 repeats image_1 (fake-a.jpg)" in errors, errors
+    assert "Row 2: image_4 repeats image_1 (fake-a.jpg)" in errors, errors
+    # on a product with options too (images live on its first row)
+    rows = _options_rows()
+    rows[0]["image_2"] = "FAKE-FC-1.jpg"
+    by, errors, _, products = _parse(rows)
+    assert "Row 2: image_2 repeats image_1 (FAKE-FC-1.jpg)" in by[_FC]["errors"], errors
+    # not duplicates: other extension, other name, same file on two different handles
+    p = _p(_simple_rows(image_1="fake-a.jpg", image_2="fake-a.jpeg", image_3="fake-a2.jpg",
+                        image_4="dir/fake-b.jpg"), "fake-glass-cleaner")
+    assert p["images"] == ["fake-a.jpg", "fake-a.jpeg", "fake-a2.jpg", "dir/fake-b.jpg"]
+    rows = _simple_rows(image_1="fake-shared.jpg") + [
+        _r(3, handle="fake-two", sku="FAKE-TWO-001", name_ar="اسم تجريبي",
+           description_ar="وصف تجريبي", price="10", stock="2", image_1="fake-shared.jpg")]
+    by, errors, _, products = _parse(rows)
+    assert not _all_errors(products, errors), _all_errors(products, errors)
+
+
+# --- F8 review round 4: unreadable CSV / encrypted xlsx -> ValueError -------------------
+
+def test_read_csv_rows_unclosed_quote_value_error():
+    # an unclosed quote swallows the rest of the file into one field over the csv
+    # module's limit (131072): a readable ValueError, never a raw csv.Error
+    big = "x" * 140000
+    data = ("handle,sku,name_ar,description_ar,price\n"
+            'fake-csv,FAKE-CSV-001,"منظف تجريبي,وصف,25\n' + big + "\nmore,rows\n"
+            ).encode("utf-8")
+    for call in (lambda: mapping.read_csv_rows(data),
+                 lambda: mapping.read_upload_rows(data, "products.csv")):
+        try:
+            call()
+        except ValueError as e:
+            msg = str(e)
+            assert msg.startswith("The CSV file cannot be read near line "), msg
+            assert "quote that is never closed" in msg and ".xlsx" in msg, msg
+            assert "line 2 " in msg or re.search(r"near line \d+ \(", msg), msg
+            continue
+        except Exception as e:
+            raise AssertionError("raised %s, not ValueError: %s" % (type(e).__name__, e))
+        raise AssertionError("no error for an unclosed quote over the field limit")
+    # the test never moved the global limit
+    import csv
+    assert csv.field_size_limit() == 131072, csv.field_size_limit()
+    # a long but closed cell under the limit still reads
+    ok = ('handle,sku,description_ar\nfake-csv,FAKE-CSV-001,"%s"\n' % ("y" * 100000)
+          ).encode("utf-8")
+    rows = mapping.read_csv_rows(ok)
+    assert len(rows) == 1 and len(rows[0]["description_ar"]) == 100000
+
+
+def _patch_zip(raw, flag_bits=0, method=None, only=None):
+    """Rewrite the local AND central headers of a ZIP: OR `flag_bits` into the
+    general-purpose flag, set the compression `method`. `only`: entry names to touch
+    (default all). Offsets come from the central directory, not a byte search."""
+    import struct
+    data = bytearray(raw)
+    eocd = data.rfind(b"PK\x05\x06")
+    count = struct.unpack_from("<H", data, eocd + 10)[0]
+    pos = struct.unpack_from("<I", data, eocd + 16)[0]
+    for _ in range(count):
+        assert data[pos:pos + 4] == b"PK\x01\x02", "central header expected"
+        n_len, e_len, c_len = struct.unpack_from("<HHH", data, pos + 28)
+        local = struct.unpack_from("<I", data, pos + 42)[0]
+        name = bytes(data[pos + 46:pos + 46 + n_len]).decode("utf-8")
+        assert data[local:local + 4] == b"PK\x03\x04", "local header expected"
+        if only is None or name in only:
+            for flag_at in (pos + 8, local + 6):
+                value = struct.unpack_from("<H", data, flag_at)[0]
+                struct.pack_into("<H", data, flag_at, value | flag_bits)
+            if method is not None:
+                for method_at in (pos + 10, local + 8):
+                    struct.pack_into("<H", data, method_at, method)
+        pos += 46 + n_len + e_len + c_len
+    return bytes(data)
+
+
+def test_read_xlsx_rows_encrypted_entry_value_error():
+    good = _xlsx([("Products", _simple_sheet())])
+    assert set(_by_sku(mapping.read_xlsx_rows(good))) == {"FAKE-XL-001"}
+    assert set(_by_sku(mapping.read_xlsx_rows(_patch_zip(good)))) == {"FAKE-XL-001"}
+    cases = [(_patch_zip(good, flag_bits=1), "xl/workbook.xml"),
+             (_patch_zip(good, flag_bits=1, only={"xl/worksheets/sheet1.xml"}),
+              "xl/worksheets/sheet1.xml")]
+    for raw, part in cases:
+        for call in (lambda: mapping.read_xlsx_rows(raw),
+                     lambda: mapping.read_upload_rows(raw, "products.xlsx"),
+                     lambda: mapping.read_upload_rows(raw, "upload.csv")):
+            try:
+                call()
+            except ValueError as e:
+                want = ("The .xlsx file is encrypted (%s): save it without a password."
+                        % part)
+                assert str(e) == want, (str(e), want)
+                continue
+            except Exception as e:      # RuntimeError must be wrapped
+                raise AssertionError("raised %s, not ValueError: %s" % (
+                    type(e).__name__, e))
+            raise AssertionError("no error for an encrypted entry (%s)" % part)
+
+
+def test_read_xlsx_rows_unsupported_compression_is_damaged():
+    # NotImplementedError is a RuntimeError subclass: still "damaged", not "encrypted"
+    assert issubclass(NotImplementedError, RuntimeError)
+    good = _xlsx([("Products", _simple_sheet())])
+    raw = _patch_zip(good, method=99, only={"xl/worksheets/sheet1.xml"})
+    try:
+        mapping.read_xlsx_rows(raw)
+    except ValueError as e:
+        assert str(e) == "The .xlsx file is damaged (xl/worksheets/sheet1.xml).", str(e)
+    except Exception as e:
+        raise AssertionError("raised %s, not ValueError: %s" % (type(e).__name__, e))
+    else:
+        raise AssertionError("no error for an unsupported compression method")
+
+
 if __name__ == "__main__":
     for fn in [test_signature_valid, test_signature_wrong_secret,
                test_signature_tampered_one_byte, test_signature_missing_or_empty_header,
@@ -2967,7 +4451,49 @@ if __name__ == "__main__":
                test_public_base_url, test_invoice_pdf_url, test_invoice_upload_payload,
                test_uploaded_invoice_id, test_salla_invoice_kind, test_adopt_uploaded_invoice,
                test_invoice_total_check_tolerance_zero,
-               test_cancel_action_credit_note_when_auto_invoicing]:
+               test_cancel_action_credit_note_when_auto_invoicing,
+               # F8: product upload
+               test_upload_columns_and_handle_re, test_read_csv_rows_bom_arabic_multiline,
+               test_read_csv_rows_utf8_without_bom_and_cp1256_fallback,
+               test_read_csv_rows_ragged_rows_never_crash, test_read_xlsx_rows_cells,
+               test_read_xlsx_rows_sheet_choice,
+               test_read_xlsx_rows_not_xlsx_raises_value_error,
+               test_read_upload_rows_dispatch, test_parse_simple_product,
+               test_parse_stock_blank_vs_zero_and_defaults,
+               test_parse_options_size_x_scent, test_parse_one_option_product,
+               test_parse_handle_order_and_blank_rows_skipped, test_parse_required_values,
+               test_parse_en_missing_is_only_a_warning,
+               test_parse_unknown_columns_warned_once, test_parse_duplicate_sku,
+               test_parse_bad_handle, test_parse_non_numeric_and_out_of_range_numbers,
+               test_parse_sale_price_rules, test_parse_option_name_value_pairing,
+               test_parse_duplicate_option_combination,
+               test_parse_duplicate_option_combination_normalized,
+               test_parse_max_options_and_images, test_parse_mixed_product_level_values,
+               test_parse_simple_product_with_two_rows,
+               test_parse_bad_product_type_and_categories_flagged,
+               test_upload_headers_case_and_spaces_insensitive, test_upload_csv_end_to_end,
+               test_text_to_html, test_flagged_claims_ar_en_case_insensitive,
+               test_flagged_claims_every_text_field, test_flagged_claims_options_and_alt,
+               test_flagged_claims_typographic_apostrophe,
+               test_product_payload_create_simple, test_product_payload_create_options,
+               test_product_payload_update_never_status_options_images,
+               test_product_payload_empty_optionals_omitted, test_translation_payload,
+               test_option_translation_payloads,
+               test_option_translation_same_value_in_two_options, test_norm_label,
+               test_match_variants_set_match,
+               test_match_variants_same_value_in_two_options, test_match_variants_id_types,
+               test_match_variants_simple_product, test_variant_payload_full,
+               test_variant_payload_diff_against_current, test_images_to_attach,
+               test_translation_kept, test_detail_helpers,
+               # F8 review round 4
+               test_translation_skip_reason, test_weight_kg, test_same_weight,
+               test_variant_payload_weight_units, test_simple_changes_weight_units,
+               test_shown, test_parse_parent_sku_collides_with_other_product_sku,
+               test_parse_parent_sku_collides_with_own_variant_sku,
+               test_parse_parent_sku_no_false_positive, test_parse_duplicate_image_names,
+               test_read_csv_rows_unclosed_quote_value_error,
+               test_read_xlsx_rows_encrypted_entry_value_error,
+               test_read_xlsx_rows_unsupported_compression_is_damaged]:
         fn()
         print(fn.__name__, "OK")
     print("all passed")

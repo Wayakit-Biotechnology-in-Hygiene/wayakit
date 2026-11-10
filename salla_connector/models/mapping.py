@@ -10,12 +10,19 @@ lineId, lineUnitPrice), so each reader is tolerant and the controller logs the
 structure of the first real webhooks. Fix the names here, once, when a payload
 disagrees.
 """
+import csv
 import hashlib
 import hmac
+import html
+import io
 import json
 import math
+import posixpath
 import re
+import zipfile
+import zlib
 from urllib.parse import urlsplit
+from xml.etree import ElementTree
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta, timezone
 
@@ -1720,3 +1727,1124 @@ def adopt_uploaded_invoice(salla_invoices, kind, known_ids):
     if not found:
         return ""
     return max(found, key=lambda s: (s.isdigit(), int(s) if s.isdigit() else 0, s))
+
+
+# ================================================================== F8: product upload
+# Master sheet (.xlsx / .csv) -> Salla products, spec claude-docs/14-product-upload.md.
+# Salla field names marked (U) in the spec are settled by the demo-store spike before the
+# real run; fix them here, once.
+
+UPLOAD_COLUMNS = [
+    "handle", "sku",
+    "name_ar", "name_en", "subtitle_ar", "subtitle_en",
+    "promotion_title_ar", "promotion_title_en", "description_ar", "description_en",
+    "seo_title_ar", "seo_title_en", "seo_description_ar", "seo_description_en",
+    "category_ids", "product_type",
+    "option1_name_ar", "option1_name_en", "option2_name_ar", "option2_name_en",
+    "option1_value_ar", "option1_value_en", "option2_value_ar", "option2_value_en",
+    "price", "sale_price", "stock", "weight", "weight_unit", "barcode",
+] + ["image_%d" % i for i in range(1, 11)] + ["image_alt", "salla_product_id"]
+UPLOAD_HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,60}$")
+UPLOAD_PRODUCT_TYPES = ("product", "group_products")
+UPLOAD_WEIGHT_UNITS = ("kg", "g")
+UPLOAD_MAX_IMAGES = 10
+# Product-level text columns, each with an _ar and an _en column.
+_UPLOAD_TEXTS = ("name", "subtitle", "promotion_title", "description", "seo_title",
+                 "seo_description")
+_UPLOAD_LANGS = ("ar", "en")
+# Matched on any column so option3_* / image_11 are reported as "too many" (an error),
+# not as an unknown column (a warning nobody reads).
+_OPTION_COL_RE = re.compile(r"^option(\d+)_(name|value)_(ar|en)$")
+_IMAGE_COL_RE = re.compile(r"^image_(\d+)$")
+# 1,250.50 is a thousands separator; 12,5 is a decimal comma and is refused: reading it
+# as 125 would put a price ten times too high on the store.
+_THOUSANDS_RE = re.compile(r"^[+-]?\d{1,3}(,\d{3})+(\.\d+)?$")
+_XLSX_MAGIC = b"PK\x03\x04"
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0"          # legacy .xls
+# Zip-bomb guard: the master sheet is a few hundred rows, never tens of MB of XML.
+_XLSX_MAX_PART = 50 * 1024 * 1024
+_DOCTYPE_RE = re.compile(rb"<!doctype", re.IGNORECASE)
+_SPACES_RE = re.compile(r"\s+")
+_APOSTROPHES = {0x2019: "'", 0x2018: "'", 0x02BC: "'", 0x00B4: "'", 0x0060: "'"}
+
+
+def _norm_header(value):
+    """"Name AR " -> "name_ar"; BOM and surrounding spaces dropped."""
+    return _SPACES_RE.sub("_", text(value).replace("﻿", "").strip().lower())
+
+
+def _rows_from_table(table):
+    """[(row_number, [cells])] with the header first -> list of row dicts.
+
+    Values stripped, missing cells "", unnamed or repeated header columns dropped (the
+    first wins), completely empty rows skipped. "_row" = the row number."""
+    if not table:
+        return []
+    header = table[0][1]
+    columns = []
+    seen = set()
+    for idx, name in enumerate(header):
+        key = _norm_header(name)
+        if key and key != "_row" and key not in seen:
+            seen.add(key)
+            columns.append((idx, key))
+    out = []
+    for number, cells in table[1:]:
+        row = {}
+        for idx, key in columns:
+            row[key] = text(cells[idx]) if idx < len(cells) else ""
+        if any(row.values()):
+            row["_row"] = number
+            out.append(row)
+    return out
+
+
+def read_csv_rows(data):
+    """CSV bytes -> list of row dicts (see _rows_from_table). UTF-8 with or without BOM,
+    else cp1256 (Arabic Windows / Excel "CSV" on an Arabic machine), else latin-1. The
+    delimiter is the one of , ; TAB that the header line uses most."""
+    if isinstance(data, str):
+        content = data
+    else:
+        data = data or b""
+        if data.startswith(b"\xef\xbb\xbf"):
+            data = data[3:]
+        for encoding in ("utf-8", "cp1256", "latin-1"):
+            try:
+                content = data.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+    content = content.lstrip("﻿")
+    first = content.split("\n", 1)[0]
+    delimiter = max((",", ";", "\t"), key=first.count)
+    reader = csv.reader(io.StringIO(content, newline=""), delimiter=delimiter)
+    try:
+        table = [(number, cells) for number, cells in enumerate(reader, start=1)]
+    except csv.Error as e:
+        # A cell over the csv module's field limit (131072 characters), usually an
+        # unclosed quote that swallowed the rest of the file.
+        raise ValueError("The CSV file cannot be read near line %s (%s): check for a "
+                         "quote that is never closed, or save the sheet as .xlsx."
+                         % (reader.line_num, e))
+    return _rows_from_table(table)
+
+
+def _xml_local(tag):
+    return tag.rsplit("}", 1)[-1]
+
+
+def _xml_children(node, name):
+    return [c for c in node if _xml_local(c.tag) == name]
+
+
+def _xml_text(node):
+    """Concatenated <t> text under `node` (rich-text runs), phonetic runs (<rPh>) left out."""
+    parts = []
+    for child in node:
+        local = _xml_local(child.tag)
+        if local == "t":
+            parts.append(child.text or "")
+        elif local == "r":
+            parts.extend(t.text or "" for t in child if _xml_local(t.tag) == "t")
+    return "".join(parts)
+
+
+def _xlsx_number(raw):
+    """Excel's stored number as the text a person sees: 12.0 -> "12", 12.300000000000001
+    -> "12.3" (15 significant digits, Excel's own precision)."""
+    try:
+        number = float(raw)
+    except (TypeError, ValueError):
+        return text(raw)
+    if not math.isfinite(number):
+        return text(raw)
+    if number.is_integer() and abs(number) < 1e15:
+        return str(int(number))
+    return "%.15g" % number
+
+
+def _col_index(ref):
+    """"AB12" -> 27 (0-based column), None when there is no column part."""
+    letters = re.match(r"[A-Za-z]+", ref or "")
+    if not letters:
+        return None
+    index = 0
+    for ch in letters.group(0).upper():
+        index = index * 26 + (ord(ch) - 64)
+    return index - 1
+
+
+def read_xlsx_rows(data):
+    """.xlsx bytes -> list of row dicts (see _rows_from_table), stdlib only.
+
+    Sheet "Products" (case-insensitive) else the first sheet; shared strings (rich text
+    included), inline strings, numbers (_xlsx_number), booleans ("TRUE"/"FALSE"),
+    formula results. The header is the first row of the sheet. ValueError with a
+    readable message when this is not an .xlsx."""
+    try:
+        book = zipfile.ZipFile(io.BytesIO(data or b""))
+    except (zipfile.BadZipFile, ValueError):
+        raise ValueError("The file is not an .xlsx workbook. Save it as .xlsx or .csv.")
+
+    def part(name, required=True):
+        try:
+            info = book.getinfo(name)
+        except KeyError:
+            if required:
+                raise ValueError("The .xlsx file is incomplete (%s missing)." % name)
+            return None
+        # The declared size is the archive's word: the capped read is what holds.
+        if info.file_size > _XLSX_MAX_PART:
+            raise ValueError("The .xlsx file is too large (%s)." % name)
+        try:
+            with book.open(info) as stream:
+                raw = stream.read(_XLSX_MAX_PART + 1)
+        except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError):
+            raise ValueError("The .xlsx file is damaged (%s)." % name)
+        except RuntimeError:
+            # zipfile's answer to an encrypted entry. After the clause above:
+            # NotImplementedError (unsupported compression) is a RuntimeError too.
+            raise ValueError("The .xlsx file is encrypted (%s): save it without a "
+                             "password." % name)
+        if len(raw) > _XLSX_MAX_PART:
+            raise ValueError("The .xlsx file is too large (%s)." % name)
+        # No DTD in a real workbook: refusing it closes the entity-expansion door. The
+        # whole part is scanned (padding could push it past any prefix); a literal
+        # "<!DOCTYPE" in cell text is stored escaped, so it never matches.
+        if _DOCTYPE_RE.search(raw):
+            raise ValueError("The .xlsx file is not a valid workbook.")
+        try:
+            return ElementTree.fromstring(raw)
+        except ElementTree.ParseError:
+            raise ValueError("The .xlsx file is damaged (%s)." % name)
+
+    workbook = part("xl/workbook.xml")
+    rels = part("xl/_rels/workbook.xml.rels", required=False)
+    targets, shared_path = {}, "xl/sharedStrings.xml"
+    for rel in (rels if rels is not None else []):
+        target = rel.get("Target") or ""
+        path = target.lstrip("/") if target.startswith("/") \
+            else posixpath.normpath(posixpath.join("xl", target))
+        targets[rel.get("Id")] = path
+        if (rel.get("Type") or "").endswith("/sharedStrings"):
+            shared_path = path
+    sheets = []
+    for sheets_node in _xml_children(workbook, "sheets"):
+        for sheet in _xml_children(sheets_node, "sheet"):
+            rid = next((v for k, v in sheet.attrib.items() if _xml_local(k) == "id"), None)
+            sheets.append((text(sheet.get("name")), targets.get(rid)))
+    if not sheets:
+        raise ValueError("The .xlsx file has no sheet.")
+    name, path = next((s for s in sheets if s[0].lower() == "products"), sheets[0])
+    if not path:
+        # No relationship part: Excel's default naming.
+        path = "xl/worksheets/sheet%d.xml" % (sheets.index((name, path)) + 1)
+
+    shared = []
+    sst = part(shared_path, required=False)
+    if sst is not None:
+        shared = [_xml_text(si) for si in _xml_children(sst, "si")]
+
+    sheet_xml = part(path)
+    table = []
+    last_row = 0
+    for data_node in _xml_children(sheet_xml, "sheetData"):
+        for row in _xml_children(data_node, "row"):
+            try:
+                number = int(row.get("r"))
+            except (TypeError, ValueError):
+                number = last_row + 1
+            last_row = number
+            cells, position = {}, 0
+            for cell in _xml_children(row, "c"):
+                index = _col_index(cell.get("r"))
+                index = position if index is None else index
+                position = index + 1
+                kind = cell.get("t") or "n"
+                value_node = next(iter(_xml_children(cell, "v")), None)
+                raw = value_node.text if value_node is not None else None
+                if kind == "s":
+                    try:
+                        value = shared[int(raw)]
+                    except (TypeError, ValueError, IndexError):
+                        value = ""
+                elif kind == "inlineStr":
+                    value = "".join(_xml_text(i) for i in _xml_children(cell, "is"))
+                elif kind == "b":
+                    value = "" if raw is None else ("TRUE" if text(raw) == "1" else "FALSE")
+                elif kind == "n":
+                    value = "" if raw is None or not text(raw) else _xlsx_number(raw)
+                else:       # str (formula result), e (error), d (ISO date): as stored
+                    value = raw or ""
+                cells[index] = text(value)
+            width = max(cells) + 1 if cells else 0
+            table.append((number, [cells.get(i, "") for i in range(width)]))
+    return _rows_from_table(table)
+
+
+def read_upload_rows(data, file_name):
+    """Master sheet bytes -> row dicts: .xlsx by its ZIP magic (whatever the name says),
+    else CSV. A legacy .xls / an .xlsx name on a non-ZIP file -> ValueError."""
+    data = data or b""
+    name = text(file_name).lower()
+    if not data.strip():
+        raise ValueError("The file is empty.")
+    if data[:4] == _XLSX_MAGIC:
+        return read_xlsx_rows(data)
+    if data[:4] == _OLE_MAGIC or name.endswith(".xls"):
+        # A password-protected .xlsx is an OLE container too.
+        raise ValueError("Old .xls files and password-protected workbooks are not "
+                         "supported: save it as an .xlsx without a password, or as .csv.")
+    if name.endswith((".xlsx", ".xlsm")):
+        raise ValueError("The file is not an .xlsx workbook. Save it as .xlsx or .csv.")
+    return read_csv_rows(data)
+
+
+def _sheet_number(value):
+    """A number typed in the sheet as float, None when unreadable. Arabic-Indic digits
+    and separators accepted; a comma only as a thousands separator (see _THOUSANDS_RE)."""
+    raw = ascii_digits(value).replace("٫", ".").replace("٬", ",").replace(" ", "")
+    if not raw:
+        return None
+    if "," in raw:
+        if not _THOUSANDS_RE.match(raw):
+            return None
+        raw = raw.replace(",", "")
+    try:
+        number = float(raw)
+    except ValueError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def text_to_html(value):
+    """Plain sheet text -> Salla description HTML. Escaped; blank line = new <p>; single
+    newline = <br>; consecutive lines starting with "- " or "• " = one <ul> of <li>.
+    No whitespace between blocks: "<p>a<br>b</p><ul><li>c</li></ul><p>d</p>".
+    A value starting with "<" is HTML already and comes back as is (stripped)."""
+    value = text(value)
+    if not value:
+        return ""
+    if value.startswith("<"):
+        return value
+    out = []
+    paragraph, bullets = [], []
+
+    def flush_paragraph():
+        if paragraph:
+            out.append("<p>%s</p>" % "<br>".join(paragraph))
+            del paragraph[:]
+
+    def flush_bullets():
+        if bullets:
+            out.append("<ul>%s</ul>" % "".join("<li>%s</li>" % b for b in bullets))
+            del bullets[:]
+
+    for line in value.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = line.strip()
+        if not line:
+            flush_paragraph()
+            flush_bullets()
+        elif line.startswith(("- ", "• ")):
+            flush_paragraph()
+            bullets.append(html.escape(line[2:].strip(), quote=False))
+        else:
+            flush_bullets()
+            paragraph.append(html.escape(line, quote=False))
+    flush_paragraph()
+    flush_bullets()
+    return "".join(out)
+
+
+def norm_label(value):
+    """Comparable label: Arabic-Indic digits -> ASCII, NBSP -> space, spaces collapsed,
+    trimmed, casefolded. "  ٥٠٠ مل" == "500 مل"; "Size" == "size"."""
+    raw = ascii_digits(value).replace(" ", " ").replace(" ", " ")
+    return " ".join(raw.split()).casefold()
+
+
+_CLAIM_TAG_RE = re.compile(r"<[^<>]*>")
+
+
+def _claim_text(value):
+    return " ".join(text(value).translate(_APOSTROPHES).split()).casefold()
+
+
+def _claim_texts(value):
+    """`value` as the shopper reads it: entities unescaped ("won&#39;t"), HTML tags
+    removed both as nothing ("baby-<b>safe</b>") and as a space ("won't<br>scratch"),
+    plus the raw text (a plain "pH < 7 > 5" is no tag)."""
+    raw = text(value)
+    if not raw:
+        return []
+    out = []
+    for variant in (raw, _CLAIM_TAG_RE.sub("", raw), _CLAIM_TAG_RE.sub(" ", raw)):
+        variant = _claim_text(html.unescape(variant))
+        if variant and variant not in out:
+            out.append(variant)
+    return out
+
+
+def flagged_claims(product, phrases):
+    """Blocked phrases found in any text of `product` (parse_upload_rows output): names,
+    subtitles, promotion titles, descriptions, SEO fields, option names and values, image
+    alt, AR and EN. Case-insensitive, curly apostrophes read as straight ones, HTML
+    read without its tags and entities (_claim_texts). A phrase
+    in Latin letters must start a word ("lick" flags "licked", not "click"); an Arabic
+    phrase matches anywhere (Arabic glues prefixes such as و / ال onto words).
+    Returns the phrases found, in the order given, each once."""
+    if not isinstance(product, dict):
+        return []
+    texts = []
+    for key in _UPLOAD_TEXTS:
+        side = product.get(key) or {}
+        if isinstance(side, dict):
+            texts += [side.get(lang) for lang in _UPLOAD_LANGS]
+    for option in product.get("options") or []:
+        if isinstance(option, dict):
+            texts += [option.get(lang) for lang in _UPLOAD_LANGS]
+    for variant in product.get("variants") or []:
+        for value in (variant or {}).get("values") or []:
+            if isinstance(value, dict):
+                texts += [value.get(lang) for lang in _UPLOAD_LANGS]
+    texts.append(product.get("image_alt"))
+    haystack = "\n".join(v for t in texts for v in _claim_texts(t))
+    found = []
+    for phrase in phrases or []:
+        needle = _claim_text(phrase)
+        if not needle or phrase in found:
+            continue
+        if needle[0].isascii() and needle[0].isalnum():
+            hit = re.search(r"(?<![^\W_])" + re.escape(needle), haystack)
+        else:
+            hit = needle in haystack
+        if hit:
+            found.append(phrase)
+    return found
+
+
+def _pair(row, base):
+    return {lang: text(row.get("%s_%s" % (base, lang))) for lang in _UPLOAD_LANGS}
+
+
+def parse_upload_rows(rows, max_options=2, max_images=UPLOAD_MAX_IMAGES):
+    """Row dicts (read_upload_rows) -> (products, errors, warnings). Rules: spec §3.
+
+    `products`: one dict per handle, in sheet order (shape in the spec §4); products
+    with problems are included and carry them in `errors` (they are also in the global
+    `errors`, which additionally holds row problems that belong to no product). Every
+    message starts with "Row N: " or "<handle>: "."""
+    errors, warnings = [], []
+    rows = [r for r in rows or [] if isinstance(r, dict)]
+    columns = []
+    for row in rows:
+        columns += [k for k in row if k != "_row" and k not in columns]
+    unknown = [c for c in columns if c not in UPLOAD_COLUMNS
+               and not _OPTION_COL_RE.match(c) and not _IMAGE_COL_RE.match(c)]
+    if unknown:
+        warnings.append("Row 1: unknown columns ignored: %s" % ", ".join(unknown))
+    option_slots = sorted({int(m.group(1)) for m in map(_OPTION_COL_RE.match, columns) if m})
+    image_slots = sorted({int(m.group(1)) for m in map(_IMAGE_COL_RE.match, columns) if m})
+    product_cols = (["%s_%s" % (t, l) for t in _UPLOAD_TEXTS for l in _UPLOAD_LANGS]
+                    + ["category_ids", "product_type", "image_alt", "salla_product_id"]
+                    + ["option%d_name_%s" % (k, l) for k in option_slots for l in _UPLOAD_LANGS]
+                    + ["image_%d" % k for k in image_slots])
+
+    products, by_handle, sku_rows = [], {}, {}
+    for row in rows:
+        number = row.get("_row")
+        handle, sku = text(row.get("handle")), text(row.get("sku"))
+        if not handle and not sku:
+            continue
+        if not handle:
+            errors.append("Row %s: handle is required (SKU %s)" % (number, sku))
+            continue
+        product = by_handle.get(handle)
+        if product is None:
+            product = by_handle[handle] = _new_upload_product(
+                row, handle, option_slots, image_slots, max_options, max_images)
+            products.append(product)
+        else:
+            for col in product_cols:
+                value = text(row.get(col))
+                if value and value != product["_first"].get(col, ""):
+                    product["errors"].append(
+                        "Row %s: %s differs from row %s, the first row of %s (leave it "
+                        "empty on later rows)" % (number, col, product["row"], handle))
+        variant = _upload_variant(row, product, option_slots, max_options)
+        if sku:
+            # Case-insensitive, like _check_parent_skus: Salla's SKU lookup may ignore
+            # case, so "abc-1" and "ABC-1" could resolve to the same Salla product.
+            if sku.upper() in sku_rows:
+                product["errors"].append("Row %s: duplicate SKU %s (also row %s)" % (
+                    number, sku, sku_rows[sku.upper()]))
+            else:
+                sku_rows[sku.upper()] = number
+        product["variants"].append(variant)
+
+    for product in products:
+        _check_upload_product(product, warnings)
+        del product["_first"], product["_slots"]
+        variants = product["variants"]
+        product["parent_sku"] = (variants[0]["sku"] if not product["options"] and variants
+                                 else product["handle"].upper())
+    _check_parent_skus(products)
+    for product in products:
+        errors += product["errors"]
+    return products, errors, warnings
+
+
+def _check_parent_skus(products):
+    """The parent SKU of a product with options is its handle in capitals: when it is
+    also a SKU of the file, the lookups of both products resolve to the same Salla
+    product. Case-insensitive (a Salla SKU search may be). Error on both products."""
+    owners = {}
+    for product in products:
+        for variant in product["variants"]:
+            if variant["sku"]:
+                owners.setdefault(variant["sku"].upper(), (product, variant["row"]))
+    for product in products:
+        if not product["options"]:
+            continue
+        owner = owners.get(product["parent_sku"].upper())
+        if not owner:
+            continue
+        other, row = owner
+        product["errors"].append(
+            "Row %s: the Salla parent SKU of %s is its handle in capitals (%s), which is "
+            "also the SKU of row %s: rename the handle or that SKU" % (
+                product["row"], product["handle"], product["parent_sku"], row))
+        if other is not product:
+            other["errors"].append(
+                "Row %s: SKU equals the parent SKU of handle %s (its handle in capitals): "
+                "rename the handle or this SKU" % (row, product["handle"]))
+
+
+def _new_upload_product(row, handle, option_slots, image_slots, max_options, max_images):
+    number = row.get("_row")
+    product = {"handle": handle, "row": number, "parent_sku": "", "errors": [],
+               "variants": [], "options": [], "images": [], "categories": [],
+               "_first": {k: text(v) for k, v in row.items() if k != "_row"}}
+    for key in _UPLOAD_TEXTS:
+        product[key] = _pair(row, key)
+    product["description"] = {lang: text_to_html(v)
+                              for lang, v in product["description"].items()}
+    product["image_alt"] = text(row.get("image_alt"))
+    product["salla_product_id"] = clean_id(row.get("salla_product_id"))
+    if product["salla_product_id"] and not product["salla_product_id"].isdigit():
+        product["errors"].append("Row %s: salla_product_id %r is not a number" % (
+            number, product["salla_product_id"]))
+    if not UPLOAD_HANDLE_RE.match(handle):
+        product["errors"].append(
+            "Row %s: handle %r must be 2-61 lowercase letters, digits or dashes, starting "
+            "with a letter or digit" % (number, handle))
+    ptype = text(row.get("product_type")).lower() or "product"
+    if ptype not in UPLOAD_PRODUCT_TYPES:
+        product["errors"].append("Row %s: product_type %r must be one of %s" % (
+            number, row.get("product_type"), ", ".join(UPLOAD_PRODUCT_TYPES)))
+    product["product_type"] = ptype
+    for part in re.split(r"[;,]", ascii_digits(row.get("category_ids"))):
+        part = part.strip()
+        if not part:
+            continue
+        if part.isdigit():
+            product["categories"].append(int(part))
+        else:
+            product["errors"].append("Row %s: category_ids must be Salla category ids "
+                                     "separated by ';' (got %r)" % (number, part))
+    # Option slots actually used by this product (name AR or EN set). A slot past
+    # max_options is an error, never silently dropped.
+    slots = []
+    for k in option_slots:
+        names = _pair(row, "option%d_name" % k)
+        if not any(names.values()):
+            continue
+        if k > max_options:
+            product["errors"].append("Row %s: more than %s options (option%d)" % (
+                number, max_options, k))
+            continue
+        if not names["ar"]:
+            product["errors"].append("Row %s: option%d_name_en without option%d_name_ar"
+                                     % (number, k, k))
+            continue
+        slots.append(k)
+        product["options"].append(names)
+    product["_slots"] = slots
+    images, seen_images = [], {}
+    for k in image_slots:
+        name = text(row.get("image_%d" % k))
+        if not name:
+            continue
+        # Same key as the ZIP lookup (lower-case basename): Apply would upload the file
+        # twice.
+        key = _basename(name)
+        if key in seen_images:
+            product["errors"].append("Row %s: image_%d repeats image_%d (%s)" % (
+                number, k, seen_images[key], name))
+        else:
+            seen_images[key] = k
+        images.append(name)
+    if len(images) > max_images:
+        product["errors"].append("Row %s: more than %s images (%s)" % (
+            number, max_images, len(images)))
+    product["images"] = images[:max_images]
+    return product
+
+
+def _upload_variant(row, product, option_slots, max_options):
+    number = row.get("_row")
+    problems = product["errors"]
+    sku = text(row.get("sku"))
+    if not sku:
+        problems.append("Row %s: sku is required" % number)
+    values = []
+    for k in option_slots:
+        value = _pair(row, "option%d_value" % k)
+        if k in product["_slots"]:
+            if not value["ar"]:
+                problems.append("Row %s: option%d_value_ar is required (option%d_name_ar "
+                                "is set)" % (number, k, k))
+            values.append(value)
+        elif any(value.values()) and k <= max_options:
+            problems.append("Row %s: option%d_value set but option%d_name_ar is empty "
+                            "(on the first row of %s)" % (number, k, k, product["handle"]))
+        elif any(value.values()):
+            problems.append("Row %s: more than %s options (option%d)" % (
+                number, max_options, k))
+    price = _sheet_number(row.get("price"))
+    if not text(row.get("price")):
+        problems.append("Row %s: price is required" % number)
+    elif price is None or price <= 0:
+        problems.append("Row %s: price %r must be a number above 0" % (number, row.get("price")))
+        price = None
+    sale_price = None
+    if text(row.get("sale_price")):
+        sale_price = _sheet_number(row.get("sale_price"))
+        if sale_price is None or sale_price <= 0:
+            problems.append("Row %s: sale_price %r must be a number above 0" % (
+                number, row.get("sale_price")))
+            sale_price = None
+        elif price is not None and sale_price >= price:
+            problems.append("Row %s: sale_price %s must be below price %s" % (
+                number, fmt_upload_number(sale_price), fmt_upload_number(price)))
+    stock = None
+    if text(row.get("stock")):
+        number_stock = _sheet_number(row.get("stock"))
+        if number_stock is None or number_stock < 0 or not number_stock.is_integer():
+            problems.append("Row %s: stock %r must be a whole number, 0 or more" % (
+                number, row.get("stock")))
+        else:
+            stock = int(number_stock)
+    weight = None
+    if text(row.get("weight")):
+        weight = _sheet_number(row.get("weight"))
+        if weight is None or weight <= 0:
+            problems.append("Row %s: weight %r must be a number above 0" % (
+                number, row.get("weight")))
+            weight = None
+    unit = text(row.get("weight_unit")).lower() or "kg"
+    if unit not in UPLOAD_WEIGHT_UNITS:
+        problems.append("Row %s: weight_unit %r must be kg or g" % (number, row.get("weight_unit")))
+        unit = "kg"
+    return {"row": number, "sku": sku, "price": price, "sale_price": sale_price,
+            "stock": stock, "weight": weight, "weight_unit": unit,
+            "barcode": text(row.get("barcode")), "values": values}
+
+
+def _check_upload_product(product, warnings):
+    """Product-wide rules, once every row of the handle is read."""
+    handle, number = product["handle"], product["row"]
+    problems = product["errors"]
+    if not product["name"]["ar"]:
+        problems.append("Row %s: name_ar is required" % number)
+    if not product["description"]["ar"]:
+        problems.append("Row %s: description_ar is required" % number)
+    if not product["name"]["en"] or not product["description"]["en"]:
+        warnings.append("%s: English name or description empty (Arabic only on Salla)"
+                        % handle)
+    variants = product["variants"]
+    if not product["options"]:
+        if variants and variants[0]["barcode"]:
+            # Salla keeps barcodes on variants; a product without options has none.
+            warnings.append("Row %s: barcode of a product without options is not uploaded"
+                            % variants[0]["row"])
+        if len(variants) > 1:
+            problems.append("%s: %s rows but no options: a product without options has "
+                            "exactly one row (set option1_name_ar for variants)" % (
+                                handle, len(variants)))
+        return
+    seen = {}
+    for variant in variants:
+        combo = tuple(norm_label(v["ar"]) for v in variant["values"])
+        if combo in seen:
+            problems.append("Row %s: same option values as row %s" % (
+                variant["row"], seen[combo]))
+        else:
+            seen[combo] = variant["row"]
+
+
+def fmt_upload_number(value):
+    """12.0 -> "12", 12.5 -> "12.5" (messages and payload strings)."""
+    if value is None:
+        return ""
+    if float(value).is_integer():
+        return str(int(value))
+    return ("%.6f" % value).rstrip("0").rstrip(".")
+
+
+def _put(body, key, value):
+    """Optional values are omitted, never sent as "" / None / []."""
+    if value is None or value == "" or value == []:
+        return
+    body[key] = value
+
+
+def _text_fields(product, lang):
+    get = lambda key: text((product.get(key) or {}).get(lang))  # noqa: E731
+    return {"name": get("name"), "description": get("description"),
+            "subtitle": get("subtitle"), "promotion_title": get("promotion_title"),
+            "metadata_title": get("seo_title"),
+            "metadata_description": get("seo_description")}
+
+
+def product_payload(product, create):
+    """Arabic body of POST /products (create=True) or PUT /products/{id} (False).
+
+    Create: name, price (lowest variant price), product_type, status "hidden", sku =
+    parent_sku, texts, categories, require_shipping; a product without options also
+    quantity / sale_price / weight + weight_type (barcode is a variant-only field);
+    with options also `options` (names and values only: a value price/quantity risks a
+    422). Update: texts and categories only, plus price / sale_price / quantity / weight
+    for a product without options (its only variant has no PUT of its own); never
+    status, options, images, sku or product_type."""
+    variants = product.get("variants") or []
+    simple = not product.get("options")
+    body = {}
+    texts = _text_fields(product, "ar")
+    if create:
+        prices = [v["price"] for v in variants if v.get("price") is not None]
+        _put(body, "name", texts["name"])
+        _put(body, "price", min(prices) if prices else None)
+        body["product_type"] = product.get("product_type") or "product"
+        body["status"] = "hidden"
+        _put(body, "sku", product.get("parent_sku"))
+    else:
+        _put(body, "name", texts["name"])
+    for key in ("description", "subtitle", "promotion_title", "metadata_title",
+                "metadata_description"):
+        _put(body, key, texts[key])
+    _put(body, "categories", list(product.get("categories") or []))
+    if create:
+        body["require_shipping"] = True
+    if simple and variants:
+        only = variants[0]
+        if not create:
+            _put(body, "price", only.get("price"))
+        _put(body, "quantity", only.get("stock"))
+        _put(body, "sale_price", only.get("sale_price"))
+        if only.get("weight") is not None:
+            body["weight"] = only["weight"]
+            body["weight_type"] = only.get("weight_unit") or "kg"
+    elif create:
+        body["options"] = []
+        for index, option in enumerate(product.get("options") or []):
+            names = []
+            for variant in variants:
+                values = variant.get("values") or []
+                name = text(values[index].get("ar")) if index < len(values) else ""
+                if name and norm_label(name) not in {norm_label(n) for n in names}:
+                    names.append(name)
+            body["options"].append({"name": text(option.get("ar")), "display_type": "text",
+                                    "values": [{"name": n} for n in names]})
+    return body
+
+
+def translation_payload(product, lang="en"):
+    """Body of the `lang` PUT /products/{id}: the texts of that side, non-empty only."""
+    body = {}
+    for key, value in _text_fields(product, lang).items():
+        _put(body, key, value)
+    return body
+
+
+def translation_skip_reason(product, lang="en"):
+    """Why the `lang` texts of `product` must not be sent, "" when they can (or when
+    there is nothing to send).
+
+    After the `lang` PUT the wizard reads the Arabic NAME back to catch Salla writing
+    the English over the Arabic. That check only works when the body carries a name
+    that differs from the Arabic one: with name_en empty (the description alone would
+    be overwritten unseen) or equal to name_ar (a Latin brand name in both columns), an
+    overwrite cannot be told apart from a kept Arabic name."""
+    if not translation_payload(product, lang):
+        return ""
+    names = product.get("name") or {}
+    other = text(names.get(lang))
+    if not other:
+        return "name_%s is empty" % lang
+    if norm_label(other) == norm_label(names.get("ar")):
+        return "name_%s is the same as name_ar" % lang
+    return ""
+
+
+def _detail_options(detail):
+    options = (detail or {}).get("options") if isinstance(detail, dict) else None
+    return [o for o in options or [] if isinstance(o, dict)]
+
+
+def _option_values(option):
+    return [v for v in option.get("values") or [] if isinstance(v, dict)]
+
+
+def _find_option(detail, name_ar):
+    key = norm_label(name_ar)
+    return next((o for o in _detail_options(detail) if norm_label(o.get("name")) == key), None)
+
+
+def option_translation_payloads(product, detail, lang="en"):
+    """[(kind, id, body)] to put the `lang` names on the Salla options / values of
+    `detail`, each matched by its Arabic name (norm_label). kind "option" ->
+    PUT /products/options/{id}, "value" -> PUT /products/options/values/{id}. Body is
+    always {"name": ...} only: an option body carrying `values` would replace them."""
+    out, done = [], set()
+    variants = product.get("variants") or []
+    for index, option in enumerate(product.get("options") or []):
+        salla = _find_option(detail, option.get("ar"))
+        if not salla:
+            continue
+        oid = clean_id(salla.get("id"))
+        if oid and text(option.get(lang)) and ("option", oid) not in done:
+            done.add(("option", oid))
+            out.append(("option", oid, {"name": text(option.get(lang))}))
+        by_name = {norm_label(v.get("name")): clean_id(v.get("id"))
+                   for v in _option_values(salla)}
+        for variant in variants:
+            values = variant.get("values") or []
+            if index >= len(values):
+                continue
+            vid = by_name.get(norm_label(values[index].get("ar")))
+            name = text(values[index].get(lang))
+            if vid and name and ("value", vid) not in done:
+                done.add(("value", vid))
+                out.append(("value", vid, {"name": name}))
+    return out
+
+
+def detail_skus(detail):
+    """Salla variants (skus[]) of a product detail."""
+    skus = (detail or {}).get("skus") if isinstance(detail, dict) else None
+    return [s for s in skus or [] if isinstance(s, dict)]
+
+
+def match_variants(product, detail):
+    """Sheet variants <-> Salla variants -> (pairs, missing_rows, extra_variant_ids).
+
+    pairs = [(sheet_variant, salla_variant)]; a sheet variant matches the Salla variant
+    whose related_option_values equal (as a set) the ids of its Arabic values, each found
+    by norm_label in the Salla option of the same Arabic name. missing_rows = sheet rows
+    with no Salla variant (a value or option the store lacks); extra_variant_ids = Salla
+    variants no sheet row matched. A product without options -> ([], [], [])."""
+    options = product.get("options") or []
+    if not options:
+        return [], [], []
+    value_ids = []
+    for option in options:
+        salla = _find_option(detail, option.get("ar"))
+        value_ids.append({norm_label(v.get("name")): clean_id(v.get("id"))
+                          for v in _option_values(salla)} if salla else {})
+    by_combo = {}
+    for sku in detail_skus(detail):
+        combo = frozenset(clean_id(v) for v in sku.get("related_option_values") or []
+                          if clean_id(v))
+        if combo:
+            by_combo.setdefault(combo, sku)
+    pairs, missing, used = [], [], set()
+    for variant in product.get("variants") or []:
+        ids = []
+        for index, value in enumerate(variant.get("values") or []):
+            if index < len(value_ids):
+                ids.append(value_ids[index].get(norm_label(value.get("ar")), ""))
+        salla = by_combo.get(frozenset(ids)) if ids and all(ids) else None
+        if salla is None:
+            missing.append(variant.get("row"))
+            continue
+        pairs.append((variant, salla))
+        used.add(clean_id(salla.get("id")))
+    extra = [clean_id(s.get("id")) for s in detail_skus(detail)
+             if clean_id(s.get("id")) and clean_id(s.get("id")) not in used]
+    return pairs, missing, extra
+
+
+def _has_options(detail):
+    """True when a Salla product detail has options: an option list, or a variant tied
+    to option values."""
+    return bool(_detail_options(detail)) or any(
+        any(clean_id(v) for v in s.get("related_option_values") or [])
+        for s in detail_skus(detail))
+
+
+def structure_problem(product, detail):
+    """Why the existing Salla product `detail` cannot take this sheet product's writes,
+    "" when it can.
+
+    A SKU lookup can land on an old listing with another shape (a simple product whose
+    sku is now one size of a product with options, or the reverse): writing this
+    handle's copy, prices or images there would damage it. Sheet product with options:
+    the Salla product needs options, variants (skus) and a variant for every sheet row.
+    Simple sheet product: the Salla product must have no options."""
+    if not product.get("options"):
+        if _has_options(detail):
+            return "the Salla product has options/variants and this handle has none"
+        return ""
+    if not _detail_options(detail) or not detail_skus(detail):
+        return "the Salla product has no options/variants and this handle has %s option(s)" \
+            % len(product["options"])
+    missing = match_variants(product, detail)[1]
+    if missing:
+        return ("rows %s have no matching Salla variant: add the option value in Salla by "
+                "hand, the uploader never edits options") % ", ".join(map(str, missing))
+    return ""
+
+
+def sku_answer_product_id(data):
+    """Salla product id of a GET /products/sku/{sku} answer (`data`), "" if none.
+
+    For a variant SKU the answer may be the variant itself (unverified, spike finding
+    3): its parent id (`product_id` / `product.id`) wins. A variant without a readable
+    parent id gives "", not its own id: taken as a product id, every re-run of a
+    product with options would see two Salla ids. The keyword search finds the parent
+    instead."""
+    if not isinstance(data, dict):
+        return ""
+    parent = data.get("product")
+    for value in (data.get("product_id"),
+                  parent.get("id") if isinstance(parent, dict) else None):
+        if clean_id(value):
+            return clean_id(value)
+    if any(clean_id(v) for v in data.get("related_option_values") or []):
+        return ""
+    return detail_id(data)
+
+
+def keyword_match_ids(items, sku, complete, skus_of=None):
+    """Salla ids of the GET /products?keyword=<sku> items whose SKUs (own or variants')
+    really contain `sku`: the search is fuzzy. `items` = every page read, `complete` =
+    the listing reached its last page (salla.backend._list_pages), `skus_of(item)` =
+    SKU reader (default product_skus).
+
+    No match on an incomplete listing -> ValueError: the product may sit on a page that
+    was not read, and the caller would create a second copy of it in Salla."""
+    skus_of = skus_of or product_skus
+    sku = text(sku)
+    ids = []
+    for item in items or []:
+        if isinstance(item, dict) and sku and sku in skus_of(item):
+            pid = detail_id(item)
+            if pid and pid not in ids:
+                ids.append(pid)
+    if not ids and not complete:
+        raise ValueError("lookup inconclusive for SKU %s: the Salla search returned more "
+                         "results than were read; set salla_product_id in the sheet" % sku)
+    return ids
+
+
+def unlisted_combinations(product):
+    """How many option-value combinations Salla creates for this handle that have no
+    row in the sheet. Salla builds the full cross product of the option values on
+    create (Size x Scent); a missing combination becomes a variant with the product's
+    lowest price and default stock, sellable once the product is published. 0 for a
+    simple product or a full grid."""
+    options = product.get("options") or []
+    variants = product.get("variants") or []
+    if not options or not variants:
+        return 0
+    per_option = [set() for _o in options]
+    combos = set()
+    for variant in variants:
+        values = variant.get("values") or []
+        labels = tuple(norm_label((values[i] or {}).get("ar")) if i < len(values) else ""
+                       for i in range(len(options)))
+        for i, label in enumerate(labels):
+            if label:
+                per_option[i].add(label)
+        combos.add(labels)
+    total = 1
+    for labels in per_option:
+        total *= max(len(labels), 1)
+    return max(total - len(combos), 0)
+
+
+def simple_changes(product, detail):
+    """Product-level values Apply would change on an existing Salla product without
+    options -> [(label, sheet value, Salla value)]: price, sale_price, stock (Salla
+    `quantity`), weight (+ unit). Same rules as the update body: an unset sheet value
+    is not sent, so it is not a change. Products with options -> [] (their values live
+    on the variants)."""
+    variants = product.get("variants") or []
+    if product.get("options") or not variants or not isinstance(detail, dict):
+        return []
+    only = variants[0]
+    out = []
+    for label, sheet_key, salla_key in (("price", "price", "price"),
+                                        ("sale_price", "sale_price", "sale_price"),
+                                        ("stock", "stock", "quantity")):
+        value = only.get(sheet_key)
+        if value is None or value == "":
+            continue
+        current = detail.get(salla_key)
+        if not _same_number(value, current):
+            out.append((label, value, _shown(current)))
+    weight, unit = only.get("weight"), text(only.get("weight_unit") or "kg").lower()
+    if weight is not None and not same_weight(weight, unit, detail.get("weight"),
+                                              detail.get("weight_type")):
+        salla_unit = text(detail.get("weight_type"))
+        current = _shown(detail.get("weight"))
+        out.append(("weight", "%s %s" % (fmt_upload_number(weight), unit),
+                    "%s %s" % (current, salla_unit) if current != "" and salla_unit
+                    else current))
+    return out
+
+
+def _shown(value):
+    """A Salla number as a message shows it: 12.0 -> 12, unreadable -> ""."""
+    shown = money(value)
+    if shown is not None and shown.is_integer():
+        shown = int(shown)
+    return "" if shown is None else shown
+
+
+def _same_number(a, b):
+    a, b = money(a), money(b)
+    if a is None or b is None:
+        return a is None and b is None
+    return abs(a - b) < 0.005
+
+
+WEIGHT_TO_KG = {"kg": 1.0, "g": 0.001}
+
+
+def weight_kg(value, unit):
+    """`value` in `unit` (kg / g, any case) as kg; None when the value is unreadable or
+    the unit is another one."""
+    number = money(value)
+    factor = WEIGHT_TO_KG.get(text(unit).lower() or "kg")
+    if number is None or factor is None:
+        return None
+    return number * factor
+
+
+def same_weight(sheet_value, sheet_unit, salla_value, salla_unit):
+    """True when the sheet weight is already Salla's. Salla may keep or echo the weight
+    in another unit than the sheet (600 g read back as 0.6 kg, unverified): when it
+    returns a unit (`salla_unit` non-empty), both sides are compared in kg, to half a
+    gram; a unit other than kg / g is never the same. Without a unit the numbers are
+    compared as they are."""
+    if not text(salla_unit):
+        return _same_number(sheet_value, salla_value)
+    a, b = weight_kg(sheet_value, sheet_unit), weight_kg(salla_value, salla_unit)
+    if a is None or b is None:
+        return False
+    return abs(a - b) < 0.0005
+
+
+def variant_payload(variant, current=None):
+    """Body of PUT /products/variants/{id}: sku, price, sale_price, stock_quantity,
+    weight (+ weight_type, the unit of the sheet), barcode. Never cost_price. Unset
+    sheet values are not sent (a blank stock never zeroes Salla's). With `current` (the
+    Salla variant) only what differs; {} = nothing to do."""
+    full = {}
+    _put(full, "sku", text(variant.get("sku")))
+    _put(full, "price", variant.get("price"))
+    _put(full, "sale_price", variant.get("sale_price"))
+    _put(full, "stock_quantity", variant.get("stock"))
+    if variant.get("weight") is not None:
+        full["weight"] = variant["weight"]
+        full["weight_type"] = variant.get("weight_unit") or "kg"
+    _put(full, "barcode", text(variant.get("barcode")))
+    if current is None:
+        return full
+    if not isinstance(current, dict):
+        current = {}
+    body = {}
+    for key, value in full.items():
+        if key in ("price", "sale_price", "stock_quantity"):
+            same = _same_number(value, current.get(key))
+        elif key == "weight":
+            same = same_weight(value, full["weight_type"], current.get("weight"),
+                               current.get("weight_type"))
+        elif key == "weight_type":
+            # Part of the weight comparison: 600 g and 0.6 kg are the same weight, and
+            # resending it on every run would never end.
+            same = True
+        else:
+            same = text(value) == text(current.get(key))
+        if not same:
+            body[key] = value
+    if "weight" in body or "weight_type" in body:
+        # The weight means nothing without its unit: always sent together.
+        body["weight"], body["weight_type"] = full["weight"], full["weight_type"]
+    return body
+
+
+def detail_images(detail):
+    """Images (dicts) of a Salla product detail."""
+    images = (detail or {}).get("images") if isinstance(detail, dict) else None
+    return [i for i in images or [] if isinstance(i, dict)]
+
+
+def detail_status(detail):
+    """Status slug of a Salla product ("hidden", "sale", "out"), "" if unreadable."""
+    status = (detail or {}).get("status") if isinstance(detail, dict) else None
+    if isinstance(status, dict):
+        status = status.get("slug") or status.get("name")
+    return _canon_status(status)
+
+
+def detail_id(detail):
+    """Id of a Salla product detail, "" if absent."""
+    return clean_id(detail.get("id")) if isinstance(detail, dict) else ""
+
+
+def detail_name(detail, lang="ar"):
+    """Name of a Salla product: a string, or {ar, en} on a multilingual answer."""
+    name = (detail or {}).get("name") if isinstance(detail, dict) else None
+    if isinstance(name, dict):
+        name = name.get(lang)
+    return text(name)
+
+
+def _basename(name):
+    return text(name).replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
+def images_to_attach(images, existing_count, available):
+    """Images still to upload -> (todo, stop_reason).
+
+    Salla already holds `existing_count` images, taken to be the first ones of the
+    sheet. todo = [(sort, name)] for sheet images existing_count+1 ... n (n <= 10), in
+    order, stopping at the first one not in `available` (ZIP names, compared by
+    lower-case basename): later images would land at the wrong position. stop_reason =
+    "<name> not in the ZIP", else None."""
+    images = [text(i) for i in images or [] if text(i)][:UPLOAD_MAX_IMAGES]
+    existing = max(0, int(existing_count or 0))
+    if existing >= len(images):
+        return [], None
+    have = {_basename(a) for a in available or []}
+    todo = []
+    for sort in range(existing + 1, len(images) + 1):
+        name = images[sort - 1]
+        if _basename(name) not in have:
+            return todo, "%s not in the ZIP" % name
+        todo.append((sort, name))
+    return todo, None
+
+
+def translation_kept(before_ar, after_ar):
+    """True when the Arabic name read back after an English write is still the one
+    written (norm_label): False = the EN write overwrote the Arabic text."""
+    if isinstance(after_ar, dict):
+        after_ar = after_ar.get("ar")
+    if isinstance(before_ar, dict):
+        before_ar = before_ar.get("ar")
+    return norm_label(before_ar) == norm_label(after_ar)

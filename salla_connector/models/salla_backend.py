@@ -42,7 +42,9 @@ WRITE_ATTEMPTS = 2
 SECRET_GROUP = "base.group_system"
 # Readable by the sales team, writable only by system: changing them rebinds the
 # backend to another store / app, or (expiry) forces/suppresses token refreshes.
-SYSTEM_WRITE_FIELDS = ("store_id", "client_id", "token_expires_at")
+# import_orders (F8): switching it on for a store whose orders another connector still
+# imports (Tecfy) would create every order twice.
+SYSTEM_WRITE_FIELDS = ("store_id", "client_id", "token_expires_at", "import_orders")
 # Columns the dedicated token cursor may write. Column names are interpolated into the
 # UPDATE from THIS tuple only, never from caller input.
 TOKEN_COLUMNS = ("access_token", "refresh_token", "token_expires_at", "token_scope", "store_id")
@@ -148,6 +150,13 @@ class SallaBackend(models.Model):
     )
 
     # --- F2a: orders ---
+    import_orders = fields.Boolean(
+        string="Import Orders", default=True,
+        help="Off = catalog-only backend: order webhooks are ignored and the order crons "
+             "skip it. Use it to connect a store whose orders another connector still "
+             "imports. Switching it off does not clear orders already queued: they wait "
+             "and are imported if it is turned on again, as are orders since Orders "
+             "Synced Until (set that to the cut-over moment first).")
     website_id = fields.Many2one(
         "website", string="Website",
         domain="[('company_id', '=', company_id)]",
@@ -328,7 +337,10 @@ class SallaBackend(models.Model):
     @api.model_create_multi
     def create(self, vals_list):
         for vals in vals_list:
-            self._check_system_write(vals)
+            # Duplicate puts import_orders (copy=True) in the vals: on, the default, is no
+            # privileged choice. Copying a catalog-only backend (off) stays admin-only.
+            self._check_system_write({k: v for k, v in vals.items()
+                                      if not (k == "import_orders" and v)})
         return super().create(vals_list)
 
     def write(self, vals):
@@ -574,7 +586,8 @@ class SallaBackend(models.Model):
         return self._notify(_("Token valid until %s UTC.") % tokens["token_expires_at"])
 
     # ------------------------------------------------------------------ HTTP
-    def _request(self, method, path, params=None, payload=None, idempotent=True):
+    def _request(self, method, path, params=None, payload=None, idempotent=True,
+                 lang=None, files=None, data=None):
         """Bearer request. Retries 429 (Retry-After / X-RateLimit-Reset) and 5xx/network
         with backoff; refreshes the token proactively near expiry and once on a 401.
         See the transaction rules above _set_token_cache before calling it.
@@ -583,7 +596,12 @@ class SallaBackend(models.Model):
         what Salla certainly did not process is retried (401 refresh, 429, connect
         timeout). A read timeout, any other network error or a 5xx raises at once
         (SallaApiError, http_status None = transient): Salla may have created it, and
-        the caller must check before sending it again."""
+        the caller must check before sending it again.
+
+        lang ("ar"/"en", F8): sent as Accept-Language AND Content-Language, since which
+        one Salla reads on a write is unverified. files/data (F8 image attach): multipart
+        instead of JSON; `files` values must be bytes (not open files) so a retry can
+        resend them, and no Content-Type is set so requests adds the boundary."""
         self.ensure_one()
         backend = self.sudo()  # tokens/URLs are system-only fields; never exposed here
         if not mapping.is_allowed_salla_url(backend.base_url):
@@ -602,19 +620,24 @@ class SallaBackend(models.Model):
                 _logger.warning("Salla backend %s: proactive refresh failed: %s", self.name, e)
 
         url = backend.base_url.rstrip("/") + path
+        multipart = files is not None or data is not None
+        body = {"files": files, "data": data} if multipart else {"json": payload}
         refreshed, attempt, last_err = False, 0, None
         while attempt < MAX_RETRIES:
             headers = {
                 "Authorization": "Bearer %s" % token,
                 "Accept": "application/json",
-                "Content-Type": "application/json",
             }
+            if not multipart:
+                headers["Content-Type"] = "application/json"
+            if lang:
+                headers["Accept-Language"] = headers["Content-Language"] = lang
             try:
                 # No redirects: the Bearer token must not follow a Location header off
                 # the allowlisted host. The 3xx is turned into an error right below.
                 resp = requests.request(method, url, headers=headers, params=params,
-                                        json=payload, timeout=REQUEST_TIMEOUT,
-                                        allow_redirects=False)
+                                        timeout=REQUEST_TIMEOUT, allow_redirects=False,
+                                        **body)
             except requests.RequestException as e:
                 last_err = type(e).__name__
                 if not idempotent and not isinstance(e, requests.ConnectTimeout):
@@ -675,7 +698,9 @@ class SallaBackend(models.Model):
 
     def _process_webhook(self, payload):
         """Handle one verified webhook. Returns a short status for the HTTP answer.
-        F1 only handles the app lifecycle; order events are logged and ignored (F2)."""
+        App lifecycle (authorize / revoke) is handled here; order events are queued for
+        the import cron (no API call here), or ignored on a catalog-only backend
+        (Import Orders off); any other event is ignored."""
         self.ensure_one()
         event = mapping.event_name(payload)
         if event == mapping.AUTHORIZE_EVENT:
@@ -711,6 +736,11 @@ class SallaBackend(models.Model):
                             "be reinstalled on store %s.", self.name, event, self.store_id)
             return "revoked"
         if event in mapping.ORDER_EVENTS:
+            if not self.import_orders:
+                # Catalog-only backend: another connector imports this store's orders.
+                _logger.info("Salla backend %s: %s ignored (Import Orders off).",
+                             self.name, event)
+                return "ignored:catalog_only"
             order_id = mapping.webhook_order_id(payload)
             if not order_id:
                 _logger.warning("Salla backend %s: %s without a readable order id; payload "
@@ -847,6 +877,14 @@ class SallaBackend(models.Model):
             if missing else _("All %s Salla SKUs match an active Odoo product.") % total)
         return self._notify(msg, warning=bool(missing), title=_("Salla Product Check"))
 
+    def action_open_product_upload(self):
+        """F8: the product upload wizard, bound to this backend."""
+        self.ensure_one()
+        action = self.env["ir.actions.actions"]._for_xml_id(
+            "salla_connector.salla_product_upload_action")
+        action["context"] = {"default_backend_id": self.id}
+        return action
+
     # ------------------------------------------------------------------ orders (F2a)
     # Transaction rules (see above _set_token_cache): nothing here writes the
     # salla_backend row through the ORM. The reconcile cursor is written by
@@ -954,6 +992,10 @@ class SallaBackend(models.Model):
         `summary` = the order as the list endpoint returned it: enough to refresh a known
         order without one more API call. Creation always reads the full order."""
         self.ensure_one()
+        if not self.import_orders:
+            # Backstop behind the webhook/cron/button guards: on a catalog-only backend
+            # another connector creates these orders, importing one would duplicate it.
+            return "error", None, "catalog-only backend (Import Orders off): not imported"
         SaleOrder = self.env["sale.order"].with_company(self.company_id)
         existing = SaleOrder._salla_find(order_id)
         if summary is not None:
@@ -1054,7 +1096,7 @@ class SallaBackend(models.Model):
     # --- queue (webhook path) ---
     @api.model
     def cron_process_order_queue(self):
-        for backend in self.search([("active", "=", True)]):
+        for backend in self.search([("active", "=", True), ("import_orders", "=", True)]):
             try:
                 with self.env.cr.savepoint():
                     backend._process_order_queue()
@@ -1070,6 +1112,8 @@ class SallaBackend(models.Model):
         Only the row ids read here are deleted or updated; rows inserted meanwhile (a
         status webhook during processing) stay due and are processed next run."""
         self.ensure_one()
+        if not self.import_orders:
+            return {}
         Queue = self.env["salla.order.queue"]
         now = fields.Datetime.now()
         rows = Queue.search([
@@ -1163,6 +1207,10 @@ class SallaBackend(models.Model):
         # The view hides the buttons, but any object method is callable over RPC.
         if not self.env.user.has_group("sales_team.group_sale_manager"):
             raise AccessError(_("Only a sales manager can run the Salla order import."))
+        if not self.import_orders:
+            raise UserError(_(
+                "Salla backend %s is a catalog-only backend (Import Orders off): its "
+                "orders are imported by another connector.") % self.name)
 
     def action_process_order_queue(self):
         self.ensure_one()
@@ -1185,7 +1233,7 @@ class SallaBackend(models.Model):
     # --- reconcile (cron path: catches every webhook Salla gave up on) ---
     @api.model
     def cron_reconcile_orders(self):
-        for backend in self.search([("active", "=", True)]):
+        for backend in self.search([("active", "=", True), ("import_orders", "=", True)]):
             try:
                 with self.env.cr.savepoint():
                     backend._reconcile_orders()
@@ -1202,6 +1250,10 @@ class SallaBackend(models.Model):
         after this transaction commits, so a rollback never skips orders."""
         self.ensure_one()
         now = fields.Datetime.now()
+        if not self.import_orders:
+            # Catalog-only: nothing listed, cursor untouched.
+            return {"counters": {}, "listed": 0, "cursor": None, "window": "",
+                    "missing_skus": []}
         start = self.last_order_sync or now - timedelta(days=DEFAULT_LOOKBACK_DAYS)
         params = {mapping.ORDER_LIST_FROM_PARAM: mapping.to_salla_date(start - WINDOW_OVERLAP),
                   # +1 day: if Salla's to_date is exclusive, today's orders would never
