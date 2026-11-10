@@ -29,6 +29,9 @@ IMAGE_MAX_BYTES = 300 * 1024
 IMAGE_SIDE = 1200
 # Zip-bomb guard per entry; a product photo is never anywhere near this.
 ZIP_ENTRY_MAX_BYTES = 20 * 1024 * 1024
+# Bytes read per image for its size: PNG and WebP keep it in the first 30 bytes, a JPEG
+# after its EXIF / ICC segments (read whole, up to ZIP_ENTRY_MAX_BYTES, when not here).
+IMAGE_HEADER_BYTES = 64 * 1024
 # Keyword-search pages read per SKU (60 items each). Past this the lookup is
 # inconclusive and the product is not created.
 KEYWORD_MAX_PAGES = 5
@@ -59,7 +62,9 @@ TEMPLATE_HELP = (
     ("category_ids", "product", "no", "Salla category ids separated by ';' (numbers)."),
     ("product_type", "product", "no", "product (default) or group_products."),
     ("option1_name_ar/en, option2_name_ar/en", "product", "AR yes if values are used",
-     "Option names, e.g. Size, Scent. At most 2 options."),
+     "Option names, e.g. Size, Scent. At most 2 options. The _en option names and "
+     "values are NOT sent (Salla may write them over the Arabic): enter them by hand "
+     "in Salla."),
     ("option1_value_ar/en, option2_value_ar/en", "variant", "AR yes when the option name "
      "is set", "One row per combination. Salla creates EVERY combination of the option "
      "values (e.g. 2 sizes x 3 scents = 6 variants); a combination without a row gets the "
@@ -100,6 +105,29 @@ def _basename(name):
 
 def _error_text(exc):
     return exc.args[0] if isinstance(exc, UserError) and exc.args else str(exc)
+
+
+def _pillow_webp():
+    """True when this server's Pillow can open and write WebP. features.check("webp")
+    is not enough: it only tests the C library, while Odoo's image tools stop Pillow
+    from loading its format plugins (Image.preinit(); Image._initialized = 2), so WebP
+    is not registered in a worker until its plugin is imported (spike 2026-11-10 on
+    odoo.sh: img.save(buf, "WEBP") -> KeyError 'WEBP')."""
+    try:
+        Image = _webp_image()
+        # SAVE, not only OPEN: Pillow registers the opener even without libwebp.
+        return "WEBP" in Image.OPEN and "WEBP" in Image.SAVE
+    except Exception:
+        return False
+
+
+def _webp_image():
+    """PIL.Image with the WebP plugin registered. The import registers WebP for the
+    rest of the worker's life, not only for this wizard: other image code running in
+    that worker can then decode a WebP too, beyond Odoo's minimal preloaded set.
+    Accepted: a format Pillow ships, and only reached by the upload's WebP paths."""
+    from PIL import Image, WebPImagePlugin  # noqa: F401  (registers WEBP)
+    return Image
 
 
 def _read_entry(archive, info):
@@ -151,7 +179,8 @@ class SallaProductUpload(models.TransientModel):
              "flagged in Dry Run. Claims on hold must not reach the store.")
     convert_webp = fields.Boolean(
         string="Convert WebP to JPEG",
-        help="Re-encode WebP images as JPEG (quality 90) before uploading them.")
+        help="Re-encode WebP images as JPEG (quality 90) before uploading them. Needs "
+             "Pillow with WebP support; the run refuses to start without it.")
     result_html = fields.Html(string="Result", readonly=True)
     result_file = fields.Binary(string="Result Sheet", readonly=True)
     result_file_name = fields.Char()
@@ -176,6 +205,12 @@ class SallaProductUpload(models.TransientModel):
             raise UserError(_("Pick the Salla backend (store) to run against first."))
         if not self.file:
             raise UserError(_("Upload the master sheet (.xlsx or .csv) first."))
+        if self.convert_webp and not _pillow_webp():
+            # Refused before any read, dry-run included: Apply would fail on the first
+            # WebP of each product and stop its images there.
+            raise UserError(_("This server cannot convert WebP (Pillow without WebP): "
+                              "convert the images to JPEG before zipping, or leave the "
+                              "toggle off."))
         try:
             rows = mapping.read_upload_rows(base64.b64decode(self.file), self.file_name or "")
         except ValueError as e:
@@ -322,11 +357,9 @@ class SallaProductUpload(models.TransientModel):
         if not archive:
             warnings.append("No images ZIP: images are not uploaded")
             return
-        try:
-            from PIL import Image
-        except ImportError:
-            Image = None
-            warnings.append("Pillow is not installed: image sizes not checked")
+        # Per ZIP entry: an image named by several products is read once (a JPEG without
+        # its size in the first 64 KB is decompressed whole).
+        sizes = {}
         for product in products:
             messages = per_product[product["handle"]]
             for name in product["images"]:
@@ -338,22 +371,52 @@ class SallaProductUpload(models.TransientModel):
                     messages.append("%s: %s is %s KB (over %s KB)" % (
                         product["handle"], name, info.file_size // 1024,
                         IMAGE_MAX_BYTES // 1024))
-                if Image is None:
-                    continue
-                try:
-                    # Straight from the ZIP stream: Pillow reads only the header for
-                    # .size, so a big photo is not decompressed twice per run.
-                    with archive.open(info) as stream, Image.open(stream) as img:
-                        width, height = img.size
-                except Exception:
+                if info.filename not in sizes:
+                    try:
+                        sizes[info.filename] = (True, self._image_size(archive, info))
+                    except Exception:
+                        sizes[info.filename] = (False, None)
+                readable, size = sizes[info.filename]
+                if not readable:
                     messages.append("%s: %s is not a readable image" % (product["handle"], name))
                     continue
+                if not size:
+                    messages.append("%s: %s size not checked (format not readable on this "
+                                    "server)" % (product["handle"], name))
+                    continue
+                width, height = size
                 if width != height:
                     messages.append("%s: %s is not square (%sx%s)" % (
                         product["handle"], name, width, height))
                 elif width != IMAGE_SIDE:
                     messages.append("%s: %s is %s px, not %s px" % (
                         product["handle"], name, width, IMAGE_SIDE))
+
+    @staticmethod
+    def _image_size(archive, info):
+        """(width, height) of a ZIP entry, None when unknown. The header parser goes
+        first: Pillow may not open a WebP at all (no libwebp on the server; see
+        _pillow_webp, which also registers the plugin when it can). Pillow only reads
+        what the parser does not know (GIF...); an exception means the file is not an
+        image."""
+        with archive.open(info) as stream:
+            head = stream.read(IMAGE_HEADER_BYTES)
+        size = mapping.image_size(head)
+        if not size and head[:2] == b"\xff\xd8" and len(head) == IMAGE_HEADER_BYTES:
+            # A JPEG whose SOF sits after big EXIF / ICC segments.
+            size = mapping.image_size(_read_entry(archive, info))
+        if size:
+            return size
+        if head[:4] == b"RIFF" and head[8:12] == b"WEBP" and not _pillow_webp():
+            # A WebP the parser cannot size: not proof it is broken.
+            return None
+        try:
+            from PIL import Image
+        except ImportError:
+            return None
+        # Straight from the ZIP stream: Pillow reads only the header for .size.
+        with archive.open(info) as stream, Image.open(stream) as img:
+            return img.size
 
     def _check_claims(self, products, per_product):
         phrases = [p.strip() for p in (self.blocked_phrases or "").splitlines() if p.strip()]
@@ -371,12 +434,16 @@ class SallaProductUpload(models.TransientModel):
     # ------------------------------------------------------------------ run
     def _run_products(self, products, per_product, archive, entries, started):
         """-> ({handle: result}, [handles left by the time budget])."""
-        # verified_kinds: "option" / "value" names already read back in Arabic after an
-        # EN write whose name differs from the Arabic; each kind is checked once (Salla
-        # may honour the language headers on one endpoint and not on the other).
-        # item_skus: {Salla id: SKUs} of the keyword-search items, read once per run.
-        state = {"en_supported": True, "verified_kinds": set(), "claimed": {},
-                 "archive": archive, "entries": entries, "item_skus": {}}
+        # en_supported: False once Salla lost or misplaced an EN write: no more EN
+        # writes in this run. item_skus: {Salla id: SKUs} of the keyword-search items,
+        # read once per run. hide_refs: "must stay hidden" markers (salla.product.hide)
+        # left by earlier runs, plus the ones this run commits. hide_dates: when each
+        # earlier one was last marked (a stale one is only reported). hide_marked: the
+        # ones this run committed (re-marking an old one restarts its date).
+        marked = self.env["salla.product.hide"]._marked(self.backend_id)
+        state = {"en_supported": True, "claimed": {},
+                 "archive": archive, "entries": entries, "item_skus": {},
+                 "hide_refs": set(marked), "hide_dates": marked, "hide_marked": set()}
         budget = self._time_budget()
         results = {}
         for index, product in enumerate(products):
@@ -400,9 +467,12 @@ class SallaProductUpload(models.TransientModel):
         return max(TIME_BUDGET_MIN, min(TIME_BUDGET, limit / 2))
 
     def _new_result(self, product, action, status, messages=None):
+        # wrote: a write call to the product was STARTED (its outcome may be unknown).
+        # leftover: a marker from an earlier run that did not finish on it.
         res = {"handle": product["handle"], "salla_id": product["salla_product_id"],
                "action": action, "status": status, "messages": list(messages or []),
-               "variant_ids": {}, "variants_set": 0, "images": 0}
+               "variant_ids": {}, "variants_set": 0, "images": 0, "wrote": False,
+               "leftover": False}
         if res["messages"] and status == "ok":
             res["status"] = "warning"
         return res
@@ -501,8 +571,8 @@ class SallaProductUpload(models.TransientModel):
         """The Salla product of a sheet product (detail dict), None = not in Salla.
         Order: salla_product_id, parent SKU, each variant SKU, keyword search. Two
         different Salla products for one handle -> UserError (never guess).
-        Read in Arabic: variant matching and the option read-back compare its names
-        with the sheet's Arabic ones."""
+        Read in Arabic: variant matching compares its option names with the sheet's
+        Arabic ones."""
         if product["salla_product_id"]:
             detail = self._get_product(product["salla_product_id"], lang="ar")
             if not detail:
@@ -559,6 +629,22 @@ class SallaProductUpload(models.TransientModel):
                 res["action"] = "would be refused"
                 self._flag(res, "error", self._structure_message(pid, problem))
                 return
+            status, leftover, stale = self._status_before(product, detail, state)
+            if stale and status != "hidden":
+                self._flag(res, "warning", self._stale_marker_message(status, dry_run=True))
+            if leftover:
+                self._flag(res, "warning", self._leftover_message(status, dry_run=True))
+            elif status == "hidden":
+                res["messages"].append(_(
+                    "hidden in Salla: kept hidden (Salla publishes a product by itself "
+                    "when a variant gets stock; Apply puts it back to hidden)"))
+            elif self.step != "images" and status != "sale" \
+                    and mapping.writes_stock(product, detail):
+                # Apply never writes this product's status: say it before, not after.
+                self._flag(res, "warning", _(
+                    "Salla status %s: writing the stock makes Salla publish it (sale) by "
+                    "itself; hide it in Salla first if it must stay hidden") % (
+                    status or _("not read")))
             if self.step != "images":
                 self._plan_variants(product, detail, res)
                 self._plan_simple(product, detail, res)
@@ -583,9 +669,13 @@ class SallaProductUpload(models.TransientModel):
                     "them out of stock in Salla before publishing") % unlisted)
             existing = 0
         if self.step != "images":
+            if product["options"]:
+                self._flag(res, "warning", self._option_names_by_hand_message())
             skip = mapping.translation_skip_reason(product)
             if skip:
                 self._flag(res, "warning", self._english_skipped_message(skip))
+            elif mapping.translation_dropped(product):
+                self._flag(res, "warning", self._english_dropped_message(product))
         todo, stop = mapping.images_to_attach(product["images"], existing, state["entries"])
         if todo:
             res["messages"].append(_("would attach image(s) %s") % ", ".join(
@@ -639,6 +729,16 @@ class SallaProductUpload(models.TransientModel):
     def _apply_product(self, product, detail, res, state):
         backend = self.backend_id
         created = False
+        # Read before any write: Salla publishes a product by itself once a variant has
+        # stock (spike 2026-11-10: a hidden product became "sale" after a variant PUT
+        # with stock). Only a product hidden before the run is put back, and one an
+        # earlier run left marked (salla.product.hide) less than 24 h ago counts as
+        # hidden before. An older marker is only reported: Ops may have published it.
+        before = found = ""
+        stale = False
+        if detail:
+            found, res["leftover"], stale = self._status_before(product, detail, state)
+            before = "hidden" if res["leftover"] else found
         if not detail:
             if self.step == "images":
                 res["action"] = "not in Salla"
@@ -652,24 +752,37 @@ class SallaProductUpload(models.TransientModel):
             if problem:
                 res["action"] = "refused"
                 raise UserError(self._structure_message(mapping.detail_id(detail), problem))
-            if self.step == "all":
-                # Set first so a failing PUT is reported as such, not as "updated".
-                res["action"] = "update failed"
-                # Arabic stated, not left to Salla's default language (unverified).
-                backend._request("PUT", "/products/%s" % mapping.detail_id(detail), lang="ar",
-                                 payload=mapping.product_payload(product, create=False))
-                res["action"] = "updated"
-            else:
-                res["action"] = "images"
+            res["action"] = "images" if self.step == "images" else ""
+            if res["leftover"]:
+                # After the structure check: a refused product is not touched (its
+                # marker stays for the next run).
+                self._flag(res, "warning", self._leftover_message(found))
+            elif stale and found != "hidden":
+                self._flag(res, "warning", self._stale_marker_message(found))
         pid = res["salla_id"] = mapping.detail_id(detail)
         state["claimed"].setdefault(pid, product["handle"])
-        if created:
-            # At once, before variants, English and images: a worker killed mid-product
-            # (limit_time_real) would otherwise leave it live if Salla ignored
-            # `status: hidden` in the create body, and the next run finds it as existing
-            # and never touches its status.
-            self._ensure_hidden(pid, res)
         try:
+            if created or before == "hidden":
+                # Committed before the first write (right after the create for a new
+                # one): a worker killed from here on (limit_time_real, the time budget
+                # only bounds when a product STARTS) leaves the marker, and the next run
+                # puts the product back to hidden instead of reading it as "not hidden".
+                self._hold_hidden(product, pid, state)
+            if created or res["leftover"]:
+                # At once, before variants, English and images. Salla ignores `status:
+                # hidden` in the create body (spike: the create answered "out"); a
+                # leftover may have been published by the run that did not finish.
+                self._ensure_hidden(pid, res, verify_first=res["leftover"])
+            if self.step == "all" and not created:
+                # Inside the try: the PUT of a product without options carries its stock,
+                # and an unknown outcome may have flipped the status too.
+                # Set first so a failing PUT is reported as such, not as "updated".
+                res["action"] = "update failed"
+                res["wrote"] = True
+                # Arabic stated, not left to Salla's default language (unverified).
+                backend._request("PUT", "/products/%s" % pid, lang="ar",
+                                 payload=mapping.product_payload(product, create=False))
+                res["action"] = "updated"
             if self.step == "all":
                 if product["options"] and not (mapping.detail_skus(detail)
                                                and detail.get("options")):
@@ -678,14 +791,119 @@ class SallaProductUpload(models.TransientModel):
                     # Only reachable for a product created here (existing ones were
                     # checked above): English and images wait for the fix in Salla.
                     return
+                # Right after the stock writes, not only at the end: the product is not
+                # left published while English and images are written.
+                self._keep_hidden(product, pid, before, created, res, state)
                 self._apply_english(product, detail, res, state)
             self._apply_images(product, detail, res, state)
         finally:
-            # Re-check at the end, even when a later step failed: until the spike shows
-            # that a variant stock or image write never flips the status, a product
-            # created here is verified hidden once more (a GET; POST only if needed).
-            if created:
-                self._ensure_hidden(pid, res, verify_first=True)
+            # Again at the end, even when a later step failed: images may flip it too.
+            self._keep_hidden(product, pid, before, created, res, state, final=True)
+
+    def _status_before(self, product, detail, state):
+        """(Salla status of `detail`, leftover, stale): leftover = an earlier run left a
+        "must stay hidden" marker on it (by Salla id, or by parent SKU when it died
+        around the create) less than HIDE_MARKER_MAX_AGE ago; stale = it has markers,
+        all older: its status is not put back (only reported)."""
+        status = mapping.detail_status(detail)
+        pid, sku = mapping.detail_id(detail), product["parent_sku"]
+        if not mapping.hide_marker_left(state["hide_refs"], pid, sku):
+            return status, False, False
+        if mapping.hide_marker_stale(state["hide_dates"], pid, sku, fields.Datetime.now()):
+            return status, False, True
+        return status, True, False
+
+    @staticmethod
+    def _leftover_message(status, dry_run=False):
+        if dry_run:
+            return _("a previous upload did not finish on this product (Salla status now: "
+                     "%s): Apply puts it back to hidden. If it was published on purpose, "
+                     "delete its row in Sales > Configuration > Salla > Products Kept "
+                     "Hidden before Apply") % (status or "?")
+        return _("a previous upload did not finish on this product (Salla status at the "
+                 "start of this run: %s): kept hidden. If it was published on purpose, "
+                 "delete its row in Sales > Configuration > Salla > Products Kept Hidden "
+                 "and publish it again") % (status or "?")
+
+    @staticmethod
+    def _stale_marker_message(status, dry_run=False):
+        verb = _("Apply does not touch it") if dry_run else _("not touched")
+        return _("a previous upload left this product marked \"must stay hidden\" more "
+                 "than 24 h ago; Salla status %(status)s: %(verb)s (it may have been "
+                 "published on purpose). If it must be hidden, hide it in Salla; either "
+                 "way delete its row in Sales > Configuration > Salla > Products Kept "
+                 "Hidden") % {"status": status or "?", "verb": verb}
+
+    def _hold_hidden(self, product, pid, state):
+        """Commit the "must stay hidden" marker of `pid` before writing to it. Raises
+        UserError when it cannot be committed: an unprotected write is not made."""
+        ref = mapping.hide_marker_ref(product_id=pid)
+        if not ref or ref in state["hide_marked"]:
+            # Not "in hide_refs": an earlier run's marker is marked again so its date
+            # restarts (a stale one would not protect this run's writes).
+            return
+        try:
+            self.env["salla.product.hide"]._mark(self.backend_id, product["handle"],
+                                                 product_id=pid)
+        except Exception as e:
+            _logger.exception("Salla upload: hidden marker of product %s not saved", pid)
+            raise UserError(_("could not record that #%s must stay hidden (%s): nothing "
+                              "more written to it; re-run") % (pid, _error_text(e)))
+        state["hide_refs"].add(ref)
+        state["hide_marked"].add(ref)
+
+    def _release_hidden(self, product, pid, state):
+        """Drop the markers of this product once it was seen hidden."""
+        refs = {mapping.hide_marker_ref(product_id=pid),
+                mapping.hide_marker_ref(sku=product["parent_sku"])} & state["hide_refs"]
+        if refs and self.env["salla.product.hide"]._clear(self.backend_id, refs):
+            state["hide_refs"] -= refs
+            state["hide_marked"] -= refs
+
+    def _keep_hidden(self, product, pid, before, created, res, state, final=False):
+        """Status after this run's writes. Created here, hidden before the run, or a
+        leftover: verified hidden (a GET; the POST only when Salla flipped it), and at
+        the end, once seen hidden, its marker is cleared. Any other existing product:
+        its status is never written; at the end a change Salla made by itself (e.g.
+        out -> sale) is only reported. Never POSTs any status but hidden."""
+        if not (created or before == "hidden"):
+            if not (final and res["wrote"]):
+                return                     # nothing was written to it
+            if before:
+                self._report_status_change(pid, before, res)
+            else:
+                self._flag(res, "warning", _(
+                    "status before the run not read: check in Salla that it is not "
+                    "published by mistake (Salla publishes a product when its stock is "
+                    "written)"))
+            return
+        if created or res["leftover"] or res["wrote"]:
+            changed_after = None
+            if not (created or res["leftover"]):
+                changed_after = _("image upload") if self.step == "images" \
+                    else _("stock update")
+            hidden = self._ensure_hidden(pid, res, verify_first=True,
+                                         changed_after=changed_after)
+        else:
+            hidden = True                  # hidden when read, nothing written since
+        if hidden and final:
+            self._release_hidden(product, pid, state)
+
+    def _report_status_change(self, pid, before, res):
+        try:
+            now = mapping.detail_status(self._get_product(pid))
+        except Exception as e:
+            # Runs in a `finally`: it must never replace the error being reported.
+            if not isinstance(e, UserError):
+                _logger.exception("Salla upload: status read of product %s failed", pid)
+            res["messages"].append(_("status after the upload not read (%s)") % _error_text(
+                e))
+            return
+        if now and now != before:
+            res["messages"].append(_(
+                "Salla changed the status from %(before)s to %(now)s during the upload "
+                "(not touched: the product was not hidden before)") % {
+                "before": before, "now": now})
 
     def _create_product(self, product, res, state):
         """POST /products. An unknown outcome (timeout, 5xx) is checked with a lookup:
@@ -695,12 +913,33 @@ class SallaProductUpload(models.TransientModel):
             # (update path) never gets here, so only new ones need a weight.
             res["action"] = "not created"
             raise UserError(self._no_weight_message())
+        # By parent SKU, before the POST: the id is not known yet, and a create with an
+        # unknown outcome (or a kill right after it) leaves a product at "out" that the
+        # next run finds by SKU; the marker makes that run hide it.
+        sku_ref = mapping.hide_marker_ref(sku=product["parent_sku"])
+        if sku_ref not in state["hide_marked"]:
+            try:
+                self.env["salla.product.hide"]._mark(self.backend_id, product["handle"],
+                                                     sku=product["parent_sku"])
+            except Exception as e:
+                _logger.exception("Salla upload: hidden marker of %s not saved",
+                                  product["handle"])
+                res["action"] = "not created"
+                raise UserError(_("not created: could not record that it must stay hidden "
+                                  "(%s); re-run") % _error_text(e))
+            state["hide_refs"].add(sku_ref)
+            state["hide_marked"].add(sku_ref)
         try:
             response = self.backend_id._request(
                 "POST", "/products", payload=mapping.product_payload(product, create=True),
                 idempotent=False, lang="ar")
         except SallaApiError as e:
             if e.http_status is not None:
+                if mapping.is_permanent_error(e.http_status) and self.env[
+                        "salla.product.hide"]._clear(self.backend_id, [sku_ref]):
+                    # Refused (422...): nothing was created, the marker has no product.
+                    state["hide_refs"].discard(sku_ref)
+                    state["hide_marked"].discard(sku_ref)
                 raise
             detail = self._lookup_after_create(product, state, _(
                 "unknown outcome of the create (%s)") % _error_text(e))
@@ -750,6 +989,7 @@ class SallaProductUpload(models.TransientModel):
             body = mapping.variant_payload(variant, current)
             if not body:
                 continue
+            res["wrote"] = True
             try:
                 self.backend_id._request("PUT", "/products/variants/%s" % vid, payload=body)
             except UserError as e:
@@ -763,63 +1003,91 @@ class SallaProductUpload(models.TransientModel):
         return not missing
 
     def _apply_english(self, product, detail, res, state):
-        """EN texts, then EN option / value names. The texts are read back in Arabic on
-        every product, option names and value names until each kind has been checked
-        once with an English name that differs from the Arabic one: if the EN write
-        replaced the Arabic (Salla ignoring the language headers), the Arabic is put
-        back and EN writes stop for the rest of the run. The read-back compares names
-        only, so EN texts are sent only with a name_en that differs from name_ar
-        (mapping.translation_skip_reason)."""
+        """EN product texts. Option / value names are never written in English: on the
+        demo store (spike 2026-11-10) PUT /products/options[/values]/{id} with the EN
+        headers replaced the ARABIC name. That store had English DISABLED then, so it
+        may not hold with English on; until the spike re-runs with it on, they are
+        entered by hand in Salla.
+        After the EN PUT the product is read back twice. In Arabic: if the EN write
+        replaced the Arabic, it is put back. In English: the demo (English disabled)
+        answered the EN PUT with a 200, kept the Arabic, and still showed the Arabic
+        name with lang en, so a 200 proves nothing. Either failure stops EN writes for the rest of the run. The
+        read-backs compare names only, so EN texts are sent only with a name_en that
+        differs from name_ar (mapping.translation_skip_reason), and only the ones whose
+        Arabic side is set (mapping.translation_payload): the Arabic restore / re-write
+        must cover every key the EN PUT carried."""
+        if product["options"]:
+            self._flag(res, "warning", self._option_names_by_hand_message())
         backend, pid = self.backend_id, mapping.detail_id(detail)
         body = mapping.translation_payload(product)
         skip = mapping.translation_skip_reason(product)
         if skip:
             self._flag(res, "warning", self._english_skipped_message(skip))
-            body = {}
-        options = mapping.option_translation_payloads(product, detail)
-        if not body and not options:
+            return
+        if mapping.translation_dropped(product):
+            self._flag(res, "warning", self._english_dropped_message(product))
+        if not body:
             return
         if not state["en_supported"]:
             self._flag(res, "warning", _("English must be entered by hand in Salla"))
             return
         # "English not written" only when the EN PUT itself failed; once one went
         # through, any later failure is about the Arabic and is reported as such.
-        if body:
-            try:
-                backend._request("PUT", "/products/%s" % pid, payload=body, lang="en")
-            except UserError as e:
-                self._flag(res, "warning", _("English not written: %s") % _error_text(e))
-                return
-            if not self._arabic_kept(
-                    res, state, pid, _("the Arabic name/description"),
-                    product["name"]["ar"], lambda after: mapping.detail_name(after, "ar"),
-                    lambda: backend._request(
-                        "PUT", "/products/%s" % pid, lang="ar",
-                        payload=mapping.product_payload(product, create=False))):
-                return
-        ar_names = self._option_names(detail)
-        for kind, oid, obody in options:
-            path = "/products/options/%s" if kind == "option" \
-                else "/products/options/values/%s"
-            try:
-                backend._request("PUT", path % oid, payload=obody, lang="en")
-            except UserError as e:
-                self._flag(res, "warning", _("English %s name not written: %s") % (
-                    kind, _error_text(e)))
-                return
-            before = ar_names.get((kind, oid))
-            if kind in state["verified_kinds"] \
-                    or mapping.norm_label(obody["name"]) == mapping.norm_label(before):
-                # Same text in both languages ("1L"): nothing an overwrite could change,
-                # so nothing to check, and no proof for the kind either.
-                continue
-            if not self._arabic_kept(
-                    res, state, pid, _("the Arabic %s name %r") % (kind, before), before,
-                    lambda after, key=(kind, oid): self._option_names(after).get(key),
-                    lambda path=path, oid=oid, before=before: backend._request(
-                        "PUT", path % oid, lang="ar", payload={"name": before})):
-                return
-            state["verified_kinds"].add(kind)
+        res["wrote"] = True
+        try:
+            backend._request("PUT", "/products/%s" % pid, payload=body, lang="en")
+        except UserError as e:
+            self._flag(res, "warning", _("English not written: %s") % _error_text(e))
+            return
+        if not self._arabic_kept(
+                res, state, pid, _("the Arabic name/description"),
+                product["name"]["ar"], lambda after: mapping.detail_name(after, "ar"),
+                # Texts only: the price, stock and weight of a product without
+                # options are not re-sent.
+                lambda: backend._request(
+                    "PUT", "/products/%s" % pid, lang="ar",
+                    payload=mapping.translation_payload(product, "ar"))):
+            return
+        try:
+            shown = self._get_product(pid, lang="en")
+        except Exception as e:
+            if not isinstance(e, UserError):
+                _logger.exception("Salla upload: English read-back of %s failed", pid)
+            # Not proof that English is lost: the next products keep trying.
+            self._flag(res, "warning", _("English written but not verified (%s): check "
+                                         "it in Salla") % _error_text(e))
+            return
+        if mapping.english_kept(product["name"]["en"], shown):
+            return
+        state["en_supported"] = False
+        self._flag(res, "warning", _(
+            "Salla did not keep the English (check that English is enabled in the "
+            "store's languages); enter it by hand (no more English writes in this run)"))
+        # The Arabic NAME was read back intact, the description was not: where Salla
+        # put the EN texts is unknown, so the Arabic texts are written again. Texts
+        # only: the stock and price of a product without options are not re-sent.
+        try:
+            backend._request("PUT", "/products/%s" % pid, lang="ar",
+                             payload=mapping.translation_payload(product, "ar"))
+        except Exception as e:
+            if not isinstance(e, UserError):
+                _logger.exception("Salla upload: Arabic re-write of %s failed", pid)
+            self._flag(res, "error", _(
+                "the Arabic texts could not be written again after the English write "
+                "(%s): check the Arabic description of #%s in Salla") % (
+                _error_text(e), pid))
+
+    @staticmethod
+    def _option_names_by_hand_message():
+        return _("English option/value names must be entered by hand in Salla (the "
+                 "uploader never writes them: Salla may write them over the Arabic)")
+
+    @staticmethod
+    def _english_dropped_message(product):
+        return _("English texts not sent for %s: their Arabic column is empty, and the "
+                 "Arabic could not be put back if Salla wrote them over it; fill the _ar "
+                 "column or enter them by hand in Salla") % ", ".join(
+            mapping.translation_dropped(product))
 
     @staticmethod
     def _english_skipped_message(reason):
@@ -860,20 +1128,6 @@ class SallaProductUpload(models.TransientModel):
             "entered by hand (no more English writes in this run)"))
         return False
 
-    @staticmethod
-    def _option_names(detail):
-        """{("option"|"value", id): name} of a Salla product detail."""
-        names = {}
-        for option in (detail or {}).get("options") or []:
-            if not isinstance(option, dict):
-                continue
-            names[("option", mapping.clean_id(option.get("id")))] = mapping.text(option.get("name"))
-            for value in option.get("values") or []:
-                if isinstance(value, dict):
-                    names[("value", mapping.clean_id(value.get("id")))] = \
-                        mapping.text(value.get("name"))
-        return names
-
     def _apply_images(self, product, detail, res, state):
         archive, entries = state["archive"], state["entries"]
         if not product["images"] or not archive:
@@ -897,6 +1151,9 @@ class SallaProductUpload(models.TransientModel):
             data = {"sort": str(sort), "main": "1" if sort == 1 else "0"}
             if product["image_alt"]:
                 data["alt"] = product["image_alt"]
+            # Before the POST: an unknown outcome may still have stored the image (and
+            # flipped the status), so the final status check must run.
+            res["wrote"] = True
             try:
                 self.backend_id._request(
                     "POST", "/products/%s/images" % pid, idempotent=False, data=data,
@@ -920,7 +1177,7 @@ class SallaProductUpload(models.TransientModel):
     @staticmethod
     def _webp_to_jpeg(content, filename):
         try:
-            from PIL import Image
+            Image = _webp_image()
         except ImportError:
             raise UserError(_("Pillow is not installed: WebP images cannot be converted"))
         with Image.open(io.BytesIO(content)) as img:
@@ -935,14 +1192,25 @@ class SallaProductUpload(models.TransientModel):
             flat.save(out, "JPEG", quality=90)
         return out.getvalue(), filename.rsplit(".", 1)[0] + ".jpg"
 
-    def _ensure_hidden(self, pid, res, verify_first=False):
-        """Created in this run: hidden, and verified. An existing product's status is
-        never touched (it may be published already). verify_first: read the status
-        first and POST only when it is not hidden (the end-of-product re-check)."""
+    def _ensure_hidden(self, pid, res, verify_first=False, changed_after=None):
+        """Hidden, and verified -> True when Salla showed it hidden. Only for a product
+        created in this run, or an existing one hidden before it (or left marked by an
+        earlier run): _keep_hidden. Any other existing product's status is never touched
+        (it may be published on purpose). verify_first: read the status first and POST
+        only when it is not hidden; a failed read still POSTs (hiding a product of these
+        kinds is always safe). changed_after: existing hidden product only, what this
+        run wrote ("stock update"): a status Salla flipped by itself is put back AND
+        reported as a warning (it was visible for a moment)."""
+        found = ""
+        if verify_first:
+            try:
+                found = mapping.detail_status(self._get_product(pid))
+            except Exception as e:
+                if not isinstance(e, UserError):
+                    _logger.exception("Salla upload: status read of product %s failed", pid)
+            if found == "hidden":
+                return True
         try:
-            status = mapping.detail_status(self._get_product(pid)) if verify_first else ""
-            if status == "hidden":
-                return
             self.backend_id._request("POST", "/products/%s/status" % pid,
                                      payload={"status": "hidden"})
             status = mapping.detail_status(self._get_product(pid))
@@ -953,12 +1221,20 @@ class SallaProductUpload(models.TransientModel):
             message = _("status not confirmed hidden (%s): check it in Salla") % _error_text(e)
         else:
             if status == "hidden":
-                return
+                if changed_after and found:
+                    # found "" = the read failed: not known to have changed.
+                    message = _("Salla changed the status to %(status)s after the "
+                                "%(step)s: put back to hidden") % {
+                        "status": found, "step": changed_after}
+                    if message not in res["messages"]:
+                        self._flag(res, "warning", message)
+                return True
             message = _("Salla shows status %r, not hidden: hide it in Salla by hand") % (
                 status or "?")
         # The early call and the final re-check can fail the same way: say it once.
         if message not in res["messages"]:
             self._flag(res, "error", message)
+        return False
 
     # ------------------------------------------------------------------ output
     def _result_html(self, products, selected, results, errors, warnings, left):

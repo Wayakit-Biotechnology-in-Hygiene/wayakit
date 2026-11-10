@@ -885,8 +885,24 @@ names, costs, tokens or customer data in the test sheet, the ticket or a chat.
 Run the standalone suite first: `python3 salla_connector/tests/test_mapping.py` must end in
 `all passed` (F8 tests: `test_read_*`, `test_parse_*`, `test_upload_*`, `test_text_to_html`,
 `test_flagged_claims_*`, `test_product_payload_*`, `test_translation_*`,
-`test_option_translation_*`, `test_norm_label`, `test_match_variants_*`, `test_variant_payload_*`,
-`test_images_to_attach`, `test_detail_helpers`, `test_create_weight_*`).
+`test_option_en_writes_removed`, `test_english_kept`, `test_image_size_*`, `test_norm_label`,
+`test_match_variants_*`, `test_variant_payload_*`, `test_images_to_attach`,
+`test_detail_helpers`, `test_create_weight_*`). 253 tests on 2026-11-10.
+
+**Rules after the spike of 2026-11-10** (`claude-docs/14-product-upload.md` §7):
+- Salla publishes a product **by itself** when a variant gets stock (hidden/out -> `sale`).
+  The uploader puts back to hidden only a product it **created** in the run or that was
+  **hidden before** the run; any other existing product's status is never written (a change
+  Salla made is only reported). The uploader only ever POSTs `hidden`.
+- Option / value names are **never** written in English (the EN PUT overwrote the Arabic
+  ones): every options product gets *English option/value names must be entered by hand in
+  Salla*. Caveat: that run had English **disabled** in the demo store; the spike (step 164,
+  finding `5 ...`) re-tests it with English enabled. The rule stays until it says otherwise.
+- English product texts are read back with lang `en`; if Salla does not show them, the run
+  warns *Salla did not keep the English (check that English is enabled in the store's
+  languages)...* once and stops EN writes for the rest of the run.
+- Image sizes come from a header parser (PNG / JPEG / WebP), not Pillow: Pillow on odoo.sh
+  cannot open WebP. **Convert WebP to JPEG** is refused on a server without Pillow WebP.
 
 **Weight is required on create** (observed on the demo store 2026-11-10: `POST /products`
 without `weight` -> 422 `{"message":"alert.invalid_fields","fields":{"weight":[...]}}`). A NEW
@@ -908,6 +924,16 @@ def sl(pid):        # one Salla product: status, parent sku, images, variants
 def sl_names(pid):  # name as Salla shows it in AR and in EN
     return [((b._request("GET", "/products/%s" % pid, lang=lang) or {}).get("data") or {})
             .get("name") for lang in ("ar", "en")]
+def sl_tr(pid):     # the `translations` object (keys + names only), if Salla returns one
+    d = (b._request("GET", "/products/%s" % pid, lang="en",
+                    params={"with": "translations"}) or {}).get("data") or {}
+    tr = d.get("translations")
+    return {k: (v.get("name") if isinstance(v, dict) else v) for k, v in tr.items()} \
+        if isinstance(tr, dict) else tr
+def sl_options(pid):  # option / value names as Salla shows them in Arabic
+    d = (b._request("GET", "/products/%s" % pid, lang="ar") or {}).get("data") or {}
+    return [(o.get("name"), [v.get("name") for v in o.get("values") or []])
+            for o in d.get("options") or []]
 def sl_find(keyword="STG-F8"):   # every Salla product whose SKUs match: duplicates show here
     res = b._request("GET", "/products", params={"keyword": keyword}) or {}
     return [(p.get("id"), mapping.detail_status(p), mapping.product_skus(p))
@@ -917,11 +943,11 @@ def last_wiz():
 ```
 
 ### S.1 Build and dependencies
-156. Build green; `salla_connector` upgrades to **17.0.5.0.0** with no error or warning about the module in the build log. Redo step 37 (Webhook URL in the Partners Portal for this build, reinstall the app on the demo store, Test Connection green). Expected in the UI:
+156. Build green; `salla_connector` upgrades to **17.0.5.0.1** with no error or warning about the module in the build log. Redo step 37 (Webhook URL in the Partners Portal for this build, reinstall the app on the demo store, Test Connection green). Expected in the UI:
     - Menu **Sales > Configuration > Salla > Upload Products** (admin and sale manager).
     - Button **Upload Products** on the backend form: it opens the wizard with the backend already set.
     - The wizard shows Master Sheet, Images ZIP, Mode (**Dry Run** by default), Step (**Everything** by default), Only Handles, Blocked Phrases (pre-filled with the 10 SAL-92 phrases, one per line), Convert WebP to JPEG (off), and the buttons **Run**, **Download Template**, Close.
-157. **openpyxl is not required.** `__manifest__.py` `external_dependencies` lists only `requests`. In the shell, write down `import importlib.util; importlib.util.find_spec("openpyxl") is not None` (either answer is fine: the reader is stdlib-only, and step 166 must read a real Excel file either way). Also write down Pillow and its WebP support (the spike and **Convert WebP to JPEG** need them): `import PIL; from PIL import features; PIL.__version__, features.check("webp")`.
+157. **openpyxl is not required.** `__manifest__.py` `external_dependencies` lists only `requests`. In the shell, write down `import importlib.util; importlib.util.find_spec("openpyxl") is not None` (either answer is fine: the reader is stdlib-only, and step 166 must read a real Excel file either way). Also write down Pillow and its WebP support with the same probe the wizard uses: `import PIL; from PIL import Image, WebPImagePlugin; PIL.__version__, "WEBP" in Image.OPEN and "WEBP" in Image.SAVE`. **Do not use `features.check("webp")`**: it only says libwebp is compiled in, and odoo.sh may report True there while `img.save(buf, "WEBP")` fails with `KeyError 'WEBP'` (spike 2026-11-10), because Odoo's `Image.preinit()` skips the WebP plugin; importing `WebPImagePlugin` registers it. If the import itself fails, write down the error: that is WebP False. WebP False: **Convert WebP to JPEG** must be refused (step 169b) and WebP sizes still checked by the header parser (step 169a). WebP True: write it down; 169b then expects a normal run (and the spike's `6 Pillow WebP support on this server` must say True too).
 
 ### S.2 Catalog-only guard (`Import Orders`)
 158. Backend form: **Import Orders** is visible, **on** by default, with its help text (*Off = catalog-only backend: ...*). As a **sale manager who is not admin**: the field is read-only, and in the shell `b.with_user(<that user id>).write({"import_orders": False})` raises **AccessError**. Nothing changes.
@@ -947,7 +973,7 @@ def last_wiz():
 163. Turn **Import Orders back on** (the demo backend is used with it on for the rest of S; the uploader does not care). Optional: run the reconcile cron and check that the order of step 161 now imports once (write down the result).
 
 ### S.3 Spike: settle the open API questions (one throwaway hidden product)
-164. Paste the whole of `tests/staging_products_spike.py` into the shell. Expected: `store verified: demo 461067869`, then the **F8 SPIKE FINDINGS** block. If it prints `STOP`, nothing was sent: fix what it says (wrong backend, module not upgraded) and paste again. Copy only the findings block into the ticket. Check in the Salla dashboard that the spike product (`SPIKE-F8-...`) is **hidden**.
+164. Paste the whole of `tests/staging_products_spike.py` into the shell (round 3: `GET /languages` runs first; the option/value EN experiment is back, on the spike product only and only when English is active; steps 9-11 and an embedded 64x64 WebP, no Pillow needed). **Before pasting, check Settings > Languages in the demo dashboard: English must be ON** (it was OFF on the first run, 2026-11-10, so those English results are not meaningful). Expected: `store verified: demo 461067869`, `English is present and active in this store.`, then the **F8 SPIKE FINDINGS** block. If it prints **ENGLISH NOT ACTIVE IN THIS STORE: English results below are not meaningful**, the step 4/5/10/11 results do not count: enable English and paste again (if the dashboard shows English ON but the reason says `unknown`, set `FORCE_EN_EXPERIMENTS = True` at the top and paste again). If it prints `STOP`, nothing was sent: fix what it says (wrong backend, module not upgraded) and paste again. Copy only the findings block into the ticket. Check in the Salla dashboard that the spike product (`SPIKE-F8-...`) is **hidden**.
 165. Act on the findings **before** step 168 (tell the lead/developer; do not work around them by hand):
 
     | Finding | If it says | Then |
@@ -958,12 +984,36 @@ def last_wiz():
     | `2 variant PUT with weight_type` | 422 | Developer drops `weight_type` from `variant_payload` |
     | `2 decimal weight 0.25 kept` / `2 barcode leading zeros kept` | False | Developer + Ops (barcodes as text) |
     | `3 GET /products/sku/<variant sku>` | 404 | Fine only if `3 ...keyword...` finds ours (fallback) |
-    | `4 AR name survived` | False | Expected handling: the uploader restores AR and says *English must be entered by hand* (check in 168) |
+    | `2 status after variant quantity` | `sale` | Expected (2026-11-10): Salla publishes by itself. The uploader puts it back (171b) |
+    | `2 POST status hidden` / `2 status after the POST (GET)` | an HTTP error / not `hidden` | The uploader relies on it right after the stock writes: developer, **STOP S** |
+    | `4 AR name survived` | False | Expected handling: the uploader restores AR and says *English must be entered by hand* (check in 170) |
+    | `4 AR description survived` | False | The developer's Arabic re-write after a lost EN (`translation_payload(product, "ar")`) is needed: keep it; tell the developer |
+    | `4 EN name shown with lang en` | False with `0 English active` = `yes` | English enabled and still not shown: developer (the EN write is wrong, not the store). If `0 English active` is not `yes`, the result does not count |
     | `4 variants kept ...` / `4 price kept ...` | False | A plain PUT wipes data: developer, **STOP S** |
-    | `5 option values and variants kept` | False | Option EN writes destroy variants: developer must turn them off, **STOP S** |
-    | `6 attach webp ...` | an HTTP error | Turn **Convert WebP to JPEG** on for the real run |
-    | `8 status after images + quantity` | not `hidden` | Salla publishes by itself: developer, **STOP S** |
-    | `8 POST /products/<id>/status hidden` | an HTTP error | Developer (step 8 of the run relies on it) |
+    | `4 status after the EN PUT`, `6 status after the image uploads`, `11 status after ...` | not `hidden` | That write also publishes: the wizard only re-checks after the stock writes and at the end; tell the developer which write |
+    | `0 English active (GET /languages)` | `NO` / `unknown` | English results of this run are not meaningful (banner printed): enable English in the store and paste again |
+    | `5 option/value EN writes` | SKIPPED: English not active | Expected only when `0 English active` is not `yes`; otherwise a bug in the spike: tell the tester |
+    | `5 option/value EN writes` | SKIPPED: spike option not found as created | The spike product's option is not the one step 1 created (wrong option name or value, or no option read back): no EN write was sent. Tell the developer (paste the line: it shows the option and value read) |
+    | `5 values kept` / `5 variants kept` | False (either one) | **STOP**: an option/value PUT changed the option's values or the product's variants (the line shows the value ids, or the variant count, before the EN PUTs, after them and after the Arabic restore; `5 values (id, name)` has the names). **Never re-enable option/value EN writes in the uploader**, whatever `5 option EN shown` says. Tell the developer and check the spike product's variants in the dashboard |
+    | `5 option AR survived` / `5 value AR survived` | True, and `5 option EN shown` / `5 value EN shown` True | With English enabled the EN option/value write works: developer may bring back option/value EN writes in the uploader (today it never writes them and warns *English option/value names must be entered by hand*) |
+    | `5 option AR survived` / `5 value AR survived` | False | Confirmed even with English enabled: lang `en` overwrites the Arabic. Keep the uploader as is (never writes them). `5 AR restored` must be True for both |
+    | `5 option EN shown` / `5 value EN shown` | False, AR survived True | Salla ignored the EN write: keep the uploader as is |
+    | `5 AR restore FAILED` | any | Put the Arabic option/value names back by hand on the spike product (names in the line) and tell the developer |
+    | `5 ?with=translations (lang ...)` | translations shown per option/value | Write it down: tells how Salla stores option translations |
+    | `6 Pillow WebP support on this server` | False | Convert WebP is refused (169b). Same probe as step 157 and the wizard: it must agree with step 157; if not, tell the developer |
+    | `6 embedded webp header (mapping.image_size)` | not `(64, 64), 110 bytes` | The module on the build is not the tested one: developer |
+    | `6 attach webp (embedded 64x64)` | ok | Salla accepts WebP: upload WebP as is, Convert WebP stays off |
+    | `6 attach webp (embedded 64x64)` | an HTTP error, and `6 control: 64x64 PNG ...` ok | Salla refuses WebP: convert the images to JPEG **before zipping** (odoo.sh cannot convert) |
+    | `6 attach webp (embedded 64x64)` and `6 control ...` both HTTP errors | | Salla refuses the 64 px size, not the format: WebP still unknown; tell the developer |
+    | `8 status after images + quantity` | not `hidden` | Images (or a later write) publish too: the wizard's final check puts it back; write it down |
+    | `8 POST status hidden` | an HTTP error | Developer (the run relies on it), **STOP S** |
+    | `9 GET /languages` | `en` listed and enabled | English should be kept: if `4 EN name shown` is still False, tell the developer (the EN write is wrong, not the store) |
+    | `9 GET /languages` | only `ar`, or `en` disabled | Explains the lost English: enable English in the store (demo: Settings > Languages) and paste the spike again; for the real store, decide with Marketing |
+    | `9 GET /languages` | HTTP 401/403 | Scope missing (not in the granted scopes): check Settings > Languages by hand and write it down |
+    | `10 GET ?with=translations (lang en)` | `en` name = the step 4 EN name | Salla stores the EN PUT but `lang en` does not show it: developer (read back via `?with=translations` in `english_kept`) |
+    | `10 ...` | no `translations` key / no `en` | Salla dropped the EN PUT |
+    | `11 PUT {translations: ...}` ok and `11 EN name via ...` True | | A `translations` body works: developer may switch the EN write to it |
+    | `11 AR name unchanged` | False | Restored by the spike (`11 AR restored` must be True); the `translations` body is not usable |
 
     Any `... crashed` line: send it to the developer as is.
 
@@ -974,16 +1024,38 @@ def last_wiz():
     - `stg-f8-options`: Size (500 مل / 1 لتر) x Scent (لافندر / ليمون), 4 rows `STG-F8-011` ... `STG-F8-014`, prices 30 / 32 / 45 / 47 (different on purpose), stock 4 / 0 / 12 / 3, **weight 0.5 kg on all 4 rows** (Salla requires a weight to create), one variant with sale_price 28 (< its price 30), `image_1..image_4 = stg-f8-1.jpg, stg-f8-2.webp, stg-f8-3.png, stg-f8-4.jpg`, `image_alt` set, `category_ids` = one demo category id (from the dashboard URL).
     - `stg-f8-broken`: one row with price `abc`.
     - `stg-f8-noweight`: one simple row, SKU `STG-F8-090`, price 25, stock 3, AR name/description, **weight and weight_unit empty**.
-    - Images ZIP (inside a folder, as a Mac zips it): `stg-f8-1.jpg` (1200 x 1200, < 300 KB), `stg-f8-2.webp`, `stg-f8-3.png` (800 x 600). **`stg-f8-4.jpg` is left out on purpose.**
+    - Images ZIP (inside a folder, as a Mac zips it): `stg-f8-1.jpg` (1200 x 1200, < 300 KB), `stg-f8-2.webp` (**1200 x 1200 lossy WebP**, < 300 KB), `stg-f8-3.png` (800 x 600). **`stg-f8-4.jpg` is left out on purpose.**
 168. **Dry Run, Step Everything** (as admin). Before: `sl_find()` -> write down (expected empty). Expected result:
     - `stg-f8-simple` and `stg-f8-options`: *would create it hidden with 1 / 4 variant(s)*, *would attach image(s) ...*.
     - `stg-f8-options`: warning *images stop: stg-f8-4.jpg not in the ZIP* (images 1-3 only) and a warning that `stg-f8-3.png` is not square.
+    - `stg-f8-options`: warning *English option/value names must be entered by hand in Salla (the uploader never writes them: Salla wrote them over the Arabic)*. `stg-f8-simple` (no options) does **not** get it.
+    - `stg-f8-2.webp`: **no** message at all (1200 x 1200 read from its header even though Pillow on odoo.sh cannot open WebP). Never *not a readable image* and never *size not checked*.
     - `stg-f8-broken`: error starting with `Row N:` (N = its sheet row) about the price; it is skipped.
     - `stg-f8-noweight`: action **would not create**, error *Salla requires a weight to create a product: fill weight (and weight_unit) in the sheet*; no "would create" / "would attach" line for it.
     - Warnings *SKU not found in Odoo* for the `STG-F8-*` SKUs (they are fake): expected.
     - **Download the result sheet:** the input rows plus `salla_product_id`, `salla_variant_id`, `upload_action`, `upload_status`, `upload_message`.
     - **No write in dry run:** `sl_find()` is still the same as before, and nothing new in the Salla dashboard.
 169. Save the same sheet as **CSV UTF-8** and dry-run it: same result as 168. Also dry-run the .xlsx with **Only Handles** = `stg-f8-simple`: only that handle is listed.
+169a. **Image checks without Pillow WebP (Dry Run only, never Apply).** Separate sheet, one simple handle `stg-f8-imgcheck` (SKU `STG-F8-095`, price 25, stock 1, weight 0.5 kg), `image_1..image_5` = `ic-1.webp, ic-2.webp, ic-3.webp, ic-4.webp, ic-5.jpg`. Make the files on a laptop (Python 3, no Pillow needed), zip them, and dry-run:
+    ```python
+    import base64, zipfile
+    full = base64.b64decode("UklGRmYAAABXRUJQVlA4IFoAAADQBACdASpAAEAAPrFInUmnJCKhMegA4BYJQBpGIAaADeAA"
+                            "P7BD0SV+jyHoTKG4AAD+4Ll+q8QZmA/ys1sxthqyRlG2r//9zfv7fOA6l6N7S38Vw7NxDQAAAAA=")
+    lossless = base64.b64decode("UklGRh4AAABXRUJQVlA4TBEAAAAvJIAFAAdQ5CrUo/+BiOh/AAA=")   # 37 x 23
+    unknown = b"RIFF\x14\x00\x00\x00WEBPALPH" + b"\x08\x00\x00\x00" + b"\x00" * 8  # no size chunk
+    with zipfile.ZipFile("stg-f8-imgcheck.zip", "w") as z:
+        z.writestr("ic/ic-1.webp", full); z.writestr("ic/ic-2.webp", lossless)
+        z.writestr("ic/ic-3.webp", unknown); z.writestr("ic/ic-4.webp", b"not an image at all")
+        z.writestr("ic/ic-5.jpg", b"not an image at all")
+    ```
+    Expected for `stg-f8-imgcheck` (Pillow without WebP, step 157):
+    - `ic-1.webp`: *is 64 px, not 1200 px* (size read from the header).
+    - `ic-2.webp`: *is not square (37x23)*.
+    - `ic-3.webp`: *size not checked (format not readable on this server)*, **not** *not a readable image*.
+    - `ic-4.webp` (no RIFF header): *not a readable image* (Pillow cannot open it). Write down the exact text.
+    - `ic-5.jpg` (not a JPEG): *not a readable image*.
+    - No traceback, and the other handles of the run are unaffected. Do not Apply this sheet.
+169b. **Convert WebP refused on odoo.sh.** Same S.4 sheet + ZIP, turn **Convert WebP to JPEG** on, Mode **Dry Run**, Run. Expected (Pillow without WebP, step 157): a UserError *This server cannot convert WebP (Pillow without WebP): convert the images to JPEG before zipping, or leave the toggle off.* before anything is read; no result sheet; `sl_find()` unchanged. Same with Mode Apply (still refused, nothing created). The field tooltip says it needs Pillow with WebP support. Turn the toggle **off** again for the rest of S. (If step 157 said WebP True: the dry run runs normally; write it down.)
 
 ### S.5 Apply with images
 170. **Mode Apply, Step Everything** (as admin), same files. Expected:
@@ -992,10 +1064,15 @@ def last_wiz():
     - The result sheet has `salla_product_id` filled for the two.
     - `sl(<id>)` for each: status **hidden**; parent SKU `STG-F8-001` (simple) and `STG-F8-OPTIONS` (options product: the handle in upper case), if the spike said the parent sku is kept; every variant with its own SKU, price (30 / 32 / 45 / 47, not all the lowest), sale price where set, stock 4 / 0 / 12 / 3 (the 0 is a 0, not empty), weight 0.5, barcode `000123456789` with its zeros.
     - In the dashboard: AR name and description (paragraphs and bullet lists rendered, no raw `<p>` text), options Size x Scent with the 4 combinations, images 1-3 in sheet order with image 1 as the main one and the alt text, the category set.
-    - `sl_names(<id>)`: EN name shown with lang en **and** AR name intact. If the spike said AR does not survive: the result says *English must be entered by hand* and the AR name is intact.
+    - `sl_names(<id>)`: the AR name is **always** intact. The EN name with lang en is one of:
+        - shown -> no English warning (English enabled and kept);
+        - not shown (the demo on 2026-11-10) -> the **first** product with EN texts has *Salla did not keep the English (check that English is enabled in the store's languages); enter it by hand (no more English writes in this run)*, and every later product with EN texts has *English must be entered by hand in Salla* (no EN PUT for them). Write down `sl_tr(<id>)` for both products.
+    - In the dashboard the Arabic description of both products is intact (not the English one): the uploader re-writes the Arabic texts after a lost English. If instead the result has *the Arabic texts could not be written again after the English write ...*: an error, tell the developer.
+    - `stg-f8-options`: warning *English option/value names must be entered by hand in Salla ...*; `sl_options(<id>)` shows the **Arabic** names (`الحجم` with 500 مل / 1 لتر, `الرائحة` with لافندر / ليمون): nothing in English. The build log shows **no** `PUT /products/options` call.
+    - `stg-f8-2.webp`: attached as image 2 if the spike said Salla accepts WebP (`6 attach webp (embedded 64x64)` ok). If the spike said Salla refuses WebP: the result reports image 2 failed and images stop there (3 is not attached); convert it to JPEG on a laptop, re-zip, and Step Images (175) attaches 2 and 3.
     - `sl_find()` lists exactly **two** products.
     - Build log: one summary line per product (handle, Salla id, action, counts). **No request bodies, no marketing copy, no token.**
-171. Status after the run: both **hidden** (`sl(<id>)["status"]`). The uploader never publishes.
+171. Status after the run: both **hidden** (`sl(<id>)["status"]`), although both got stock (Salla flipped them to `sale` after the variant PUT; the uploader put them back right after the stock writes and again at the end). The uploader never publishes. If either is not hidden: **STOP S**, developer.
 171a. **Options product whose first row has no weight** (own SKU prefix so the `STG-F8` counts below do not change). Separate sheet, handle `stg-w8-options`, option Size (500 مل / 1 لتر), 2 rows `STG-W8-001` (500 مل, price 30, stock 4, **weight empty**) and `STG-W8-002` (1 لتر, price 45, stock 12, **weight 600, weight_unit g**). Dry Run: *would create it hidden with 2 variant(s)* (no weight error: one row has a weight). Apply: **created**, no 422; `sl(<id>)`: status hidden, variant `STG-W8-002` weight 600 g (or 0.6 if Salla shows kg: write down which). Write down the weight Salla shows for `STG-W8-001` (no row weight: the create sent 600 g at product level; this says whether Salla copies it to variants without their own). Leave it hidden.
 
 ### S.6 Re-run idempotence
@@ -1003,7 +1080,51 @@ def last_wiz():
     - Both products *update #id*; `sl_find()` still lists exactly **two** (no duplicates).
     - Images count unchanged (3): nothing re-attached. Variant values unchanged; no variant PUT reported when nothing changed.
 172a. **Existing product: no weight needed to update.** Clear `weight` and `weight_unit` of `stg-f8-simple` in the sheet, change its `stock` to 7, Apply. Expected: *update #id* (no *Salla requires a weight* error), stock 7 in `sl(<id>)`, its weight in Salla **unchanged** (0.5: an empty cell never clears it). Restore the sheet (weight 0.5 kg, stock 12) and Apply again.
-173. **Published product untouched.** In the Salla dashboard, publish `stg-f8-simple` by hand (demo only). Change its `price` to 27 in the sheet and Apply. Expected: price 27 in Salla, status still **published** (the uploader never touches the status of an existing product). Hide it again by hand afterwards.
+171b. **Existing hidden product + new stock stays hidden.** Both products are hidden (171). In the sheet change the stock of `STG-F8-012` from 0 to 5 (the variant with no stock) and of `STG-F8-001` from 12 to 9 (simple product: its stock goes in the product PUT). Before, write down `sl(<options id>)["status"]` and `sl(<simple id>)["status"]` (both `hidden`).
+    - **Dry Run:** both say *hidden in Salla: kept hidden (Salla publishes a product by itself when a variant gets stock; Apply puts it back to hidden)*; no write (statuses still hidden).
+    - **Apply:** both *update #id*; stock 5 and 9 in `sl()`; status **hidden** at the end. For each product Salla flipped, the result has the warning *Salla changed the status to sale after the stock update: put back to hidden* (**once** per product, not twice). Write down for which product Salla flipped (none / options / simple / both). No *Salla changed the status from ... (not touched ...)* line for these two.
+    - Restore the sheet (0 and 12) and Apply again: same, hidden at the end.
+171c. **Interrupted run: the marker hides it on the next run (v17.0.5.0.1).** Simulates "both hide calls failed" (the same state a worker killed mid-product leaves). Shell, wizard of 171b, sheet with the stock of `STG-F8-012` changed again (5 -> 6), both products hidden before:
+    ```python
+    Cls = type(w); keep, ens = Cls._keep_hidden, Cls._ensure_hidden
+    Cls._keep_hidden = lambda *a, **k: None; Cls._ensure_hidden = lambda *a, **k: False
+    w.handles = "stg-f8-options"; w.mode = "apply"; w.action_run(); env.cr.commit()
+    Cls._keep_hidden, Cls._ensure_hidden = keep, ens
+    print(sl(<options id>)["status"]); print(env["salla.product.hide"].search([]).mapped("ref"))
+    ```
+    Expected: the status is whatever Salla made it (write it down: `sale` expected) and the marker list has `product:<options id>`. Also visible in Sales -> Configuration -> Salla -> **Products Kept Hidden** (admin only). Then, in the UI:
+    - **Dry Run** (Only Handles `stg-f8-options`): warning *a previous upload did not finish on this product (Salla status now: sale): Apply puts it back to hidden*; no write.
+    - **Apply**: warning *a previous upload did not finish on this product (Salla status at the start of this run: sale): kept hidden*; status **hidden** at the end; the marker row is **gone**.
+    - Apply once more: no such warning, no marker left after it.
+    If the status stays published or the marker stays after a hidden status: **STOP S**, developer.
+171c2. **Stale marker (older than 24 h) on a published product is only reported (v17.0.5.0.1).** Needs a product that is **published** (`sale`) and has a marker. Repeat the 171c shell block (stock of `STG-F8-012` changed again, 6 -> 7) to leave `stg-f8-options` with a marker and the status Salla gave it. If `sl(<options id>)["status"]` is not `sale` afterwards, skip this step and write down the status (never publish it through the API). Then age the marker past 24 h in the shell:
+    ```python
+    env.cr.execute("UPDATE salla_product_hide SET write_date = (now() at time zone 'UTC') "
+                   "- interval '25 hours' WHERE ref = %s", ("product:<options id>",))
+    print(env.cr.rowcount); env.cr.commit()   # 1 expected
+    print(env["salla.product.hide"].search([("ref", "=", "product:<options id>")]).write_date)
+    ```
+    Change the stock of `STG-F8-012` again (7 -> 8) so Apply has something to write.
+    - **Dry Run** (Only Handles `stg-f8-options`): warning *a previous upload left this product marked "must stay hidden" more than 24 h ago; Salla status sale: Apply does not touch it (it may have been published on purpose) ...*; **not** *a previous upload did not finish ... Apply puts it back to hidden*; no write.
+    - **Apply**, with every Salla call recorded (shell, wizard `w`):
+      ```python
+      B = type(w.backend_id); req = B._request; calls = []
+      def spy(self, method, path, *a, **k):
+          calls.append((method, path)); return req(self, method, path, *a, **k)
+      B._request = spy
+      try:
+          w.handles = "stg-f8-options"; w.mode = "apply"; w.action_run(); env.cr.commit()
+      finally:
+          B._request = req
+      print([c for c in calls if "/status" in c[1]])   # [] expected: no status call
+      print(sl(<options id>)["status"]); print(env["salla.product.hide"].search([]).mapped("ref"))
+      ```
+      Expected: warning *... more than 24 h ago; Salla status sale: not touched ...*; **no** `/status` call in the list (the stock PUT is there); the status is still `sale`; the marker `product:<options id>` is **still there** (a stale marker is never cleared by a run). If a `/status` call was sent or the status became `hidden`: **STOP S**, developer.
+    - Clean up: hide `stg-f8-options` by hand in the Salla dashboard, delete its row in Sales -> Configuration -> Salla -> **Products Kept Hidden**, and check `sl(<options id>)["status"]` is `hidden` and the marker list is empty (step 175 expects it hidden). The sheet can keep stock 8 for `STG-F8-012` (no later step depends on it).
+171d. **Dry run warns before stock publishes a product that is not hidden.** In the dashboard set `stg-f8-simple` to out of stock / unpublished so `sl(<simple id>)["status"]` is neither `hidden` nor `sale` (write down the value, `out` expected; if the dashboard cannot reach such a status, skip and say so). Change its stock in the sheet, **Dry Run**: warning *Salla status out: writing the stock makes Salla publish it (sale) by itself; hide it in Salla first if it must stay hidden*. Hide it by hand again; restore the sheet.
+171e. **EN text without its AR column is not sent.** On `stg-f8-simple` set `subtitle_en` = `Fake subtitle` with `subtitle_ar` empty. **Dry Run** and **Apply**: warning *English texts not sent for subtitle_en: their Arabic column is empty ...*; the Arabic subtitle in Salla (empty, or one typed by hand) is unchanged. Clear `subtitle_en`.
+173. **Published product untouched.** In the Salla dashboard, publish `stg-f8-simple` by hand (demo only). Change its `price` to 27 in the sheet and Apply. Expected: price 27 in Salla, status still **published** (the uploader never writes the status of an existing product that was not hidden). No *put back to hidden* warning. Keep it published for 173a.
+173a. **Published product whose status Salla changes is only reported.** Still published: set the stock of `STG-F8-001` to **0** in the sheet and Apply; write down the status (`out` expected) and whether this run already says *Salla changed the status from sale to out ... (not touched ...)*. Then stock **5**, Apply. Expected: status in Salla is what Salla made it (`sale` expected), **never** put back to hidden, and the result says *Salla changed the status from out to sale during the upload (not touched: the product was not hidden before)* (with the statuses Salla really showed). If Salla did not change it: no such line. Restore the sheet (stock 12, price 25), Apply, and **hide it again by hand** in the dashboard.
 174. **New option value is never created by the uploader.** Add a 5th row to `stg-f8-options` with a new scent (e.g. نعناع / Mint, SKU `STG-F8-015`) and Apply. Expected: error *add the option value in Salla by hand; the uploader never edits options* for that row, the 4 existing variants untouched, no new option value in Salla. Remove the row.
 
 ### S.7 Images only
@@ -1011,6 +1132,7 @@ def last_wiz():
     - `stg-f8-options`: exactly one image attached (sort 4); `sl(<id>)["images"]` = 4. The EN name in Salla is **not** changed (no product PUT in this step).
     - `stg-f8-new`: error *not in Salla yet: run step Everything first*; nothing created (`sl_find()` still two).
     - Run it again: nothing attached (4 already there).
+    - Status of `stg-f8-options` after the images step: **hidden** (it was hidden before). If Salla flipped it on the image upload, the result has *Salla changed the status to sale after the image upload: put back to hidden*; write down whether it appeared. The second run (nothing attached) makes **no** status call for it.
 
 ### S.8 Claims on hold block apply
 176. Put `Baby-Safe formula` in `description_en` of `stg-f8-simple` and `It won’t scratch` (curly apostrophe, as pasted from Word/Notion) in its `subtitle_en`. **Dry Run:** warnings naming the phrases found. **Apply:** error for `stg-f8-simple`, product skipped: its EN description and subtitle in Salla are unchanged (`sl_names()` and the dashboard). Remove the phrases afterwards. Also check that clearing **Blocked Phrases** to a blank line does not flag every product.

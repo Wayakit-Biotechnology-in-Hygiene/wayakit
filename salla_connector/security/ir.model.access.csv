@@ -5,3 +5,5 @@ access_salla_order_queue_user,salla.order.queue.user,model_salla_order_queue,sal
 access_salla_order_queue_manager,salla.order.queue.manager,model_salla_order_queue,sales_team.group_sale_manager,1,1,1,1
 access_salla_product_upload_manager,salla.product.upload.manager,model_salla_product_upload,sales_team.group_sale_manager,1,1,1,1
 access_salla_product_upload_system,salla.product.upload.system,model_salla_product_upload,base.group_system,1,1,1,1
+access_salla_product_hide_manager,salla.product.hide.manager,model_salla_product_hide,sales_team.group_sale_manager,1,0,0,0
+access_salla_product_hide_system,salla.product.hide.system,model_salla_product_hide,base.group_system,1,0,0,1

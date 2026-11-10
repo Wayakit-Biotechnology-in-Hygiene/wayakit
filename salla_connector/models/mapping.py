@@ -2400,12 +2400,15 @@ def _put(body, key, value):
     body[key] = value
 
 
+# Salla body key -> sheet column base (the parsed product's key).
+TEXT_FIELDS = (("name", "name"), ("description", "description"), ("subtitle", "subtitle"),
+               ("promotion_title", "promotion_title"), ("metadata_title", "seo_title"),
+               ("metadata_description", "seo_description"))
+
+
 def _text_fields(product, lang):
-    get = lambda key: text((product.get(key) or {}).get(lang))  # noqa: E731
-    return {"name": get("name"), "description": get("description"),
-            "subtitle": get("subtitle"), "promotion_title": get("promotion_title"),
-            "metadata_title": get("seo_title"),
-            "metadata_description": get("seo_description")}
+    return {key: text(((product or {}).get(column) or {}).get(lang))
+            for key, column in TEXT_FIELDS}
 
 
 def create_weight(product):
@@ -2482,11 +2485,29 @@ def product_payload(product, create):
 
 
 def translation_payload(product, lang="en"):
-    """Body of the `lang` PUT /products/{id}: the texts of that side, non-empty only."""
+    """Body of the `lang` PUT /products/{id}: the texts of that side, non-empty only.
+
+    Other than "ar": only the texts whose Arabic side is non-empty too
+    (translation_dropped lists the others). If Salla writes the EN body over the
+    Arabic (as it did with options), the Arabic re-write / restore sends
+    translation_payload(product, "ar"), so every key the EN PUT carried must be in that
+    body, or an English subtitle would stay in the Arabic store."""
     body = {}
+    ar = _text_fields(product, "ar") if lang != "ar" else None
     for key, value in _text_fields(product, lang).items():
-        _put(body, key, value)
+        if ar is None or ar[key]:
+            _put(body, key, value)
     return body
+
+
+def translation_dropped(product, lang="en"):
+    """Sheet columns ("subtitle_en"...) with a `lang` text left out of
+    translation_payload because their Arabic side is empty; [] for "ar"."""
+    if lang == "ar":
+        return []
+    ar, other = _text_fields(product, "ar"), _text_fields(product, lang)
+    return ["%s_%s" % (column, lang) for key, column in TEXT_FIELDS
+            if other[key] and not ar[key]]
 
 
 def translation_skip_reason(product, lang="en"):
@@ -2521,35 +2542,6 @@ def _option_values(option):
 def _find_option(detail, name_ar):
     key = norm_label(name_ar)
     return next((o for o in _detail_options(detail) if norm_label(o.get("name")) == key), None)
-
-
-def option_translation_payloads(product, detail, lang="en"):
-    """[(kind, id, body)] to put the `lang` names on the Salla options / values of
-    `detail`, each matched by its Arabic name (norm_label). kind "option" ->
-    PUT /products/options/{id}, "value" -> PUT /products/options/values/{id}. Body is
-    always {"name": ...} only: an option body carrying `values` would replace them."""
-    out, done = [], set()
-    variants = product.get("variants") or []
-    for index, option in enumerate(product.get("options") or []):
-        salla = _find_option(detail, option.get("ar"))
-        if not salla:
-            continue
-        oid = clean_id(salla.get("id"))
-        if oid and text(option.get(lang)) and ("option", oid) not in done:
-            done.add(("option", oid))
-            out.append(("option", oid, {"name": text(option.get(lang))}))
-        by_name = {norm_label(v.get("name")): clean_id(v.get("id"))
-                   for v in _option_values(salla)}
-        for variant in variants:
-            values = variant.get("values") or []
-            if index >= len(values):
-                continue
-            vid = by_name.get(norm_label(values[index].get("ar")))
-            name = text(values[index].get(lang))
-            if vid and name and ("value", vid) not in done:
-                done.add(("value", vid))
-                out.append(("value", vid, {"name": name}))
-    return out
 
 
 def detail_skus(detail):
@@ -2822,6 +2814,55 @@ def detail_status(detail):
     return _canon_status(status)
 
 
+def hide_marker_ref(product_id="", sku=""):
+    """Key of a "must stay hidden" marker (wizard table salla.product.hide):
+    "product:<Salla id>", else "sku:<parent SKU, upper case>" (written before a create,
+    when the id is not known yet; Salla's SKU lookup ignores case), "" when neither."""
+    pid = clean_id(product_id)
+    if pid:
+        return "product:%s" % pid
+    sku = text(sku).upper()
+    return "sku:%s" % sku if sku else ""
+
+
+def hide_marker_left(markers, product_id, sku):
+    """True when `markers` (refs read at the start of a run) hold the Salla product
+    `product_id` or the parent `sku`: a previous run wrote to that product (created
+    here, or hidden before) and did not confirm it hidden again (worker killed, or both
+    hide calls failed). It must be treated as hidden before this run."""
+    refs = {hide_marker_ref(product_id=product_id), hide_marker_ref(sku=sku)} - {""}
+    return bool(refs & set(markers or ()))
+
+
+# A marker exists for the NEXT run. Past this age the product may have been reviewed
+# and published on purpose by Ops (the uploader never publishes), so its status is no
+# longer put back to hidden: the run only reports the marker.
+HIDE_MARKER_MAX_AGE = timedelta(hours=24)
+
+
+def hide_marker_stale(marked, product_id, sku, now, max_age=HIDE_MARKER_MAX_AGE):
+    """True when `marked` ({ref: when it was last marked, naive UTC}) holds a marker
+    of the Salla product `product_id` or the parent `sku` and NONE of its markers is
+    younger than `max_age` (an undated one counts as old). False when it has no
+    marker, or one recent enough to act on."""
+    refs = {hide_marker_ref(product_id=product_id), hide_marker_ref(sku=sku)} - {""}
+    found = [(marked or {})[ref] for ref in refs if ref in (marked or {})]
+    if not found:
+        return False
+    return not any(when and now - when < max_age for when in found)
+
+
+def writes_stock(product, detail):
+    """True when an update of the existing Salla product `detail` would write stock
+    (product quantity, or a variant's stock_quantity): Salla then publishes it by
+    itself (spike 2026-11-10: a variant PUT with stock turned a product "sale")."""
+    if not product.get("options"):
+        return any(label == "stock" for label, new, current in simple_changes(product, detail))
+    pairs, missing, extra = match_variants(product, detail)
+    return any("stock_quantity" in variant_payload(variant, current)
+               for variant, current in pairs)
+
+
 def detail_id(detail):
     """Id of a Salla product detail, "" if absent."""
     return clean_id(detail.get("id")) if isinstance(detail, dict) else ""
@@ -2869,3 +2910,98 @@ def translation_kept(before_ar, after_ar):
     if isinstance(before_ar, dict):
         before_ar = before_ar.get("ar")
     return norm_label(before_ar) == norm_label(after_ar)
+
+
+def english_kept(name_en, detail_en):
+    """True when the product read back with lang "en" shows `name_en` (norm_label).
+    Spike 2026-11-10: the EN PUT answered 200 and kept the Arabic, but the EN read
+    still showed the Arabic name, so a 200 alone does not prove English is stored."""
+    return bool(norm_label(name_en)) and \
+        norm_label(name_en) == norm_label(detail_name(detail_en, "en"))
+
+
+# JPEG start-of-frame markers (baseline, progressive, lossless...): they carry the size.
+# C4 / C8 / CC are DHT / JPG / DAC, not frames.
+_JPEG_SOF = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+
+
+def image_size(data):
+    """(width, height) from the header of a PNG, JPEG or WebP image, None when the
+    format is not one of those or the bytes end before the size.
+
+    Without Pillow on purpose: Pillow on odoo.sh has no WebP support (spike
+    2026-11-10), so it cannot even open a WebP to read its size. Only header bytes
+    are needed: PNG and WebP sizes sit in the first 30 bytes; a JPEG's SOF follows
+    its EXIF / ICC segments and can be tens of KB in, so a None on a truncated JPEG
+    means "read more", not "unreadable"."""
+    if not isinstance(data, (bytes, bytearray)):
+        return None
+    data = bytes(data)
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        if len(data) < 24 or data[12:16] != b"IHDR":
+            return None
+        return _positive_size(int.from_bytes(data[16:20], "big"),
+                              int.from_bytes(data[20:24], "big"))
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return _webp_size(data)
+    if data[:2] == b"\xff\xd8":
+        return _jpeg_size(data)
+    return None
+
+
+def _positive_size(width, height):
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def _webp_size(data):
+    chunk, body = data[12:16], data[20:]
+    if chunk == b"VP8 ":
+        # Lossy: 3-byte frame tag, start code 9d 01 2a, then 14-bit width / height
+        # (the top 2 bits are the scaling factor).
+        if len(body) < 10 or body[3:6] != b"\x9d\x01\x2a":
+            return None
+        return _positive_size(int.from_bytes(body[6:8], "little") & 0x3FFF,
+                              int.from_bytes(body[8:10], "little") & 0x3FFF)
+    if chunk == b"VP8L":
+        # Lossless: signature 0x2f, then width-1 and height-1 in 14 bits each.
+        if len(body) < 5 or body[0] != 0x2F:
+            return None
+        bits = int.from_bytes(body[1:5], "little")
+        return _positive_size((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+    if chunk == b"VP8X":
+        # Extended (alpha, animation, EXIF): canvas width-1 / height-1 in 24 bits each.
+        if len(body) < 10:
+            return None
+        return _positive_size(int.from_bytes(body[4:7], "little") + 1,
+                              int.from_bytes(body[7:10], "little") + 1)
+    return None
+
+
+def _jpeg_size(data):
+    i, n = 2, len(data)
+    while i < n:
+        if data[i] != 0xFF:
+            return None
+        while i < n and data[i] == 0xFF:
+            # Fill bytes before a marker are allowed.
+            i += 1
+        if i >= n:
+            return None
+        marker = data[i]
+        i += 1
+        if marker == 0x01 or 0xD0 <= marker <= 0xD8:
+            continue                       # no length field
+        if marker in (0xD9, 0xDA):
+            return None                    # end of image / scan data before any SOF
+        if i + 2 > n:
+            return None
+        length = int.from_bytes(data[i:i + 2], "big")
+        if length < 2:
+            return None
+        if marker in _JPEG_SOF:
+            if i + 7 > n:
+                return None
+            return _positive_size(int.from_bytes(data[i + 5:i + 7], "big"),
+                                  int.from_bytes(data[i + 3:i + 5], "big"))
+        i += length
+    return None

@@ -10,6 +10,9 @@
                     <div class="alert alert-info" role="alert" invisible="result_html">
                         Products are created <b>hidden</b> and matched by SKU on every run:
                         re-running updates them, nothing is ever deleted or published.
+                        A product hidden in Salla stays hidden (Salla publishes it by itself
+                        when a variant gets stock; the uploader puts it back). English option
+                        and value names are entered by hand in Salla.
                         Dry Run only reads Salla. Apply needs an administrator.
                     </div>
                     <group>
@@ -50,6 +53,30 @@
             <field name="res_model">salla.product.upload</field>
             <field name="view_mode">form</field>
             <field name="target">new</field>
+        </record>
+
+        <!-- Markers the upload commits before writing to a product that must stay hidden
+             and clears once Salla shows it hidden. A row left here = a run that did not
+             finish on that product; a run within 24 h of "Last Marked" hides it, an
+             older row is only reported. Deleting one only stops that. -->
+        <record id="salla_product_hide_view_tree" model="ir.ui.view">
+            <field name="name">salla.product.hide.tree</field>
+            <field name="model">salla.product.hide</field>
+            <field name="arch" type="xml">
+                <tree create="0" edit="0">
+                    <field name="backend_id"/>
+                    <field name="ref"/>
+                    <field name="handle"/>
+                    <field name="create_date" string="Since"/>
+                    <field name="write_date" string="Last Marked"/>
+                </tree>
+            </field>
+        </record>
+
+        <record id="salla_product_hide_action" model="ir.actions.act_window">
+            <field name="name">Products Kept Hidden (upload)</field>
+            <field name="res_model">salla.product.hide</field>
+            <field name="view_mode">tree</field>
         </record>
     </data>
 </odoo>

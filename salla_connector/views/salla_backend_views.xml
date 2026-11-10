@@ -162,5 +162,11 @@
                   action="salla_product_upload_action"
                   groups="sales_team.group_sale_manager"
                   sequence="20"/>
+        <menuitem id="menu_salla_product_hide"
+                  name="Products Kept Hidden"
+                  parent="menu_salla_backend"
+                  action="salla_product_hide_action"
+                  groups="base.group_system"
+                  sequence="30"/>
     </data>
 </odoo>

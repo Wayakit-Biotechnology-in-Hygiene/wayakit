@@ -3858,7 +3858,8 @@ def test_translation_payload():
     rows = _options_rows()
     rows[0].update(subtitle_en="Fake subtitle", promotion_title_en="Fake promo",
                    seo_title_en="Fake SEO", seo_description_en="Fake SEO copy",
-                   subtitle_ar="عنوان فرعي")
+                   subtitle_ar="عنوان فرعي", promotion_title_ar="عرض تجريبي",
+                   seo_title_ar="عنوان سيو", seo_description_ar="وصف سيو")
     p = _p(rows, _FC)
     tp = mapping.translation_payload(p, "en")
     assert tp == {"name": "Fake Floor Cleaner", "description": p["description"]["en"],
@@ -3873,35 +3874,32 @@ def test_translation_payload():
     assert mapping.translation_payload(p, "en") == {}
 
 
-def test_option_translation_payloads():
-    p = _p(_options_rows(), _FC)
-    detail = {"id": 555, "options": _DETAIL_OPTIONS, "skus": []}
-    out = mapping.option_translation_payloads(p, detail, "en")
-    got = {(kind, str(oid)): body for kind, oid, body in out}
-    assert got == {("option", "11"): {"name": "Size"}, ("value", "111"): {"name": "500 ml"},
-                   ("value", "112"): {"name": "1 L"}, ("option", "22"): {"name": "Scent"},
-                   ("value", "221"): {"name": "Lavender"},
-                   ("value", "222"): {"name": "Lemon"}}, got
-    assert len(out) == len(got), out                          # no duplicate writes
-    for kind, _, body in out:
-        assert "values" not in body and set(body) == {"name"}, body
-    # Salla option not in the sheet, sheet value not in Salla, EN missing -> no call
-    rows = _options_rows()
-    for row in rows:
-        if row["option2_value_ar"] == "ليمون":
-            row["option2_value_en"] = ""
-    detail = {"options": _DETAIL_OPTIONS[:1] + [
-        {"id": 22, "name": "الرائحة", "values": [{"id": 221, "name": "لافندر"},
-                                                 {"id": 222, "name": "ليمون"}]},
-        {"id": 33, "name": "اللون", "values": [{"id": 331, "name": "أزرق"}]}]}
-    got = {(k, str(i)): b for k, i, b in mapping.option_translation_payloads(
-        _p(rows, _FC), detail, "en")}
-    assert ("value", "222") not in got and ("option", "33") not in got, got
-    assert ("value", "331") not in got and got[("value", "221")] == {"name": "Lavender"}
-    for body in got.values():
-        assert body.get("name"), body                          # never {"name": ""}
-    assert mapping.option_translation_payloads(_p(_simple_rows(), "fake-glass-cleaner"),
-                                               {"options": []}, "en") == []
+_WIZARD_SRC = os.path.join(os.path.dirname(__file__), "..", "wizard", "salla_product_upload.py")
+# _request("PUT", "/products/%s" ...): method + path literal of every API call in the wizard
+_REQUEST_RE = re.compile(r'_request\(\s*"([A-Z]+)",\s*"([^"]*)"')
+
+
+def _wizard_requests():
+    with open(_WIZARD_SRC, encoding="utf-8") as fh:
+        src = fh.read()
+    return src, _REQUEST_RE.findall(src)
+
+
+def test_option_en_writes_removed():
+    # Spike 2026-11-10: PUT /products/options[/values]/{id} with lang en wrote OVER the
+    # Arabic option / value names. The pure builder is gone and the wizard never calls
+    # those endpoints (read as text: it imports odoo).
+    assert not hasattr(mapping, "option_translation_payloads")
+    src, calls = _wizard_requests()
+    assert calls, "no _request calls found: regex out of date"
+    for method, path in calls:
+        assert "/options" not in path, (method, path)
+        assert method in ("GET", "POST", "PUT"), (method, path)      # never DELETE
+    # (the docstring may still name the endpoint: only _request paths count)
+    # every status write is "hidden", never "sale"
+    statuses = re.findall(r'payload=\{\s*"status":\s*"([^"]*)"', src)
+    assert statuses and set(statuses) == {"hidden"}, statuses
+    assert '"status": "sale"' not in src and "'status': 'sale'" not in src
 
 
 def _overlap_product():
@@ -3918,13 +3916,6 @@ _OVERLAP_DETAIL = {"id": 556, "options": [
                                              {"id": 223, "name": "عادي"}]}],
     "skus": [{"id": 9101, "sku": "", "related_option_values": [113, 221]},
              {"id": 9102, "sku": "", "related_option_values": [223, 113]}]}
-
-
-def test_option_translation_same_value_in_two_options():
-    got = {(k, str(i)): b for k, i, b in mapping.option_translation_payloads(
-        _overlap_product(), _OVERLAP_DETAIL, "en")}
-    assert got[("value", "113")] == {"name": "Regular"}, got
-    assert got[("value", "223")] == {"name": "Unscented"}, got
 
 
 # --- norm_label / match_variants -----------------------------------------------------------
@@ -4095,6 +4086,252 @@ def test_translation_kept():
     assert k("منظف زجاج تجريبي", None) is False
 
 
+def test_english_kept():
+    k = mapping.english_kept
+    assert k("Cleaner", {"name": "Cleaner"}) is True
+    assert k("Cleaner", {"name": {"ar": "منظف", "en": " cleaner "}}) is True
+    assert k("Fake  Glass Cleaner", {"name": {"ar": "منظف", "en": "fake glass cleaner"}}) is True
+    # spike 2026-11-10: the EN read still showed the Arabic string name
+    assert k("Cleaner", {"name": "منظف"}) is False
+    assert k("Cleaner", {"name": {"ar": "منظف", "en": "Other"}}) is False
+    assert k("Cleaner", {"name": {"ar": "منظف"}}) is False
+    assert k("Cleaner", {"name": {"ar": "منظف", "en": ""}}) is False
+    assert k("Cleaner", {"name": None}) is False
+    assert k("Cleaner", {}) is False
+    assert k("Cleaner", None) is False
+    assert k("Cleaner", "garbage") is False
+    # an empty / blank name_en is never "kept", even against an empty name
+    for empty in ("", "   ", None):
+        assert k(empty, {"name": ""}) is False, empty
+        assert k(empty, {"name": {"ar": "منظف", "en": ""}}) is False, empty
+        assert k(empty, None) is False, empty
+
+
+def test_translation_payload_ar_rewrite_texts_only():
+    # The wizard re-writes the Arabic texts with translation_payload(product, "ar") when
+    # English was not kept: texts only, never stock, price, weight, status or options.
+    rows = _simple_rows(name_en="Fake Glass Cleaner", subtitle_ar="عنوان فرعي")
+    p = _p(rows, "fake-glass-cleaner")
+    tp = mapping.translation_payload(p, "ar")
+    assert tp.get("name") == p["name"]["ar"], tp
+    assert tp.get("description") == p["description"]["ar"], tp
+    for key in ("quantity", "price", "sale_price", "cost_price", "weight", "weight_type",
+                "status", "options", "images", "sku", "product_type", "categories"):
+        assert key not in tp, (key, tp)
+    for value in tp.values():
+        assert "Fake Glass Cleaner" not in str(value), tp           # no EN in the AR body
+    tp = mapping.translation_payload(_p(_options_rows(), _FC), "ar")
+    assert "options" not in tp and "quantity" not in tp and "price" not in tp, tp
+
+
+# --- image_size (header parser; Pillow on odoo.sh has no WebP) ----------------------------
+
+# Real 64x64 lossy WebP given by the lead (spike 2026-11-10). NOTE: only the first 95 of
+# the 286 bytes its RIFF header declares: the header is intact, the bitstream is cut. Good
+# for the header parser (it never reads past the size); not a decodable image.
+_WEBP_64_GIVEN_B64 = ("UklGRhYBAABXRUJQVlA4IAoBAACwCACdASpAAEAAPm0ylEakIqIhKBgMgA2JaQAIDgCF"
+                      "//+H1iK37ZcbM8vyWwMN2Bwy4YJLXWYnYhw/YIz4qmXAAP7+HQf0vDAAAAA=")
+# Complete 64x64 lossy WebP (110 bytes; Pillow 10.2 + dwebp decode it), same as the spike.
+_WEBP_64_FULL_B64 = ("UklGRmYAAABXRUJQVlA4IFoAAADQBACdASpAAEAAPrFInUmnJCKhMegA4BYJQBpGIAaADeAA"
+                     "P7BD0SV+jyHoTKG4AAD+4Ll+q8QZmA/ys1sxthqyRlG2r//9zfv7fOA6l6N7S38Vw7NxDQAA"
+                     "AAA=")
+# Real Pillow 10.2 files, 37x23 (not square: a swapped width/height shows).
+_REAL_37x23_B64 = {
+    "webp-lossless": "UklGRh4AAABXRUJQVlA4TBEAAAAvJIAFAAdQ5CrUo/+BiOh/AAA=",
+    "webp-alpha-vp8x": ("UklGRmwAAABXRUJQVlA4WAoAAAAQAAAAJAAAFgAAQUxQSAoAAAABB1DAiAhERP8DVlA4"
+                        "IDwAAABQAwCdASolABcAPtFmrVEoJaQipWgBABoJZwDKpoAANa6r6AD+Ex/jebzWtb//"
+                        "FodaHWhtjoTKuJ+uAAA="),
+    "png": ("iVBORw0KGgoAAAANSUhEUgAAACUAAAAXCAIAAAADThHyAAAAKElEQVR4nGPkOiHHQEfARE/LRu0b"
+            "tW/UvlH7Ru0btW/UvlH7Ru0jCABfIgEe+UCBwwAAAABJRU5ErkJggg=="),
+    "jpeg-progressive-exif": (
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/4QASRXhpZgAATU0AKgAAAAgAAP/bAEMAGxIUFxQRGxcWFx4cGyAo"
+        "QisoJSUoUTo9MEJgVWVkX1VdW2p4mYFqcZBzW12FtYaQnqOrratngLzJuqbHmairpP/bAEMBHB4eKCMo"
+        "TisrTqRuXW6kpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpP/C"
+        "ABEIABcAJQMBIgACEQEDEQH/xAAVAAEBAAAAAAAAAAAAAAAAAAAAAf/EABUBAQEAAAAAAAAAAAAAAAAA"
+        "AAAE/9oADAMBAAIQAxAAAAGCeMAAAAD/xAAUEAEAAAAAAAAAAAAAAAAAAAAw/9oACAEBAAEFAn//xAAU"
+        "EQEAAAAAAAAAAAAAAAAAAAAg/9oACAEDAQE/AV//xAAUEQEAAAAAAAAAAAAAAAAAAAAg/9oACAECAQE/"
+        "AV//xAAUEAEAAAAAAAAAAAAAAAAAAAAw/9oACAEBAAY/An//xAAUEAEAAAAAAAAAAAAAAAAAAAAw/9oA"
+        "CAEBAAE/IX//2gAMAwEAAgADAAAAEP8A/wD/AP8A/wD/xAAUEQEAAAAAAAAAAAAAAAAAAAAg/9oACAED"
+        "AQE/EF//xAAUEQEAAAAAAAAAAAAAAAAAAAAg/9oACAECAQE/EF//xAAUEAEAAAAAAAAAAAAAAAAAAAAw"
+        "/9oACAEBAAE/EH//2Q=="),
+}
+
+
+def _b64(value):
+    import base64
+    return base64.b64decode(value)
+
+
+def _png(width, height, chunk=b"IHDR"):
+    ihdr = width.to_bytes(4, "big") + height.to_bytes(4, "big") + b"\x08\x02\x00\x00\x00"
+    return (b"\x89PNG\r\n\x1a\n" + len(ihdr).to_bytes(4, "big") + chunk + ihdr
+            + b"\x00\x00\x00\x00" + b"\x00\x00\x00\x00IEND\xaeB`\x82")
+
+
+def _jpeg_segment(marker, payload):
+    return bytes([0xFF, marker]) + (len(payload) + 2).to_bytes(2, "big") + payload
+
+
+def _jpeg_sof(width, height, marker=0xC0):
+    # precision 8, height, width, 3 components (id, sampling, quant table)
+    payload = (b"\x08" + height.to_bytes(2, "big") + width.to_bytes(2, "big")
+               + b"\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01")
+    return _jpeg_segment(marker, payload)
+
+
+_JFIF_APP0 = _jpeg_segment(0xE0, b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00")
+_DQT = _jpeg_segment(0xDB, b"\x00" + bytes(range(1, 65)))
+_DHT = _jpeg_segment(0xC4, b"\x00" + b"\x00" * 16)       # C4 = DHT, not a frame
+_SOS = _jpeg_segment(0xDA, b"\x03\x01\x00\x02\x11\x03\x11\x00\x3f\x00") + b"\x12\x34"
+
+
+def _jpeg(width, height, marker=0xC0, exif_bytes=40, before_sof=b""):
+    app1 = _jpeg_segment(0xE1, b"Exif\x00\x00" + b"MM\x00*" + b"\x00" * exif_bytes)
+    return (b"\xff\xd8" + _JFIF_APP0 + app1 + _DQT + before_sof
+            + _jpeg_sof(width, height, marker) + _DHT + _SOS + b"\xff\xd9")
+
+
+def _riff_webp(chunk, body):
+    payload = b"WEBP" + chunk + len(body).to_bytes(4, "little") + body
+    return b"RIFF" + len(payload).to_bytes(4, "little") + payload
+
+
+def _webp_vp8(width, height, start=b"\x9d\x01\x2a", scale=0):
+    w = (width & 0x3FFF) | (scale << 14)
+    h = (height & 0x3FFF) | (scale << 14)
+    return _riff_webp(b"VP8 ", b"\x30\x01\x00" + start + w.to_bytes(2, "little")
+                      + h.to_bytes(2, "little") + b"\x00" * 8)
+
+
+def _webp_vp8l(width, height, signature=0x2F):
+    bits = (width - 1) | ((height - 1) << 14) | (1 << 28)     # alpha_is_used, version 0
+    return _riff_webp(b"VP8L", bytes([signature]) + bits.to_bytes(4, "little") + b"\x00" * 4)
+
+
+def _webp_vp8x(width, height):
+    body = (b"\x10\x00\x00\x00" + (width - 1).to_bytes(3, "little")
+            + (height - 1).to_bytes(3, "little"))
+    return _riff_webp(b"VP8X", body)
+
+
+def test_image_size_real_webp_64():
+    f = mapping.image_size
+    given = _b64(_WEBP_64_GIVEN_B64)
+    assert given[:4] == b"RIFF" and given[12:16] == b"VP8 "
+    assert f(given) == (64, 64), f(given)
+    full = _b64(_WEBP_64_FULL_B64)
+    assert int.from_bytes(full[4:8], "little") + 8 == len(full)      # complete file
+    assert f(full) == (64, 64), f(full)
+    assert f(bytearray(full)) == (64, 64)
+
+
+def test_image_size_real_files_not_square():
+    for kind, b64 in _REAL_37x23_B64.items():
+        assert mapping.image_size(_b64(b64)) == (37, 23), (kind, mapping.image_size(_b64(b64)))
+
+
+def test_image_size_png():
+    f = mapping.image_size
+    assert f(_png(1000, 1000)) == (1000, 1000)
+    assert f(_png(300, 200)) == (300, 200)                # width first, height second
+    assert f(_png(1, 70000)) == (1, 70000)
+    assert f(_png(300, 200)[:24]) == (300, 200)           # header only is enough
+    for bad in (_png(300, 200)[:23], _png(300, 200)[:16], _png(300, 200, chunk=b"IDAT"),
+                _png(0, 200), _png(300, 0), b"\x89PNG\r\n\x1a\n"):
+        assert f(bad) is None, bad
+
+
+def test_image_size_jpeg_baseline_and_progressive():
+    f = mapping.image_size
+    assert f(_jpeg(1000, 1000)) == (1000, 1000)
+    assert f(_jpeg(300, 200)) == (300, 200)               # SOF stores height before width
+    assert f(_jpeg(300, 200, marker=0xC2)) == (300, 200)  # progressive
+    for marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE,
+                   0xCF):
+        assert f(_jpeg(640, 480, marker=marker)) == (640, 480), hex(marker)
+    # DHT (C4), JPG (C8), DAC (CC) before the frame are skipped, never read as a size
+    junk = _jpeg_segment(0xC8, b"\x00\x05\x00\x07\x00") + _jpeg_segment(0xCC, b"\x01\x02\x03")
+    assert f(_jpeg(640, 480, before_sof=_DHT + junk)) == (640, 480)
+    # 0xFF fill bytes before a marker, and markers without a length (RSTn / TEM)
+    assert f(_jpeg(640, 480, before_sof=b"\xff\xff\xff")) == (640, 480)
+    assert f(_jpeg(640, 480, before_sof=b"\xff\xd0\xff\x01")) == (640, 480)
+
+
+def test_image_size_jpeg_big_exif_and_64kb_header():
+    # The wizard reads 64 KB first and the whole entry only for a JPEG without a SOF in
+    # them: the parser must answer None (not a wrong size) on the cut header.
+    f = mapping.image_size
+    big = _jpeg(1000, 1000, exif_bytes=40 * 1024)
+    assert len(big) < 65536 and f(big[:65536]) == (1000, 1000)
+    app1s = b"".join(_jpeg_segment(0xE1, b"\x00" * 60000) for _ in range(2))
+    late = _jpeg(1000, 1000, before_sof=app1s)            # SOF ~120 KB in
+    assert len(late) > 65536
+    assert f(late[:65536]) is None
+    assert f(late) == (1000, 1000)
+
+
+def test_image_size_jpeg_none_cases():
+    f = mapping.image_size
+    good = _jpeg(640, 480)
+    sof_at = good.index(b"\xff\xc0")
+    # cut inside the APP1, right before the SOF, inside the SOF length, before width
+    for cut in (4, 20, sof_at, sof_at + 1, sof_at + 3, sof_at + 7, sof_at + 8):
+        assert f(good[:cut]) is None, cut
+    assert f(good[:sof_at + 9]) == (640, 480)             # FFC0 + len + prec + h + w
+    # SOS or EOI before any SOF
+    assert f(b"\xff\xd8" + _JFIF_APP0 + _SOS + _jpeg_sof(640, 480)) is None
+    assert f(b"\xff\xd8" + _JFIF_APP0 + b"\xff\xd9" + _jpeg_sof(640, 480)) is None
+    # garbage where a marker should be, a length below 2, zero sizes
+    assert f(b"\xff\xd8" + _JFIF_APP0 + b"\x00\x01" + _jpeg_sof(640, 480)) is None
+    assert f(b"\xff\xd8\xff\xe0\x00\x01" + _jpeg_sof(640, 480)) is None
+    assert f(_jpeg(0, 480)) is None and f(_jpeg(640, 0)) is None
+    assert f(b"\xff\xd8") is None and f(b"\xff\xd8\xff") is None
+
+
+def test_image_size_webp_vp8_lossy():
+    f = mapping.image_size
+    assert f(_webp_vp8(1000, 1000)) == (1000, 1000)
+    assert f(_webp_vp8(300, 200)) == (300, 200)
+    assert f(_webp_vp8(16383, 1)) == (16383, 1)
+    assert f(_webp_vp8(300, 200, scale=3)) == (300, 200)  # top 2 bits = scaling, masked
+    assert f(_webp_vp8(300, 200)[:30]) == (300, 200)      # header only
+    for bad in (_webp_vp8(300, 200)[:29], _webp_vp8(300, 200, start=b"\x00\x00\x00"),
+                _webp_vp8(0, 200), _webp_vp8(300, 0)):
+        assert f(bad) is None, bad
+
+
+def test_image_size_webp_vp8l_lossless():
+    f = mapping.image_size
+    assert f(_webp_vp8l(1000, 1000)) == (1000, 1000)
+    assert f(_webp_vp8l(300, 200)) == (300, 200)
+    assert f(_webp_vp8l(1, 1)) == (1, 1)
+    assert f(_webp_vp8l(16384, 16384)) == (16384, 16384)  # 14 bits of size - 1
+    assert f(_webp_vp8l(300, 200)[:25]) == (300, 200)
+    for bad in (_webp_vp8l(300, 200)[:24], _webp_vp8l(300, 200, signature=0x2E)):
+        assert f(bad) is None, bad
+
+
+def test_image_size_webp_vp8x_extended():
+    f = mapping.image_size
+    assert f(_webp_vp8x(1000, 1000)) == (1000, 1000)
+    assert f(_webp_vp8x(300, 200)) == (300, 200)
+    assert f(_webp_vp8x(1, 1)) == (1, 1)
+    assert f(_webp_vp8x(1 << 24, 70000)) == (1 << 24, 70000)   # 24 bits of size - 1
+    assert f(_webp_vp8x(300, 200)[:30]) == (300, 200)
+    assert f(_webp_vp8x(300, 200)[:29]) is None
+
+
+def test_image_size_unknown_or_garbage_is_none():
+    f = mapping.image_size
+    gif = b"GIF89a" + (64).to_bytes(2, "little") * 2 + b"\x00" * 20
+    for bad in (gif, b"", None, "not bytes", 12345, b"\x00" * 64, b"RIFF",
+                b"RIFF\x10\x00\x00\x00WAVEfmt " + b"\x00" * 20,          # RIFF, not WEBP
+                _riff_webp(b"ALPH", b"\x00" * 16),                       # unknown chunk
+                b"BM" + b"\x00" * 60, b"%PDF-1.4" + b"\x00" * 40,
+                b"\x89PNG", b"RIFF\x00\x00\x00\x00WEBP", b"RIFF\x00\x00\x00\x00WEBPVP8 "):
+        assert f(bad) is None, bad
+
+
 def test_detail_helpers():
     detail = {"id": 555, "status": "hidden",
               "images": [{"id": 1, "url": "https://cdn.example.test/fake-1.jpg"},
@@ -4119,9 +4356,14 @@ def test_translation_skip_reason():
     # EN description (or any EN text) without name_en: the overwrite would go unseen
     p = _p(_simple_rows(name_en=""), "fake-glass-cleaner")
     assert r(p) == "name_en is empty", r(p)
+    p = _p(_simple_rows(name_en="", description_en="", subtitle_en="Fake subtitle",
+                        subtitle_ar="عنوان فرعي"), "fake-glass-cleaner")
+    assert r(p) == "name_en is empty", r(p)
+    # an EN text whose AR side is blank is never sent (translation_dropped): alone, it
+    # leaves nothing to send, so nothing to skip either
     p = _p(_simple_rows(name_en="", description_en="", subtitle_en="Fake subtitle"),
            "fake-glass-cleaner")
-    assert r(p) == "name_en is empty", r(p)
+    assert mapping.translation_payload(p, "en") == {} and r(p) == "", r(p)
     # same name on both sides once normalized (case, inner/outer spaces)
     p = _p(_simple_rows(name_ar="WAYAKIT Gel", name_en=" wayakit  gel"), "fake-glass-cleaner")
     assert r(p) == "name_en is the same as name_ar", r(p)
@@ -4136,7 +4378,9 @@ def test_translation_skip_reason():
     assert r(p) == ""
     # tolerant of a hand-built product
     assert r({}) == ""
-    assert r({"name": None, "description": {"en": "<p>Fake</p>"}}) == "name_en is empty"
+    assert r({"name": None, "description": {"ar": "<p>وصف</p>", "en": "<p>Fake</p>"}}) \
+        == "name_en is empty"
+    assert r({"name": None, "description": {"en": "<p>Fake</p>"}}) == ""    # AR blank: not sent
 
 
 # --- F8 review round 4: weight units ------------------------------------------------------
@@ -4450,6 +4694,183 @@ def test_read_xlsx_rows_unsupported_compression_is_damaged():
         raise AssertionError("no error for an unsupported compression method")
 
 
+# --- F8 spike follow-up: EN text without AR, hidden markers, stock publishes ---------------
+
+def test_translation_payload_drops_en_without_ar():
+    # Review S2: the Arabic re-write / restore sends translation_payload(product, "ar");
+    # an EN key it does not carry (AR blank) could stay over the Arabic in Salla, so it is
+    # never sent in English, and translation_dropped names its column.
+    rows = _simple_rows(subtitle_en="Fake subtitle", promotion_title_en="Fake promo",
+                        seo_title_en="Fake SEO", seo_description_en="Fake SEO copy",
+                        seo_title_ar="عنوان سيو")
+    p = _p(rows, "fake-glass-cleaner")
+    tp = mapping.translation_payload(p, "en")
+    assert tp == {"name": "Fake Glass Cleaner", "description": p["description"]["en"],
+                  "metadata_title": "Fake SEO"}, tp
+    assert "subtitle" not in tp and "promotion_title" not in tp, tp
+    assert "metadata_description" not in tp, tp
+    assert mapping.translation_dropped(p) == ["subtitle_en", "promotion_title_en",
+                                              "seo_description_en"], \
+        mapping.translation_dropped(p)
+    assert mapping.translation_dropped(p, "en") == mapping.translation_dropped(p)
+    # every EN key has its AR counterpart in the re-write body
+    ar = mapping.translation_payload(p, "ar")
+    assert set(tp) <= set(ar), (tp, ar)
+    # AR side: never filtered, nothing dropped
+    assert mapping.translation_dropped(p, "ar") == []
+    assert ar["name"] == p["name"]["ar"] and ar["metadata_title"] == "عنوان سيو", ar
+    # AR blank, EN blank -> neither sent nor dropped
+    p = _p(_simple_rows(), "fake-glass-cleaner")
+    assert mapping.translation_dropped(p) == []
+    assert set(mapping.translation_payload(p, "en")) == {"name", "description"}
+    # options product: subtitle_en alone on the first row
+    rows = _options_rows()
+    rows[0].update(subtitle_en="Fake subtitle")
+    p = _p(rows, _FC)
+    assert "subtitle" not in mapping.translation_payload(p, "en")
+    assert mapping.translation_dropped(p) == ["subtitle_en"]
+    # tolerant of a hand-built product
+    assert mapping.translation_dropped({}) == []
+    assert mapping.translation_payload({"name": None, "subtitle": {"en": "x"}}) == {}
+    assert mapping.translation_dropped({"name": None, "subtitle": {"en": "x"}}) == \
+        ["subtitle_en"]
+
+
+def test_hide_marker_ref():
+    ref = mapping.hide_marker_ref
+    assert ref(product_id=555) == "product:555"
+    assert ref(product_id="555") == "product:555"
+    assert ref(product_id=" 555 ") == "product:555"
+    assert ref(product_id=555, sku="FAKE-FC") == "product:555"         # id wins
+    assert ref(sku="fake-floor-cleaner") == "sku:FAKE-FLOOR-CLEANER"    # upper case
+    assert ref(sku=" FAKE-GC-001 ") == "sku:FAKE-GC-001"
+    for pid in (None, "", "None", "null"):
+        assert ref(product_id=pid) == "", pid
+        assert ref(product_id=pid, sku="FAKE-1") == "sku:FAKE-1", pid
+    assert ref() == "" and ref(sku=None) == ""
+
+
+def test_hide_marker_left():
+    left = mapping.hide_marker_left
+    markers = {"product:555", "sku:FAKE-FLOOR-CLEANER"}
+    assert left(markers, 555, "OTHER") is True
+    assert left(markers, "555", "") is True
+    assert left(markers, 777, "fake-floor-cleaner") is True             # SKU, any case
+    assert left(markers, "", "FAKE-FLOOR-CLEANER") is True              # id unreadable
+    assert left(markers, 777, "OTHER") is False
+    assert left(markers, "", "") is False
+    assert left(set(), 555, "FAKE-FLOOR-CLEANER") is False
+    assert left(None, 555, "X") is False
+    assert left(["product:555"], 555, None) is True                    # any iterable
+    # the empty ref of a missing id / SKU never matches a stray "" in the markers
+    assert left({""}, "", "") is False and left({""}, None, None) is False
+    # a marker of product 55 is not one of product 555
+    assert left({"product:55"}, 555, "") is False
+
+
+def test_hide_marker_stale():
+    # A marker older than HIDE_MARKER_MAX_AGE (24 h) is only reported: Ops may have
+    # published the product on purpose since. Any recent marker of the product wins.
+    stale = mapping.hide_marker_stale
+    now = datetime(2026, 11, 10, 12, 0)
+    h = lambda hours: now - timedelta(hours=hours)  # noqa: E731
+    assert mapping.HIDE_MARKER_MAX_AGE == timedelta(hours=24)
+    assert stale({}, "1", "", now) is False                             # no marker
+    assert stale(None, "1", "a", now) is False
+    assert stale({"product:1": h(1)}, "1", "", now) is False            # 1 h: act on it
+    assert stale({"product:1": h(25)}, "1", "", now) is True            # 25 h: report only
+    assert stale({"product:1": h(24)}, "1", "", now) is True            # exactly 24 h
+    assert stale({"product:1": now - timedelta(hours=24) + timedelta(seconds=1)},
+                 "1", "", now) is False                                 # 1 s under
+    assert stale({"product:1": None}, "1", "", now) is True             # undated = old
+    # one recent marker (SKU, any case) is enough to keep acting on the product
+    assert stale({"product:1": h(25), "sku:A": h(2)}, "1", "a", now) is False
+    assert stale({"product:1": h(2), "sku:A": h(25)}, "1", "a", now) is False
+    assert stale({"product:1": h(25), "sku:A": None}, "1", "a", now) is True
+    # id unreadable: matched by SKU alone
+    assert stale({"sku:A": h(72)}, "", "a", now) is True
+    # another product's marker is not this one's
+    assert stale({"product:2": h(72)}, "1", "", now) is False
+    assert stale({"product:11": h(72)}, "1", "", now) is False
+    # explicit max_age
+    assert stale({"product:1": h(2)}, "1", "", now, max_age=timedelta(hours=1)) is True
+
+
+def test_writes_stock():
+    # Review S3: the dry run warns when Apply would write the stock of an existing
+    # product that is neither hidden nor sale (Salla then publishes it by itself).
+    ws = mapping.writes_stock
+    p = _p(_simple_rows(), "fake-glass-cleaner")                          # stock 12
+    assert ws(p, _gc_detail(quantity=12)) is False                        # same stock
+    assert ws(p, _gc_detail(quantity=5)) is True
+    assert ws(p, _gc_detail(quantity=None)) is True                       # unknown
+    assert ws(_p(_simple_rows(stock=""), "fake-glass-cleaner"),
+              _gc_detail(quantity=5)) is False                            # blank: not sent
+    # price change only: no stock write
+    assert ws(_p(_simple_rows(price="30"), "fake-glass-cleaner"),
+              _gc_detail(quantity=12)) is False
+    # options: per matched variant
+    p = _p(_options_rows(), _FC)
+    detail = _fc_detail_matching(p)
+    assert ws(p, detail) is False, detail                                 # all the same
+    detail["skus"][0]["stock_quantity"] = 99
+    assert ws(p, detail) is True
+    # no matched variant -> nothing written
+    assert ws(p, {"id": 1, "options": [], "skus": []}) is False
+    assert ws({"options": [], "variants": []}, {}) is False
+
+
+def _fc_detail_matching(p):
+    """A Salla detail whose variants match _options_rows() value for value."""
+    opt_ids = {}
+    options = []
+    for index, option in enumerate(p["options"]):
+        values = []
+        for variant in p["variants"]:
+            name = variant["values"][index]["ar"]
+            if name not in opt_ids:
+                opt_ids[name] = str(100 + len(opt_ids))
+                values.append({"id": opt_ids[name], "name": name})
+        options.append({"id": str(10 + index), "name": option["ar"], "values": values})
+    skus = []
+    for i, variant in enumerate(p["variants"]):
+        skus.append({"id": str(900 + i), "sku": variant["sku"], "price": variant["price"],
+                     "sale_price": variant.get("sale_price"),
+                     "stock_quantity": variant["stock"], "barcode": variant.get("barcode"),
+                     "weight": variant.get("weight"), "weight_type": variant.get("weight_unit"),
+                     "related_option_values": [opt_ids[v["ar"]] for v in variant["values"]]})
+    return {"id": 555, "options": options, "skus": skus}
+
+
+def test_wizard_restore_and_hide_static():
+    # Read as text (the wizard imports odoo). Review N3: the Arabic restore sends the
+    # texts only; product_payload(create=False) is the update PUT alone.
+    src, calls = _wizard_requests()
+    assert src.count("product_payload(product, create=False)") == 1, \
+        src.count("product_payload(product, create=False)")
+    assert src.count('translation_payload(product, "ar")') >= 2
+    # Review S1: the verify read of _ensure_hidden is caught on its own, before the POST
+    body = src[src.index("def _ensure_hidden"):src.index("# ---", src.index(
+        "def _ensure_hidden"))]
+    verify, post = body.index("if verify_first:"), body.index('"/products/%s/status"')
+    first_try = body.index("try:", verify)
+    first_except = body.index("except Exception", first_try)
+    assert first_except < post, "the verify GET must have its own except before the POST"
+    # Review B1: markers committed on their own cursor, never through the ORM
+    hide_src = open(os.path.join(os.path.dirname(__file__), "..", "models",
+                                 "salla_product_hide.py"), encoding="utf-8").read()
+    assert hide_src.count("self.env.registry.cursor()") == 2, "mark + clear on own cursor"
+    # marked again -> the date restarts (hide_marker_stale reads write_date)
+    assert "ON CONFLICT (backend_id, ref) DO UPDATE" in hide_src
+    assert "DO NOTHING" not in hide_src
+    assert ".create(" not in hide_src and ".unlink(" not in hide_src
+    # the marker is committed before the create POST and before the first write
+    apply_src = src[src.index("def _apply_product"):src.index("def _status_before")]
+    assert apply_src.index("_hold_hidden(") < apply_src.index('"PUT", "/products/%s"')
+    create_src = src[src.index("def _create_product"):src.index("def _lookup_after_create")]
+    assert create_src.index("_mark(") < create_src.index('"POST", "/products"')
+
+
 if __name__ == "__main__":
     for fn in [test_signature_valid, test_signature_wrong_secret,
                test_signature_tampered_one_byte, test_signature_missing_or_empty_header,
@@ -4586,13 +5007,19 @@ if __name__ == "__main__":
                test_product_payload_create_simple, test_product_payload_create_options,
                test_product_payload_update_never_status_options_images,
                test_product_payload_empty_optionals_omitted, test_translation_payload,
-               test_option_translation_payloads,
-               test_option_translation_same_value_in_two_options, test_norm_label,
+               test_option_en_writes_removed, test_norm_label,
                test_match_variants_set_match,
                test_match_variants_same_value_in_two_options, test_match_variants_id_types,
                test_match_variants_simple_product, test_variant_payload_full,
                test_variant_payload_diff_against_current, test_images_to_attach,
-               test_translation_kept, test_detail_helpers,
+               test_translation_kept, test_english_kept,
+               test_translation_payload_ar_rewrite_texts_only,
+               test_image_size_real_webp_64, test_image_size_real_files_not_square,
+               test_image_size_png, test_image_size_jpeg_baseline_and_progressive,
+               test_image_size_jpeg_big_exif_and_64kb_header, test_image_size_jpeg_none_cases,
+               test_image_size_webp_vp8_lossy, test_image_size_webp_vp8l_lossless,
+               test_image_size_webp_vp8x_extended, test_image_size_unknown_or_garbage_is_none,
+               test_detail_helpers,
                # F8 review round 4
                test_translation_skip_reason, test_weight_kg, test_same_weight,
                test_variant_payload_weight_units, test_simple_changes_weight_units,
@@ -4607,7 +5034,11 @@ if __name__ == "__main__":
                test_create_weight_options_first_weighted_row,
                test_create_weight_none_without_any_weight,
                test_create_weight_rejects_non_positive_and_non_numbers,
-               test_product_payload_update_options_never_weight]:
+               test_product_payload_update_options_never_weight,
+               # F8 spike follow-up (review B1/S2/S3)
+               test_translation_payload_drops_en_without_ar, test_hide_marker_ref,
+               test_hide_marker_left, test_hide_marker_stale, test_writes_stock,
+               test_wizard_restore_and_hide_static]:
         fn()
         print(fn.__name__, "OK")
     print("all passed")
