@@ -1,0 +1,69 @@
+<odoo>
+    <data noupdate="0">
+        <!-- Daily, not on expiry: the 1-month refresh token lapses on a quiet store
+             that makes no API call, and then the app has to be reinstalled. -->
+        <record id="ir_cron_salla_refresh_tokens" model="ir.cron">
+            <field name="name">Salla: Refresh Tokens</field>
+            <field name="model_id" ref="model_salla_backend"/>
+            <field name="state">code</field>
+            <field name="code">model.cron_refresh_tokens()</field>
+            <field name="user_id" ref="base.user_root"/>
+            <field name="interval_number">1</field>
+            <field name="interval_type">days</field>
+            <field name="numbercall">-1</field>
+        </record>
+
+        <!-- Woken by every order webhook through _trigger(); the 30 min interval only
+             retries what is still pending (missing SKU, API errors). -->
+        <record id="ir_cron_salla_order_queue" model="ir.cron">
+            <field name="name">Salla: Process Order Queue</field>
+            <field name="model_id" ref="model_salla_backend"/>
+            <field name="state">code</field>
+            <field name="code">model.cron_process_order_queue()</field>
+            <field name="user_id" ref="base.user_root"/>
+            <field name="interval_number">30</field>
+            <field name="interval_type">minutes</field>
+            <field name="numbercall">-1</field>
+        </record>
+
+        <!-- Safety net: Salla drops a webhook after 3 failed deliveries. -->
+        <record id="ir_cron_salla_reconcile_orders" model="ir.cron">
+            <field name="name">Salla: Reconcile Orders</field>
+            <field name="model_id" ref="model_salla_backend"/>
+            <field name="state">code</field>
+            <field name="code">model.cron_reconcile_orders()</field>
+            <field name="user_id" ref="base.user_root"/>
+            <field name="interval_number">30</field>
+            <field name="interval_type">minutes</field>
+            <field name="numbercall">-1</field>
+        </record>
+
+        <!-- F3: woken by every validated WH/OUT through _trigger(); the 30 min interval
+             runs the retries (5 / 30 / 120 min after a failure). -->
+        <record id="ir_cron_salla_push_status" model="ir.cron">
+            <field name="name">Salla: Push Order Status</field>
+            <field name="model_id" ref="sale.model_sale_order"/>
+            <field name="state">code</field>
+            <field name="code">model.cron_salla_push_status()</field>
+            <field name="user_id" ref="base.user_root"/>
+            <field name="interval_number">30</field>
+            <field name="interval_type">minutes</field>
+            <field name="numbercall">-1</field>
+        </record>
+
+        <!-- F5: invoices confirmed by hand, payments of hand-posted invoices, and the
+             upload of ZATCA-accepted invoices / credit notes to Salla. Woken by every
+             posting and by the "Upload Invoice to Salla" button; the 30 min interval
+             re-checks ZATCA acceptance and runs the retries (5 / 30 / 120 min). -->
+        <record id="ir_cron_salla_invoices" model="ir.cron">
+            <field name="name">Salla: Invoices and Upload</field>
+            <field name="model_id" ref="account.model_account_move"/>
+            <field name="state">code</field>
+            <field name="code">model.cron_salla_invoices()</field>
+            <field name="user_id" ref="base.user_root"/>
+            <field name="interval_number">30</field>
+            <field name="interval_type">minutes</field>
+            <field name="numbercall">-1</field>
+        </record>
+    </data>
+</odoo>

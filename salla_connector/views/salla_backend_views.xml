@@ -1,0 +1,172 @@
+<odoo>
+    <data>
+        <record id="salla_backend_form" model="ir.ui.view">
+            <field name="name">salla.backend.form</field>
+            <field name="model">salla.backend</field>
+            <field name="arch" type="xml">
+                <form>
+                    <header>
+                        <button name="action_test_connection" type="object" string="Test Connection" class="btn-primary"/>
+                        <button name="action_check_products" type="object" string="Check Product SKUs"/>
+                        <button name="action_import_orders" type="object" string="Import Orders Now"
+                                groups="sales_team.group_sale_manager" invisible="not import_orders"/>
+                        <button name="action_process_order_queue" type="object" string="Process Order Queue"
+                                groups="sales_team.group_sale_manager" invisible="not import_orders"/>
+                        <button name="action_open_product_upload" type="object" string="Upload Products"
+                                groups="sales_team.group_sale_manager"/>
+                        <!-- System only: it spends the single-use refresh token. -->
+                        <button name="action_refresh_token" type="object" string="Refresh Token Now"
+                                groups="base.group_system"
+                                confirm="Refresh the Salla token now? Only needed if the daily cron is failing."/>
+                    </header>
+                    <sheet>
+                        <div class="oe_button_box" name="button_box">
+                            <button name="action_view_order_queue" type="object" class="oe_stat_button"
+                                    icon="fa-list">
+                                <field name="order_queue_count" widget="statinfo" string="Queued Orders"/>
+                            </button>
+                        </div>
+                        <widget name="web_ribbon" title="Archived" bg_color="bg-danger" invisible="active"/>
+                        <div class="oe_title">
+                            <label for="name"/>
+                            <h1><field name="name"/></h1>
+                        </div>
+                        <group>
+                            <group string="Salla App">
+                                <!-- Rebinding store/app is admin-only (enforced in write()
+                                     too); the sales team sees them read-only. -->
+                                <field name="store_id" groups="base.group_system"/>
+                                <field name="store_id" groups="!base.group_system" readonly="1"/>
+                                <field name="client_id" groups="base.group_system"/>
+                                <field name="client_id" groups="!base.group_system" readonly="1"/>
+                                <field name="client_secret" password="True" groups="base.group_system"/>
+                                <!-- System-only: these hosts receive the credentials. -->
+                                <field name="base_url" groups="base.group_system"/>
+                                <field name="token_url" groups="base.group_system"/>
+                            </group>
+                            <group string="Odoo Mapping">
+                                <field name="company_id" groups="base.group_multi_company"/>
+                                <!-- warehouse_id's domain reads company_id: Odoo 17 rejects the
+                                     view unless every user also gets it, so a hidden copy. -->
+                                <field name="company_id" invisible="1"/>
+                                <field name="warehouse_id"/>
+                                <field name="active" invisible="1"/>
+                                <!-- Header buttons read import_orders: same rule as company_id.
+                                     Read-only, or a non-admin's create would send its default
+                                     and hit _check_system_write. -->
+                                <field name="import_orders" invisible="1" readonly="1"/>
+                            </group>
+                            <group string="Authorization (filled by app.store.authorize)">
+                                <!-- Read-only even for admins: only the authorize webhook and
+                                     the refresh write these (raw SQL). An editable form can save
+                                     a stale, already-spent refresh token back over the live one,
+                                     which kills the app installation (seen on maintest). -->
+                                <field name="access_token" password="True" readonly="1" groups="base.group_system"/>
+                                <field name="refresh_token" password="True" readonly="1" groups="base.group_system"/>
+                                <field name="token_expires_at" groups="base.group_system"/>
+                                <field name="token_expires_at" groups="!base.group_system" readonly="1"/>
+                                <field name="token_scope"/>
+                            </group>
+                            <group string="Webhook">
+                                <field name="webhook_url" placeholder="https://…/sl/webhook" widget="CopyClipboardChar"/>
+                                <field name="webhook_secret" password="True" groups="base.group_system"/>
+                                <field name="log_payloads" groups="base.group_system"/>
+                            </group>
+                        </group>
+                        <group>
+                            <group string="Orders">
+                                <!-- Off = catalog-only backend (another connector imports the
+                                     store's orders). Admin-only write, enforced in write(). -->
+                                <field name="import_orders" groups="base.group_system"/>
+                                <field name="import_orders" groups="!base.group_system" readonly="1"/>
+                                <field name="website_id"/>
+                                <field name="pricelist_id"/>
+                                <field name="salesperson_id"/>
+                                <field name="auto_confirm"/>
+                                <field name="last_order_sync"/>
+                            </group>
+                            <group string="Order Lines">
+                                <!-- All three must carry the 15% sales tax, or the Odoo total
+                                     no longer equals what the customer paid on Salla. -->
+                                <field name="shipping_product_id"/>
+                                <field name="cod_product_id"/>
+                                <field name="discount_product_id"/>
+                            </group>
+                            <group string="Notifications">
+                                <field name="notify_user_ids" widget="many2many_tags"/>
+                                <field name="ops_alert_user_ids" widget="many2many_tags"/>
+                            </group>
+                            <group string="Order Status to Salla">
+                                <field name="send_status_sms"/>
+                            </group>
+                        </group>
+                        <!-- F5, proposal C: Odoo is the only ZATCA issuer; the customer gets
+                             the invoice through Salla only. -->
+                        <group>
+                            <group string="Invoices">
+                                <field name="auto_invoice"/>
+                                <field name="invoice_journal_id"/>
+                                <field name="invoice_from"/>
+                                <field name="accounting_alert_user_ids" widget="many2many_tags"/>
+                            </group>
+                            <group string="Upload to Salla">
+                                <field name="upload_invoices"/>
+                                <field name="require_zatca_before_upload"/>
+                            </group>
+                            <group string="Payments">
+                                <field name="salla_payments_journal_id"/>
+                                <field name="tabby_journal_id"/>
+                                <field name="tamara_journal_id"/>
+                                <field name="payment_method_overrides" placeholder="stc_pay = salla_payments"/>
+                            </group>
+                        </group>
+                    </sheet>
+                </form>
+            </field>
+        </record>
+
+        <record id="salla_backend_tree" model="ir.ui.view">
+            <field name="name">salla.backend.tree</field>
+            <field name="model">salla.backend</field>
+            <field name="arch" type="xml">
+                <tree>
+                    <field name="name"/>
+                    <field name="store_id"/>
+                    <field name="import_orders" optional="show"/>
+                    <field name="company_id" groups="base.group_multi_company"/>
+                    <field name="token_expires_at"/>
+                </tree>
+            </field>
+        </record>
+
+        <record id="salla_backend_action" model="ir.actions.act_window">
+            <field name="name">Salla Backends</field>
+            <field name="res_model">salla.backend</field>
+            <field name="view_mode">tree,form</field>
+        </record>
+
+        <!-- Section since F8 (Backends + Upload Products). On an upgraded database it
+             keeps its old action, which the navbar ignores for a menu with children. -->
+        <menuitem id="menu_salla_backend"
+                  name="Salla"
+                  parent="sale.menu_sale_config"
+                  sequence="91"/>
+        <menuitem id="menu_salla_backend_list"
+                  name="Backends"
+                  parent="menu_salla_backend"
+                  action="salla_backend_action"
+                  sequence="10"/>
+        <menuitem id="menu_salla_product_upload"
+                  name="Upload Products"
+                  parent="menu_salla_backend"
+                  action="salla_product_upload_action"
+                  groups="sales_team.group_sale_manager"
+                  sequence="20"/>
+        <menuitem id="menu_salla_product_hide"
+                  name="Products Kept Hidden"
+                  parent="menu_salla_backend"
+                  action="salla_product_hide_action"
+                  groups="base.group_system"
+                  sequence="30"/>
+    </data>
+</odoo>
