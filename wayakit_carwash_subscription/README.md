@@ -44,7 +44,13 @@ odoo-bin -c ../odoo.conf -d <db_de_prueba> -i wayakit_carwash_subscription --tes
 - **Cambio de plan al renovar** (por ejemplo, de Sedan a SUV o de Exterior a Full): la racha se reinicia, porque se cuenta por contrato original + producto.
 
 ## Pendientes fuera del código
-- Elegir entre 6 productos o variantes (Dalal/Sandra). El módulo funciona con cualquiera de las dos.
+- Decidido (2026-11-03): **6 productos** (sin variantes), agrupados en 2 categorías de eCommerce: *Regular Care* (4) y *Premium Care* (2).
+  Creados en producción (2026-11-04, KSA, servicio, 15% VAT, sin publicar):
+  `FP-CWS-00103` Regular Care Sedan (4 Exterior Washes) · `FP-CWS-00104` Regular Care Sedan (4 Full Washes) ·
+  `FP-CWS-00203` Regular Care SUV (4 Exterior Washes) · `FP-CWS-00204` Regular Care SUV (4 Full Washes) ·
+  `FP-CWS-00105` Premium Care Sedan · `FP-CWS-00205` Premium Care SUV.
+  Los cupones canjean los servicios sueltos `FP-CWS-00100/101/102` (Sedan) y `00200/201/202` (SUV).
+  Falta: categorías de eCommerce y la casilla de suscripción.
 - Crear el producto **Desinfectante 100 mL**, que no existe en KSA.
 - Confirmar que el proveedor de pago del website soporta **tokenización**. Si no la soporta, la renovación no se cobra sola y el cliente paga desde el portal.
 - Activar *Sales › Automatic Invoice*, porque sin factura pagada no se emite nada.
