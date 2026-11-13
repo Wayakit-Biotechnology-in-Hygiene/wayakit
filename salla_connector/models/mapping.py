@@ -1743,7 +1743,7 @@ UPLOAD_COLUMNS = [
     "option1_name_ar", "option1_name_en", "option2_name_ar", "option2_name_en",
     "option1_value_ar", "option1_value_en", "option2_value_ar", "option2_value_en",
     "price", "sale_price", "stock", "weight", "weight_unit", "barcode",
-] + ["image_%d" % i for i in range(1, 11)] + ["image_alt", "salla_product_id"]
+] + ["image_%d" % i for i in range(1, 11)] + ["image_alt", "variant_image", "salla_product_id"]
 UPLOAD_HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,60}$")
 UPLOAD_PRODUCT_TYPES = ("product", "group_products")
 UPLOAD_WEIGHT_UNITS = ("kg", "g")
@@ -2225,6 +2225,7 @@ def _new_upload_product(row, handle, option_slots, image_slots, max_options, max
     number = row.get("_row")
     product = {"handle": handle, "row": number, "parent_sku": "", "errors": [],
                "variants": [], "options": [], "images": [], "categories": [],
+               "option_images": [],
                "_first": {k: text(v) for k, v in row.items() if k != "_row"}}
     for key in _UPLOAD_TEXTS:
         product[key] = _pair(row, key)
@@ -2349,7 +2350,8 @@ def _upload_variant(row, product, option_slots, max_options):
         unit = "kg"
     return {"row": number, "sku": sku, "price": price, "sale_price": sale_price,
             "stock": stock, "weight": weight, "weight_unit": unit,
-            "barcode": text(row.get("barcode")), "values": values}
+            "barcode": text(row.get("barcode")), "values": values,
+            "image": text(row.get("variant_image"))}
 
 
 def _check_upload_product(product, warnings):
@@ -2364,6 +2366,7 @@ def _check_upload_product(product, warnings):
         warnings.append("%s: English name or description empty (Arabic only on Salla)"
                         % handle)
     variants = product["variants"]
+    _check_option_images(product, warnings)
     if not product["options"]:
         if variants and variants[0]["barcode"]:
             # Salla keeps barcodes on variants; a product without options has none.
@@ -2382,6 +2385,73 @@ def _check_upload_product(product, warnings):
                 variant["row"], seen[combo]))
         else:
             seen[combo] = variant["row"]
+
+
+def _check_option_images(product, warnings):
+    """variant_image = the photo of the row's option1 value (Size in Wave 1): Salla
+    links ONE gallery image per value of one option (spike 2026-11-13), so every row
+    of a value names the same file, and an option shown as image swatches needs a
+    photo for every value (no partial). The file must be one of image_1 ... image_10:
+    Salla links gallery images only, and the 10-image limit stays visible in the
+    sheet. Sets product["option_images"] = [(option1 Arabic value, file)] in sheet
+    order when the handle has photos and none of these errors."""
+    variants = product["variants"]
+    named = [v for v in variants if v["image"]]
+    if not named:
+        return
+    problems, handle = product["errors"], product["handle"]
+    if not product["options"]:
+        for variant in named:
+            problems.append("Row %s: variant_image needs option1 (it is the photo of an "
+                            "option1 value); a product without options shows image_1"
+                            % variant["row"])
+        return
+    if product["_slots"][:1] != [1]:
+        # Only option2 set: values[0] would be option2's, and every message says option1.
+        problems.append("Row %s: variant_image needs option1_name_ar (it is the photo of an "
+                        "option1 value)" % product["row"])
+        return
+    gallery = {_basename(name) for name in product["images"]}
+    first, order, ok = {}, [], True
+    for variant in variants:
+        ar = text(variant["values"][0].get("ar")) if variant["values"] else ""
+        key = norm_label(ar)
+        if not key:
+            continue                    # option1_value_ar missing: already an error
+        image = variant["image"]
+        if not image:
+            problems.append(
+                "Row %s: variant_image is empty: once a row of %s has one, every row "
+                "needs the photo of its option1 value (an image option cannot have a "
+                "value without a photo)" % (variant["row"], handle))
+            ok = False
+            continue
+        if _basename(image) not in gallery:
+            problems.append(
+                "Row %s: variant_image %s is not one of image_1 ... image_%s of %s: add "
+                "it to the gallery columns (Salla links a value to a gallery photo)" % (
+                    variant["row"], image, UPLOAD_MAX_IMAGES, handle))
+            ok = False
+        if key not in first:
+            first[key] = (variant["row"], image, ar)
+            order.append(key)
+        elif _basename(first[key][1]) != _basename(image):
+            problems.append(
+                "Row %s: variant_image %s differs from row %s (%s) for option1 value %s: "
+                "one photo per option1 value, the same on each of its rows" % (
+                    variant["row"], image, first[key][0], first[key][1], ar))
+            ok = False
+    if ok:
+        product["option_images"] = [(first[k][2], first[k][1]) for k in order]
+        # Allowed (two sizes may share a pack shot) but most likely a copy slip.
+        owner = {}
+        for key in order:
+            row, image, ar = first[key]
+            other = owner.setdefault(_basename(image), (row, ar))
+            if other[0] != row:
+                warnings.append("Row %s: option1 values %s and %s (row %s) have the same "
+                                "variant_image %s: both show that photo; check the sheet" % (
+                                    row, ar, other[1], other[0], image))
 
 
 def fmt_upload_number(value):
@@ -3060,19 +3130,233 @@ def option_translation_payloads(product, detail):
     return writes, skipped, unchanged
 
 
-def detail_option_name(detail, kind, item_id, lang="ar"):
-    """Name of the option (kind "option") or option value ("value") `item_id` in a
-    Salla product read with `lang`; None when it is not in the detail."""
+def _detail_item(detail, kind, item_id):
+    """The option (kind "option") or option value ("value") `item_id` of a Salla
+    product detail, None when absent."""
     item_id = clean_id(item_id)
+    if not item_id:
+        return None
     for option in _detail_options(detail):
         if kind == "option":
             if clean_id(option.get("id")) == item_id:
-                return _lang_label(option.get("name"), lang)
+                return option
             continue
         for value in _option_values(option):
             if clean_id(value.get("id")) == item_id:
-                return _lang_label(value.get("name"), lang)
+                return value
     return None
+
+
+def detail_option_name(detail, kind, item_id, lang="ar"):
+    """Name of the option (kind "option") or option value ("value") `item_id` in a
+    Salla product read with `lang`; None when it is not in the detail."""
+    item = _detail_item(detail, kind, item_id)
+    return None if item is None else _lang_label(item.get("name"), lang)
+
+
+def _image_sort(value):
+    """Gallery position of a Salla image (`sort`), None when not a whole number."""
+    found = ascii_digits(text(value))
+    # isdecimal, not isdigit: "²" is a digit that int() refuses.
+    return int(found) if found.isdecimal() else None
+
+
+def gallery_image_ids(images, existing, attached=None):
+    """Salla image id of each sheet gallery image -> ({basename: id}, reason).
+
+    existing = Salla's gallery (detail_images) BEFORE this run's attaches. As in
+    images_to_attach, those are the first images of the sheet, and the uploader POSTs
+    sheet image k with sort=k: sheet image k <-> the Salla image whose sort is k.
+    attached = {sort: id} of this run's POST /products/{id}/images answers (spike
+    2026-11-13: the same ids as the detail's images[]). The existing ones are never
+    guessed: more Salla images than sheet images, a missing id, or sorts that are not
+    exactly 1..N (an image deleted, added or moved by hand: ranking them would link the
+    wrong photo) leave them out and reason says why ("" otherwise). If Salla renumbers
+    the sorts after a delete, a delete cannot be seen here (doc §8)."""
+    names = [text(i) for i in images or [] if text(i)][:UPLOAD_MAX_IMAGES]
+    ids, reason = {}, ""
+    gallery = [i for i in existing or [] if isinstance(i, dict)]
+    if gallery:
+        sorts = [_image_sort(i.get("sort")) for i in gallery]
+        gids = [clean_id(i.get("id")) for i in gallery]
+        if len(gallery) > len(names):
+            reason = ("Salla has %s images and the sheet %s: which photo is which cannot "
+                      "be told; make the gallery in Salla match image_1..image_N" % (
+                          len(gallery), len(names)))
+        elif not all(gids) or len(set(gids)) < len(gids):
+            reason = ("Salla's images have no readable id: check that the gallery in Salla "
+                      "matches image_1..image_N")
+        elif sorted(s for s in sorts if s is not None) != list(range(1, len(gallery) + 1)) \
+                or None in sorts:
+            reason = ("Salla's images are not in the uploader's 1..%s order (deleted, added "
+                      "or moved by hand): which photo is which cannot be told; make the "
+                      "gallery in Salla match image_1..image_N" % len(gallery))
+        else:
+            for sort, gid in zip(sorts, gids):
+                ids[_basename(names[sort - 1])] = gid
+    for sort, gid in (attached or {}).items():
+        sort = _image_sort(sort)
+        if sort and sort <= len(names) and clean_id(gid):
+            ids[_basename(names[sort - 1])] = clean_id(gid)
+    return ids, reason
+
+
+def option_image_plan(product, detail, image_ids, pending=()):
+    """Photo per option1 value (variant_image) -> (option_write, value_writes,
+    linked, problems).
+
+    detail = the Salla product read with lang "ar" after the gallery attach (options
+    with display_type / display_value, images). image_ids = gallery_image_ids. pending
+    = files a dry run would attach first (no id yet): planned with body None, never
+    sent. option_write = (option id, {"name": <Salla's Arabic>, "display_type":
+    "image"}), None when Salla already shows it as images. value_writes = [(value id,
+    Arabic value, file, body)], body = {"name": <Salla's Arabic>, "display_value":
+    "<image id>"} (a string; spike 2026-11-13); a value whose display_value or
+    hashed_display_value already is that id is in linked [(Arabic value, file)].
+    Never "values" in the option body (Salla rebuilds the variants), never price /
+    quantity in a value body. Matching by Arabic name (norm_label), like
+    match_variants. Any problem (option1 or a value missing or matching twice in
+    Salla, a Salla value with no photo in the sheet, an image id unknown or not in
+    the gallery) -> (None, [], linked, problems): nothing is written for the product,
+    an image option must not end up with a value lacking its photo."""
+    links = (product or {}).get("option_images") or []
+    options = (product or {}).get("options") or []
+    if not links or not options:
+        return None, [], [], []
+    option_ar = text(options[0].get("ar"))
+    label = "option1 %s" % option_ar
+    hits = [o for o in _detail_options(detail)
+            if norm_label(_lang_label(o.get("name"))) == norm_label(option_ar)]
+    if len(hits) != 1:
+        return None, [], [], ["%s: %s" % (label, "not in the Salla product" if not hits
+                                         else "matches %s Salla options" % len(hits))]
+    option = hits[0]
+    option_id, option_name = clean_id(option.get("id")), _lang_label(option.get("name"))
+    if not option_id or not option_name:
+        return None, [], [], ["%s: the Salla option has no id or Arabic name" % label]
+    gallery = {clean_id(i.get("id")) for i in detail_images(detail)} - {""}
+    pending = {_basename(name) for name in pending or ()}
+    values = _option_values(option)
+    writes, linked, problems, covered = [], [], [], set()
+    for ar, name in links:
+        where = "option1 value %s" % ar
+        found = [v for v in values if norm_label(_lang_label(v.get("name"))) == norm_label(ar)]
+        # Every match has this row: an ambiguous pair is not also "without a row".
+        covered.update(id(v) for v in found)
+        if len(found) != 1:
+            problems.append("%s: %s" % (where, "not in the Salla option" if not found
+                                        else "matches %s Salla values" % len(found)))
+            continue
+        value = found[0]
+        value_id, value_name = clean_id(value.get("id")), _lang_label(value.get("name"))
+        if not value_id or not value_name:
+            problems.append("%s: the Salla value has no id or Arabic name" % where)
+            continue
+        image_id = clean_id((image_ids or {}).get(_basename(name)))
+        if not image_id:
+            if _basename(name) in pending:
+                writes.append((value_id, ar, name, None))
+            else:
+                problems.append("%s: no Salla image id for %s (not attached, or Salla's "
+                                "answer had no id: see the image messages, then re-upload "
+                                "the images with Images Only)" % (where, name))
+            continue
+        if image_id not in gallery:
+            problems.append("%s: image #%s (%s) is not in the Salla gallery (check that "
+                            "the gallery in Salla matches image_1..image_N, then run "
+                            "Images Only again)" % (where, image_id, name))
+            continue
+        if image_id in (clean_id(value.get("display_value")),
+                        clean_id(value.get("hashed_display_value"))):
+            linked.append((ar, name))
+            continue
+        writes.append((value_id, ar, name, {"name": value_name, "display_value": image_id}))
+    for value in values:
+        if id(value) not in covered:
+            problems.append("%s: Salla value %s has no variant_image row (an image option "
+                            "needs a photo for every value)" % (
+                                label, _lang_label(value.get("name"))
+                                or "#%s" % clean_id(value.get("id"))))
+    if problems:
+        return None, [], linked, problems
+    option_write = None
+    if text(option.get("display_type")).lower() != "image":
+        option_write = (option_id, {"name": option_name, "display_type": "image"})
+    return option_write, writes, linked, problems
+
+
+def option_english_lost(before, after, written):
+    """What the photo-link PUTs changed in the names -> (restores, unknown, arabic).
+
+    Not tested on the demo (2026-11-13): whether PUT {name, display_type} /
+    {name, display_value} keeps the English of the option / value. before / after =
+    the product read with lang "ar" and ?with=translations right before and after
+    those PUTs; written = [(kind, id)] that were (or may have been) PUT. Over-including
+    is harmless: only a real change acts.
+    - restores = [(kind, id, {"name": <the Arabic BEFORE>, "translations": {"en":
+      {OPTION_EN_KEYS[kind]: <the English before>}}})] for an English that existed
+      before and is gone or different after (the v17.0.5.0.2 path, lang ar). The
+      Arabic comes from `before`: a moved Arabic is never written back as if right.
+    - unknown = [(kind, id, English before)]: missing from `after` or without an
+      Arabic name there; checked by hand.
+    - arabic = [(kind, id, Arabic before, Arabic after)] whose Arabic moved and that
+      are NOT in restores (a restore already puts the Arabic back): the caller puts
+      {"name": <Arabic before>} back, as _option_english_kept does.
+    No English before -> no restore (Salla's own English, not the sheet's, is what
+    gets put back)."""
+    restores, unknown, arabic = [], [], []
+    for kind, item_id in written or []:
+        if kind not in OPTION_EN_KEYS:
+            continue
+        old = _detail_item(before, kind, item_id)
+        old_name = _lang_label(old.get("name")) if old else ""
+        if not old_name:
+            continue                        # nothing known to compare or put back
+        english = _current_english(old, kind)
+        new = _detail_item(after, kind, item_id)
+        name = _lang_label(new.get("name")) if new else ""
+        if not name:
+            if english:
+                unknown.append((kind, clean_id(item_id), english))
+            continue
+        if english and norm_label(_current_english(new, kind)) != norm_label(english):
+            restores.append((kind, clean_id(item_id), {
+                "name": old_name, "translations": {"en": {OPTION_EN_KEYS[kind]: english}}}))
+        elif norm_label(name) != norm_label(old_name):
+            arabic.append((kind, clean_id(item_id), old_name, name))
+    return restores, unknown, arabic
+
+
+def option_image_lost(detail, option_id, links):
+    """Photo links missing in `detail` (a lang "ar" read) -> [str].
+
+    option_id = option1's id, which must show display_type "image" ("" = not checked:
+    the option was put back to text); links = [(value id, image id, label)] that must
+    still carry the image id (display_value or hashed_display_value). Used after the
+    names are put back: those PUTs carry neither field, and might drop them as the
+    link PUT might drop the English."""
+    lost = []
+    option = _detail_item(detail, "option", option_id) if clean_id(option_id) else None
+    if clean_id(option_id) and option is None:
+        lost.append("option #%s not in Salla's answer" % clean_id(option_id))
+    elif option is not None and text(option.get("display_type")).lower() != "image":
+        lost.append("option %s is no longer image swatches (%s)" % (
+            _lang_label(option.get("name")) or "#%s" % clean_id(option_id),
+            text(option.get("display_type")) or "?"))
+    for value_id, image_id, label in links or []:
+        value = _detail_item(detail, "value", value_id)
+        if value is None:
+            lost.append("value %s not in Salla's answer" % label)
+        elif clean_id(image_id) not in (clean_id(value.get("display_value")),
+                                        clean_id(value.get("hashed_display_value"))):
+            lost.append("value %s lost its photo" % label)
+    return lost
+
+
+def option_display_type(detail, option_id):
+    """display_type of an option in a Salla product detail, "" when unknown."""
+    option = _detail_item(detail, "option", option_id)
+    return text(option.get("display_type")).lower() if option else ""
 
 
 # JPEG start-of-frame markers (baseline, progressive, lossless...): they carry the size.

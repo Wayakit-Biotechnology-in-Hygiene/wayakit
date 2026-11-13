@@ -3912,6 +3912,11 @@ def _assigned_from_option_path(fn, name):
                for n in ast.walk(fn))
 
 
+# The mapping functions allowed to build a PUT body for /products/options[/values]/{id}.
+_OPTION_BODY_BUILDERS = ("option_translation_payloads", "option_image_plan",
+                         "option_english_lost")
+
+
 def _str_constants(node):
     return [n.value for n in ast.walk(node)
             if isinstance(n, ast.Constant) and isinstance(n.value, str)]
@@ -3954,9 +3959,30 @@ def test_option_en_writes_lang_ar_translations_only():
             assert keys == {"name"}, ("option restore body", keys)
         else:                                    # the write: body built by the mapping
             assert isinstance(payload, ast.Name), ast.unparse(call)
-            assert "option_translation_payloads" in ast.unparse(fn), fn.name
-    # the translations write + the Arabic restore
-    assert len(option_calls) >= 2, [ast.unparse(c) for c in option_calls]
+            # v17.0.5.1.0: also the photo-per-size bodies (option_image_plan: option
+            # {name, display_type} / value {name, display_value}) and the English
+            # restores after the link (option_english_lost). Their exact keys (never
+            # "values", Salla's Arabic in "name") are asserted on the mapping in
+            # test_option_image_plan_* / test_option_english_lost_*.
+            # A hand-made dict bound to that name is allowed for ONE shape only: the
+            # revert of option1 to its previous type after every value photo was
+            # refused ({name, display_type}, _revert_option_display).
+            literals = [node.value for node in ast.walk(fn)
+                        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict)
+                        and any(isinstance(t, ast.Name) and t.id == payload.id
+                                for t in node.targets)]
+            if literals:
+                for literal in literals:
+                    keys = {k.value for k in literal.keys if isinstance(k, ast.Constant)}
+                    assert keys == {"name", "display_type"} and None not in literal.keys, \
+                        ("hand-made option body", fn.name, ast.unparse(literal))
+                    assert "image" not in _str_constants(literal), ast.unparse(literal)
+            else:
+                builders = [b for b in _OPTION_BODY_BUILDERS
+                            if "mapping.%s(" % b in ast.unparse(fn)]
+                assert builders, ("option PUT body not built by the mapping", fn.name)
+    # the translations write + the Arabic restore + the photo links + the EN restores
+    assert len(option_calls) >= 4, [ast.unparse(c) for c in option_calls]
     # every _option_path use is the path of one of those calls, or assigned to a name
     # that is (path = self._option_path(...); _request("PUT", path, lang="ar", ...))
     for use in (n for n in ast.walk(tree) if _is_option_path_call(n)):
@@ -3974,8 +4000,10 @@ def test_option_en_writes_lang_ar_translations_only():
                        if isinstance(n, ast.FunctionDef) and n.name == "_option_path")
     paths = {c for c in _str_constants(option_path) if "/" in c}
     assert paths == {"/products/options/%s", "/products/options/values/%s"}, paths
-    # the option English code never names values / price / quantity / status
-    for name in ("_apply_option_english", "_option_english_kept", "_option_path"):
+    # the option English / photo code never names values / price / quantity / status
+    for name in ("_apply_option_english", "_option_english_kept", "_option_path",
+                 "_apply_option_images", "_link_option_images", "_recheck_option_english",
+                 "_plan_option_images"):
         fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
         for c in _str_constants(fn):
             assert c not in ("values", "price", "quantity", "sale_price", "status"), (name, c)
@@ -5228,6 +5256,679 @@ def test_wizard_restore_and_hide_static():
     assert create_src.index("_mark(") < create_src.index('"POST", "/products"')
 
 
+# --- F8 photo per size (variant_image, v17.0.5.1.0, spike 2026-11-13) ------------------------
+
+_OI_500, _OI_1L = "fake-fc-500.jpg", "fake-fc-1l.jpg"
+_OI_SKIP = object()
+# Exact texts (mapping.py, doc §5 step 7b / §8)
+_OI_NO_ID = ("option1 value %s: no Salla image id for %s (not attached, or Salla's answer had "
+             "no id: see the image messages, then re-upload the images with Images Only)")
+_OI_NOT_IN_GALLERY = ("option1 value %s: image #%s (%s) is not in the Salla gallery (check "
+                      "that the gallery in Salla matches image_1..image_N, then run Images "
+                      "Only again)")
+_GALLERY_TOO_MANY = ("Salla has %s images and the sheet %s: which photo is which cannot be "
+                     "told; make the gallery in Salla match image_1..image_N")
+_GALLERY_NO_ID = ("Salla's images have no readable id: check that the gallery in Salla "
+                  "matches image_1..image_N")
+_GALLERY_ORDER = ("Salla's images are not in the uploader's 1..%s order (deleted, added or "
+                  "moved by hand): which photo is which cannot be told; make the gallery in "
+                  "Salla match image_1..image_N")
+
+
+def _oi_rows(images=(_OI_500, _OI_500, _OI_1L, _OI_1L), **first):
+    """_options_rows() (rows 2-5: 500/lavender, 500/lemon, 1 L/lavender, 1 L/lemon) with
+    the two pack shots as image_3 / image_4 and one variant_image per row (_OI_SKIP =
+    no variant_image key on that row)."""
+    rows = _options_rows()
+    rows[0].update(image_3=_OI_500, image_4=_OI_1L)
+    rows[0].update(first)
+    for row, image in zip(rows, images):
+        if image is not _OI_SKIP:
+            row["variant_image"] = image
+    return rows
+
+
+def _oi_detail(display_type="text", count=4, **over):
+    """Salla detail (lang ar) of the fake floor cleaner with `count` gallery images,
+    ids 9001.. (ints, as Salla answers) at sort 1.., matching the sheet images."""
+    detail = _fc_detail(**over)
+    detail["options"][0]["display_type"] = display_type
+    detail["options"][1]["display_type"] = "text"
+    detail["images"] = [{"id": 9001 + i, "sort": i + 1, "main": i == 0,
+                         "url": "https://example.invalid/fake-%d.jpg" % i, "alt": ""}
+                        for i in range(count)]
+    return detail
+
+
+def _oi_plan(product, detail, attached=None, pending=()):
+    ids, reason = mapping.gallery_image_ids(product["images"], mapping.detail_images(detail),
+                                            attached)
+    return mapping.option_image_plan(product, detail, ids, pending), reason
+
+
+def _assert_link_bodies(option_write, writes):
+    """Option body = {name, display_type: image}; value body = {name, display_value:
+    "<id>" (a string)}; never values / price / quantity (Salla rebuilds the variants)."""
+    if option_write:
+        assert set(option_write[1]) == {"name", "display_type"}, option_write
+        assert option_write[1]["display_type"] == "image", option_write
+    for value_id, ar, name, body in writes:
+        assert isinstance(value_id, str) and value_id, writes
+        if body is None:                         # dry-run pending: never sent
+            continue
+        assert set(body) == {"name", "display_value"}, body
+        assert isinstance(body["display_value"], str) and body["display_value"].isdigit(), body
+
+
+def test_upload_columns_variant_image_and_template():
+    assert "variant_image" in mapping.UPLOAD_COLUMNS
+    # a known, variant-level column: no unknown-column warning, later rows may differ
+    by, errors, warnings, products = _parse(_oi_rows())
+    assert not _all_errors(products, errors), _all_errors(products, errors)
+    assert not any("unknown columns" in w for w in warnings), warnings
+    # the column is optional: without it, nothing to link and no error
+    p = _p(_options_rows(), _FC)
+    assert p["option_images"] == [] and all(v["image"] == "" for v in p["variants"]), p
+    # the Download Template examples parse cleanly and the options example links its sizes
+    tree = _wizard_tree()
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_template_xlsx")
+    examples = next(ast.literal_eval(a.value) for a in ast.walk(fn)
+                    if isinstance(a, ast.Assign) and any(
+                        isinstance(t, ast.Name) and t.id == "examples" for t in a.targets))
+    rows = [dict(e, _row=i) for i, e in enumerate(examples, start=2)]
+    by, errors, warnings, products = _parse(rows)
+    assert not _all_errors(products, errors), _all_errors(products, errors)
+    assert by["example-options"]["option_images"] == [
+        ("500 مل", "example-options-500ml.jpg"), ("1 لتر", "example-options-1l.jpg")], \
+        by["example-options"]["option_images"]
+    assert by["example-simple"]["option_images"] == []
+    src, _ = _wizard_requests()
+    help_src = src[src.index("TEMPLATE_HELP = ("):src.index("\n)\n", src.index("TEMPLATE_HELP"))]
+    assert '("variant_image", "variant", "no",' in help_src
+
+
+def test_option_images_happy_path():
+    p = _p(_oi_rows(), _FC)
+    # one (option1 Arabic value, file) per value, in sheet order, each value once
+    assert p["option_images"] == [("500 مل", _OI_500), ("1 لتر", _OI_1L)], p["option_images"]
+    assert [v["image"] for v in p["variants"]] == [_OI_500, _OI_500, _OI_1L, _OI_1L]
+    # one-option product (Size only): same
+    rows = _oi_rows()
+    for row in rows:
+        for key in ("option2_name_ar", "option2_name_en", "option2_value_ar",
+                    "option2_value_en"):
+            row.pop(key, None)
+    rows = [rows[0], rows[2]]
+    rows[1]["_row"] = 3
+    p = _p(rows, _FC)
+    assert len(p["options"]) == 1 and p["option_images"] == [
+        ("500 مل", _OI_500), ("1 لتر", _OI_1L)], p["option_images"]
+    # the photo can be any gallery image, the main one included (spike: sort 1 works)
+    p = _p(_oi_rows(images=("fake-fc-1.jpg",) * 2 + ("fake-fc-2.webp",) * 2), _FC)
+    assert p["option_images"] == [("500 مل", "fake-fc-1.jpg"), ("1 لتر", "fake-fc-2.webp")]
+    # a blank / whitespace-only cell on EVERY row = no photos at all, not an error
+    p = _p(_oi_rows(images=("", " ", "", "  ")), _FC)
+    assert p["option_images"] == [], p["option_images"]
+
+
+def test_option_images_without_options_error():
+    by, errors, _, products = _parse(_simple_rows(image_1="fake-gc-1.jpg",
+                                                  variant_image="fake-gc-1.jpg"))
+    p = by["fake-glass-cleaner"]
+    assert _blocked(by, "fake-glass-cleaner")
+    assert "Row 2: variant_image needs option1 (it is the photo of an option1 value); a " \
+           "product without options shows image_1" in p["errors"], p["errors"]
+    assert p["option_images"] == []
+    # also in the global errors (blocks the handle in apply)
+    assert any(e.startswith("Row 2: variant_image needs option1") for e in errors), errors
+
+
+def test_option_images_option2_only_error():
+    # Only option2 set: values[0] would be option2's (Scent), and every message says
+    # option1 -> one error on the handle's first row, nothing to link
+    rows = _oi_rows()
+    for row in rows:
+        for lang in ("ar", "en"):
+            if "option1_name_" + lang in row:
+                row["option2_name_" + lang] = row.pop("option1_name_" + lang) + "x"
+        row.pop("option1_value_ar"), row.pop("option1_value_en")
+    rows[0]["option2_name_ar"], rows[0]["option2_name_en"] = "الرائحة", "Scent"
+    for row, scent in zip(rows, ("لافندر", "ليمون", "نعناع", "ورد")):
+        row["option2_value_ar"] = scent
+    by, errors, _, _ = _parse(rows)
+    p = by[_FC]
+    assert [o["ar"] for o in p["options"]] == ["الرائحة"], p["options"]
+    assert _blocked(by, _FC) and p["option_images"] == []
+    msg = "Row 2: variant_image needs option1_name_ar (it is the photo of an option1 value)"
+    assert [e for e in p["errors"] if "variant_image" in e] == [msg], p["errors"]
+    assert msg in errors
+
+
+def test_option_images_shared_file_warning():
+    # Two different option1 values with the same file: allowed (both show that photo),
+    # but a warning on the later value's first row, never an error
+    by, errors, warnings, products = _parse(_oi_rows(
+        images=(_OI_500, _OI_500, "Wave1/FAKE-FC-500.JPG", _OI_500)))
+    assert not _all_errors(products, errors), _all_errors(products, errors)
+    assert [w for w in warnings if "variant_image" in w] == [
+        "Row 4: option1 values 1 لتر and 500 مل (row 2) have the same variant_image "
+        "Wave1/FAKE-FC-500.JPG: both show that photo; check the sheet"], warnings
+    assert by[_FC]["option_images"] == [("500 مل", _OI_500),
+                                        ("1 لتر", "Wave1/FAKE-FC-500.JPG")]
+    # three values on one file: one warning per later value, each naming the first
+    rows = _oi_rows(images=(_OI_500,) * 4)
+    rows += [_r(6, handle=_FC, sku="FAKE-FC-005", option1_value_ar="2 لتر",
+                option2_value_ar="لافندر", price="60", stock="7", variant_image=_OI_500)]
+    by, errors, warnings, products = _parse(rows)
+    assert not _all_errors(products, errors), _all_errors(products, errors)
+    shared = [w for w in warnings if "same variant_image" in w]
+    assert shared == [
+        "Row 4: option1 values 1 لتر and 500 مل (row 2) have the same variant_image "
+        "fake-fc-500.jpg: both show that photo; check the sheet",
+        "Row 6: option1 values 2 لتر and 500 مل (row 2) have the same variant_image "
+        "fake-fc-500.jpg: both show that photo; check the sheet"], shared
+    # distinct files (the normal sheet): no such warning
+    _, _, warnings, _ = _parse(_oi_rows())
+    assert not [w for w in warnings if "variant_image" in w], warnings
+
+
+def test_option_images_partial_error():
+    # one row of 500 مل without its photo: error on that row, nothing to link
+    by, errors, _, _ = _parse(_oi_rows(images=(_OI_500, "", _OI_1L, _OI_1L)))
+    p = by[_FC]
+    assert _blocked(by, _FC) and p["option_images"] == []
+    msg = ("Row 3: variant_image is empty: once a row of fake-floor-cleaner has one, every "
+           "row needs the photo of its option1 value (an image option cannot have a value "
+           "without a photo)")
+    assert msg in p["errors"] and msg in errors, p["errors"]
+    assert len([e for e in p["errors"] if "variant_image" in e]) == 1, p["errors"]
+    # a whole value without photo (both 1 L rows, one with no cell at all): one error per row
+    by, _, _, _ = _parse(_oi_rows(images=(_OI_500, _OI_500, "", _OI_SKIP)))
+    p = by[_FC]
+    assert _blocked(by, _FC) and p["option_images"] == []
+    empty = [e for e in p["errors"] if "variant_image is empty" in e]
+    assert _err_at(empty, rows=(4,)) and _err_at(empty, rows=(5,)) and len(empty) == 2, empty
+
+
+def test_option_images_same_value_different_files_error():
+    by, errors, _, _ = _parse(_oi_rows(images=(_OI_500, _OI_1L, _OI_1L, _OI_1L)))
+    p = by[_FC]
+    assert _blocked(by, _FC) and p["option_images"] == []
+    msg = ("Row 3: variant_image fake-fc-1l.jpg differs from row 2 (fake-fc-500.jpg) for "
+           "option1 value 500 مل: one photo per option1 value, the same on each of its rows")
+    assert msg in p["errors"], p["errors"]
+    # the same value spelled with Arabic-Indic digits is the same value (norm_label)
+    rows = _oi_rows(images=(_OI_500, _OI_1L, _OI_1L, _OI_1L))
+    rows[1]["option1_value_ar"] = "٥٠٠ مل"
+    by, _, _, _ = _parse(rows)
+    assert any(e.startswith("Row 3: variant_image fake-fc-1l.jpg differs from row 2")
+               for e in by[_FC]["errors"]), by[_FC]["errors"]
+
+
+def test_option_images_file_not_in_gallery_error():
+    by, errors, _, _ = _parse(_oi_rows(images=(_OI_500, _OI_500, "fake-fc-zip-only.jpg",
+                                               "fake-fc-zip-only.jpg")))
+    p = by[_FC]
+    assert _blocked(by, _FC) and p["option_images"] == []
+    msg = ("Row 4: variant_image fake-fc-zip-only.jpg is not one of image_1 ... image_10 of "
+           "fake-floor-cleaner: add it to the gallery columns (Salla links a value to a "
+           "gallery photo)")
+    assert msg in p["errors"], p["errors"]
+    assert _err_at([e for e in p["errors"] if "is not one of image_1" in e], rows=(5,))
+    # a gallery image of ANOTHER handle does not count
+    rows = _oi_rows(images=("fake-gc-1.jpg",) * 4) + _simple_rows(
+        _row=6, image_1="fake-gc-1.jpg")
+    by, _, _, _ = _parse(rows)
+    assert _blocked(by, _FC) and not _blocked(by, "fake-glass-cleaner")
+    assert any("variant_image fake-gc-1.jpg is not one of image_1" in e
+               for e in by[_FC]["errors"]), by[_FC]["errors"]
+
+
+def test_option_images_case_insensitive_basename_ok():
+    # Basename compared lower-case (as the ZIP lookup): a folder and capitals are fine,
+    # and rows of one value may spell the file differently
+    rows = _oi_rows(images=("Wave1/FAKE-FC-500.JPG", _OI_500, "fake-fc-1L.jpg",
+                            "wave1\\Fake-FC-1l.JPG"))
+    p = _p(rows, _FC)
+    assert p["option_images"] == [("500 مل", "Wave1/FAKE-FC-500.JPG"),
+                                  ("1 لتر", "fake-fc-1L.jpg")], p["option_images"]
+    # ... and the plan still finds their Salla ids (keys are the lower-case basename)
+    (option_write, writes, linked, problems), reason = _oi_plan(p, _oi_detail())
+    assert problems == [] and reason == "", problems
+    assert [(i, b["display_value"]) for i, ar, n, b in writes] == [("111", "9003"),
+                                                                  ("112", "9004")], writes
+
+
+def test_gallery_image_ids_position_mapping():
+    names = ["fake-1.jpg", "Wave1/FAKE-2.JPG", "fake-3.webp", "fake-4.jpg"]
+    # sheet image k <-> the Salla image whose sort is k; Salla's list out of order, sorts
+    # as strings / Arabic-Indic digits
+    existing = [{"id": "7702", "sort": "2"}, {"id": 7701, "sort": 1}, {"id": 7703, "sort": "٣"}]
+    ids, reason = mapping.gallery_image_ids(names, existing)
+    assert reason == "" and ids == {"fake-1.jpg": "7701", "fake-2.jpg": "7702",
+                                    "fake-3.webp": "7703"}, (ids, reason)
+    # this run's attaches: {sort: answer id} -> sheet image `sort` (1-based)
+    ids, reason = mapping.gallery_image_ids(
+        names, [{"id": 7701, "sort": 1}, {"id": 7702, "sort": 2}], {3: 7703, "4": "7704"})
+    assert reason == "" and ids == {"fake-1.jpg": "7701", "fake-2.jpg": "7702",
+                                    "fake-3.webp": "7703", "fake-4.jpg": "7704"}, ids
+    # a brand-new product: only the attaches
+    ids, reason = mapping.gallery_image_ids(names, [], {1: 1, 2: 2, 3: 3, 4: 4})
+    assert reason == "" and sorted(ids.values()) == ["1", "2", "3", "4"], ids
+    # Salla's gallery as long as the sheet: every image mapped
+    full = [{"id": 7701 + i, "sort": i + 1} for i in range(4)]
+    ids, reason = mapping.gallery_image_ids(names, full)
+    assert reason == "" and len(ids) == 4 and ids["fake-4.jpg"] == "7704", ids
+    # nothing / garbage never raises
+    assert mapping.gallery_image_ids(None, None, None) == ({}, "")
+    assert mapping.gallery_image_ids(names, ["x", None, 3]) == ({}, "")
+    # only the first 10 sheet images count (Salla's limit): an attach at sort 11 is ignored
+    many = ["fake-%d.jpg" % i for i in range(1, 13)]
+    ids, _ = mapping.gallery_image_ids(many, [], {10: 10, 11: 11})
+    assert ids == {"fake-10.jpg": "10"}, ids
+
+
+def test_gallery_image_ids_never_guess():
+    names = ["fake-1.jpg", "fake-2.jpg", "fake-3.jpg"]
+    good = [{"id": 7701, "sort": 1}, {"id": 7702, "sort": 2}]
+    # more Salla images than the sheet: which photo is which cannot be told
+    ids, reason = mapping.gallery_image_ids(names[:2], good + [{"id": 7703, "sort": 3}])
+    assert ids == {} and reason == _GALLERY_TOO_MANY % (3, 2), (ids, reason)
+    no_id = [[{"id": 7701, "sort": 1}, {"sort": 2}],                     # missing id
+             [{"id": 7701, "sort": 1}, {"id": "None", "sort": 2}],       # literal None id
+             [{"id": 7701, "sort": 1}, {"id": 7701, "sort": 2}]]         # duplicate id
+    # review B2: sorts must be exactly 1..N (a hand delete leaves a gap, a hand add or
+    # move shifts them): ranking them would link the wrong photo
+    order = [[{"id": 7701}, {"id": 7702, "sort": 2}],                    # missing sort
+             [{"id": 7701, "sort": 1}, {"id": 7702, "sort": 1}],         # duplicate sort
+             [{"id": 7701, "sort": 1}, {"id": 7702, "sort": 3}],         # gap (2 deleted)
+             [{"id": 7701, "sort": 0}, {"id": 7702, "sort": 1}],         # 0-based
+             [{"id": 7701, "sort": 2}, {"id": 7702, "sort": 3}],         # 1 deleted
+             [{"id": 7701, "sort": "1.5"}, {"id": 7702, "sort": 2}],     # not whole
+             [{"id": 7701, "sort": "abc"}, {"id": 7702, "sort": 2}],
+             [{"id": 7701, "sort": -1}, {"id": 7702, "sort": 2}],
+             [{"id": 7701, "sort": "²"}, {"id": 7702, "sort": 2}],       # digit int() refuses
+             [{"id": 7701, "sort": True}, {"id": 7702, "sort": 2}],
+             [{"id": 7701, "sort": None}, {"id": 7702, "sort": 2}]]
+    for bad, expected in [(b, _GALLERY_NO_ID) for b in no_id] + \
+            [(b, _GALLERY_ORDER % 2) for b in order]:
+        ids, reason = mapping.gallery_image_ids(names, bad)
+        assert ids == {} and reason == expected, (bad, ids, reason)
+        # the attaches of this run still map (their ids come from the answer)
+        ids, reason = mapping.gallery_image_ids(names, bad, {3: 7709})
+        assert ids == {"fake-3.jpg": "7709"} and reason == expected, (bad, ids)
+    # an attach whose answer had no id, or whose outcome is unknown (not in `attached`),
+    # leaves that image without an id: never taken from its sort
+    for attached in ({3: ""}, {3: None}, {3: "None"}, {3: "null"}, {}, None):
+        ids, reason = mapping.gallery_image_ids(names, good, attached)
+        assert ids == {"fake-1.jpg": "7701", "fake-2.jpg": "7702"} and reason == "", \
+            (attached, ids)
+    # attach sorts that point at no sheet image are ignored
+    for attached in ({0: 1}, {4: 1}, {"abc": 1}, {"": 1}, {None: 1}, {-1: 1}, {"²": 1}):
+        ids, _ = mapping.gallery_image_ids(names, [], attached)
+        assert ids == {}, (attached, ids)
+
+
+def test_option_image_plan_writes():
+    p = _p(_oi_rows(), _FC)
+    (option_write, writes, linked, problems), reason = _oi_plan(p, _oi_detail())
+    assert problems == [] and linked == [] and reason == "", problems
+    assert option_write == ("11", {"name": "الحجم", "display_type": "image"}), option_write
+    assert writes == [
+        ("111", "500 مل", _OI_500, {"name": "500 مل", "display_value": "9003"}),
+        ("112", "1 لتر", _OI_1L, {"name": "1 لتر", "display_value": "9004"}),
+    ], writes
+    _assert_link_bodies(option_write, writes)
+    # option2 (Scent) is never touched
+    assert all(i not in ("22", "221", "222") for i, *_ in writes)
+    # Salla's Arabic goes in "name", never the sheet's spelling (no Arabic overwrite)
+    detail = _oi_detail()
+    detail["options"][0]["name"] = "  الحجم "
+    detail["options"][0]["values"][0]["name"] = "٥٠٠ مل"
+    detail["options"][0]["values"][1]["name"] = {"ar": "1  لتر", "en": "1 L"}
+    (option_write, writes, _, problems), _ = _oi_plan(p, detail)
+    assert problems == [], problems
+    assert option_write[1]["name"] == "الحجم", option_write          # text() strips
+    assert [b["name"] for i, ar, n, b in writes] == ["٥٠٠ مل", "1  لتر"], writes
+    # option already shown as images (any case): no option write, the values still go
+    for shown in ("image", "Image", " IMAGE "):
+        (option_write, writes, _, problems), _ = _oi_plan(p, _oi_detail(display_type=shown))
+        assert option_write is None and len(writes) == 2 and problems == [], (shown, writes)
+    # this run's attaches (Apply): gallery had 2, the pack shots answered 9003 / 9004
+    before = _oi_detail(count=2)
+    ids, reason = mapping.gallery_image_ids(p["images"], mapping.detail_images(before),
+                                            {3: 9003, 4: 9004})
+    plan = mapping.option_image_plan(p, _oi_detail(), ids)
+    assert [b["display_value"] for i, a, n, b in plan[1]] == ["9003", "9004"], plan
+
+
+def test_option_image_plan_already_linked():
+    p = _p(_oi_rows(), _FC)
+    detail = _oi_detail(display_type="image")
+    detail["options"][0]["values"][0]["display_value"] = 9003            # int, as read back
+    detail["options"][0]["values"][1]["hashed_display_value"] = "9004"
+    (option_write, writes, linked, problems), _ = _oi_plan(p, detail)
+    assert (option_write, writes, problems) == (None, [], []), (option_write, writes)
+    assert linked == [("500 مل", _OI_500), ("1 لتر", _OI_1L)], linked
+    # one linked, one not: only the other is written
+    detail["options"][0]["values"][1].pop("hashed_display_value")
+    (option_write, writes, linked, problems), _ = _oi_plan(p, detail)
+    assert option_write is None and problems == [], problems
+    assert linked == [("500 مل", _OI_500)] and [w[0] for w in writes] == ["112"], writes
+    # linked to ANOTHER gallery image: re-linked to the sheet's
+    detail["options"][0]["values"][0]["display_value"] = 9001
+    (option_write, writes, linked, problems), _ = _oi_plan(p, detail)
+    assert linked == [] and [w[0] for w in writes] == ["111", "112"], writes
+    # the option is still text although the values are linked: only the option PUT
+    detail = _oi_detail(display_type="text")
+    detail["options"][0]["values"][0]["display_value"] = "9003"
+    detail["options"][0]["values"][1]["display_value"] = "9004"
+    (option_write, writes, linked, problems), _ = _oi_plan(p, detail)
+    assert option_write and option_write[0] == "11" and writes == [] and len(linked) == 2
+    # nothing to link at all
+    assert mapping.option_image_plan(_p(_options_rows(), _FC), _oi_detail(), {}) == \
+        (None, [], [], [])
+    assert mapping.option_image_plan(None, None, None) == (None, [], [], [])
+    simple = _p(_simple_rows(), "fake-glass-cleaner")
+    assert mapping.option_image_plan(simple, _oi_detail(), {}) == (None, [], [], [])
+
+
+def _oi_problems(p, detail, ids=None, pending=()):
+    if ids is None:
+        ids, _ = mapping.gallery_image_ids(p["images"], mapping.detail_images(detail))
+    option_write, writes, linked, problems = mapping.option_image_plan(p, detail, ids, pending)
+    # all or nothing: any problem -> no write at all for the product
+    assert option_write is None and writes == [], (option_write, writes, problems)
+    assert problems, "expected problems"
+    return linked, problems
+
+
+def test_option_image_plan_problems_all_or_nothing():
+    p = _p(_oi_rows(), _FC)
+    # option1 missing in Salla / matching twice / without id
+    detail = _oi_detail()
+    detail["options"][0]["name"] = "المقاس"
+    assert _oi_problems(p, detail)[1] == ["option1 الحجم: not in the Salla product"]
+    assert _oi_problems(p, None, ids={})[1] == ["option1 الحجم: not in the Salla product"]
+    detail = _oi_detail()
+    detail["options"][1]["name"] = "الحجم"
+    assert _oi_problems(p, detail)[1] == ["option1 الحجم: matches 2 Salla options"]
+    detail = _oi_detail()
+    detail["options"][0]["id"] = None
+    assert _oi_problems(p, detail)[1] == [
+        "option1 الحجم: the Salla option has no id or Arabic name"]
+    # a value missing in Salla: the other one (writable) is NOT written either
+    detail = _oi_detail()
+    del detail["options"][0]["values"][1]
+    assert _oi_problems(p, detail)[1] == ["option1 value 1 لتر: not in the Salla option"]
+    # a value matching twice
+    detail = _oi_detail()
+    detail["options"][0]["values"].append({"id": 113, "name": "٥٠٠ مل"})
+    # only that line: both matched Salla values count as covered (no misleading
+    # "has no variant_image row" for them)
+    assert _oi_problems(p, detail)[1] == ["option1 value 500 مل: matches 2 Salla values"]
+    # a value without id
+    detail = _oi_detail()
+    detail["options"][0]["values"][0]["id"] = ""
+    assert _oi_problems(p, detail)[1] == [
+        "option1 value 500 مل: the Salla value has no id or Arabic name"]
+    # no Salla image id for the file: an attach without id / with unknown outcome
+    before = _oi_detail(count=2)
+    ids, reason = mapping.gallery_image_ids(p["images"], mapping.detail_images(before),
+                                            {3: 9003})        # sort 4: no id / unknown
+    assert _oi_problems(p, _oi_detail(), ids)[1] == [_OI_NO_ID % ("1 لتر", _OI_1L)]
+    # ... or a gallery whose order cannot be trusted (an image deleted by hand)
+    detail = _oi_detail()
+    del detail["images"][1]                                    # sorts 1, 3, 4
+    ids, reason = mapping.gallery_image_ids(p["images"], mapping.detail_images(detail))
+    assert reason == _GALLERY_ORDER % 3, reason
+    assert _oi_problems(p, detail, ids)[1] == [_OI_NO_ID % ("500 مل", _OI_500),
+                                               _OI_NO_ID % ("1 لتر", _OI_1L)]
+    # an id that is not in the gallery Salla has now (an image deleted meanwhile)
+    detail = _oi_detail()
+    ids = {"fake-fc-500.jpg": "9003", "fake-fc-1l.jpg": "9999"}
+    assert _oi_problems(p, detail, ids)[1] == [
+        _OI_NOT_IN_GALLERY % ("1 لتر", "9999", _OI_1L)]
+    # a Salla value with no variant_image row (named, and nameless -> its id)
+    detail = _oi_detail()
+    detail["options"][0]["values"].append({"id": 113, "name": "2 لتر"})
+    assert _oi_problems(p, detail)[1] == [
+        "option1 الحجم: Salla value 2 لتر has no variant_image row (an image option needs a "
+        "photo for every value)"]
+    detail = _oi_detail()
+    detail["options"][0]["values"].append({"id": 113, "name": ""})
+    assert _oi_problems(p, detail)[1][0].startswith("option1 الحجم: Salla value #113 has "
+                                                    "no variant_image row"), detail
+    # problems keep what is already linked (reported), still no write
+    detail = _oi_detail()
+    detail["options"][0]["values"][0]["display_value"] = "9003"
+    detail["options"][0]["values"].append({"id": 113, "name": "2 لتر"})
+    linked, problems = _oi_problems(p, detail)
+    assert linked == [("500 مل", _OI_500)] and len(problems) == 1, (linked, problems)
+
+
+def test_option_image_plan_dry_run_pending():
+    # Dry run on an existing product: Salla holds image_1 and image_2, Apply would attach
+    # the two pack shots first (images_to_attach), so their ids are not known yet
+    p = _p(_oi_rows(), _FC)
+    detail = _oi_detail(count=2)
+    todo, stop = mapping.images_to_attach(p["images"], len(mapping.detail_images(detail)),
+                                          p["images"])
+    pending = [name for sort, name in todo]
+    assert pending == [_OI_500, _OI_1L] and stop is None, (todo, stop)
+    (option_write, writes, linked, problems), reason = _oi_plan(p, detail, pending=pending)
+    assert problems == [] and reason == "" and linked == [], problems
+    assert option_write == ("11", {"name": "الحجم", "display_type": "image"})
+    # planned with body None: never sent, and no "not in the gallery" for them
+    assert writes == [("111", "500 مل", _OI_500, None), ("112", "1 لتر", _OI_1L, None)], writes
+    # pending compared by lower-case basename
+    (_, writes, _, problems), _ = _oi_plan(p, detail, pending=["Wave1/FAKE-FC-500.JPG",
+                                                               "FAKE-FC-1L.jpg"])
+    assert problems == [] and [b for *_, b in writes] == [None, None], writes
+    # no archive in the dry run -> nothing pending -> not linkable, said as a problem
+    (option_write, writes, _, problems), _ = _oi_plan(p, detail, pending=[])
+    assert option_write is None and writes == [] and problems == [
+        _OI_NO_ID % ("500 مل", _OI_500), _OI_NO_ID % ("1 لتر", _OI_1L)], problems
+    # one already in Salla (linked), one pending
+    detail = _oi_detail(count=3)
+    detail["options"][0]["values"][0]["display_value"] = "9003"
+    (option_write, writes, linked, problems), _ = _oi_plan(p, detail, pending=[_OI_1L])
+    assert problems == [] and linked == [("500 مل", _OI_500)], problems
+    assert writes == [("112", "1 لتر", _OI_1L, None)], writes
+    # a pending file never hides a real id: one already in Salla gets its real body
+    detail = _oi_detail(count=3)
+    (_, writes, _, problems), _ = _oi_plan(p, detail, pending=[_OI_500, _OI_1L])
+    assert writes == [("111", "500 مل", _OI_500, {"name": "500 مل", "display_value": "9003"}),
+                      ("112", "1 لتر", _OI_1L, None)], writes
+
+
+def _en(detail, english):
+    """detail with translations.en for {id: English} (?with=translations shape)."""
+    for option in detail["options"]:
+        if option["id"] in english:
+            option["translations"] = {"en": {"option_name": english[option["id"]]},
+                                      "ar": {"option_name": option["name"]}}
+        for value in option["values"]:
+            if value["id"] in english:
+                value["translations"] = {"en": {"option_details_name": english[value["id"]]}}
+    return detail
+
+
+def test_option_english_lost_restore():
+    written = [("option", "11"), ("value", "111"), ("value", "112")]
+    before = _en(_oi_detail(), {11: "Size", 111: "500 ml", 112: "1 L", 22: "Scent"})
+    # the link PUTs dropped one value English, changed another, kept the option's
+    after = _en(_oi_detail(), {11: "size ", 112: "1 Litre", 22: "Scent"})
+    after["options"][0]["values"][0]["name"] = "٥٠٠ مل"          # same Arabic (norm_label)
+    restores, unknown, arabic = mapping.option_english_lost(before, after, written)
+    assert unknown == [] and arabic == [], (unknown, arabic)
+    # the Arabic BEFORE in "name": a moved Arabic is never written back as if right
+    assert restores == [
+        ("value", "111", {"name": "500 مل",
+                          "translations": {"en": {"option_details_name": "500 ml"}}}),
+        ("value", "112", {"name": "1 لتر",
+                          "translations": {"en": {"option_details_name": "1 L"}}}),
+    ], restores
+    # same body shape as the v17.0.5.0.2 path (lang ar + translations.en)
+    _assert_option_bodies(restores)
+    # English lost AND Arabic moved: one restore (it puts the Arabic before back), no
+    # separate Arabic entry
+    after = _en(_oi_detail(), {111: "500 ml", 112: "1 L"})
+    after["options"][0]["name"] = "Size"                          # Arabic overwritten
+    restores, unknown, arabic = mapping.option_english_lost(before, after, written)
+    assert restores == [("option", "11", {"name": "الحجم", "translations": {
+        "en": {"option_name": "Size"}}})] and arabic == [] and unknown == [], restores
+    # nothing lost -> nothing; option2 (not written) is never checked even if lost
+    after = _en(_oi_detail(), {11: "Size", 111: "500 ML", 112: " 1 l"})
+    assert mapping.option_english_lost(before, after, written) == ([], [], [])
+    # ids as ints (from Salla) work the same; unknown kinds are ignored
+    after = _en(_oi_detail(), {11: "Size", 112: "1 L"})
+    assert mapping.option_english_lost(before, after, [("value", 111), ("variant", "111")]) \
+        == ([("value", "111", {"name": "500 مل", "translations": {
+            "en": {"option_details_name": "500 ml"}}})], [], [])
+
+
+def test_option_english_lost_arabic_moved():
+    written = [("option", "11"), ("value", "111"), ("value", "112")]
+    # English kept but the Arabic moved -> arabic = [(kind, id, before, after)]
+    before = _en(_oi_detail(), {11: "Size", 111: "500 ml"})
+    after = _en(_oi_detail(), {11: "Size", 111: "500 ml"})
+    after["options"][0]["values"][0]["name"] = "500 ml"           # English over the Arabic
+    after["options"][0]["values"][1]["name"] = "لتر واحد"         # no English before
+    restores, unknown, arabic = mapping.option_english_lost(before, after, written)
+    assert restores == [] and unknown == [], (restores, unknown)
+    assert arabic == [("value", "111", "500 مل", "500 ml"),
+                      ("value", "112", "1 لتر", "لتر واحد")], arabic
+    # a spelling norm_label treats as equal is not a move
+    after = _oi_detail()
+    after["options"][0]["values"][0]["name"] = " ٥٠٠  مل "
+    assert mapping.option_english_lost(_oi_detail(), after, written) == ([], [], [])
+
+
+def test_option_english_lost_unknown():
+    written = [("option", "11"), ("value", "111"), ("value", "112")]
+    before = _en(_oi_detail(), {11: "Size", 111: "500 ml", 112: "1 L"})
+    # value 112 missing from the answer, value 111 without an Arabic name there
+    after = _en(_oi_detail(), {11: "Size"})
+    del after["options"][0]["values"][1]
+    after["options"][0]["values"][0]["name"] = ""
+    restores, unknown, arabic = mapping.option_english_lost(before, after, written)
+    assert unknown == [("value", "111", "500 ml"), ("value", "112", "1 L")], unknown
+    assert restores == [] and arabic == [], (restores, arabic)
+    # no `after` at all -> every item with English before is unknown, nothing restored
+    restores, unknown, arabic = mapping.option_english_lost(before, None, written)
+    assert restores == [] and arabic == [] and [u[1] for u in unknown] == ["11", "111", "112"]
+    # missing from `after` WITHOUT English before: nothing to check by hand
+    restores, unknown, arabic = mapping.option_english_lost(_oi_detail(), None, written)
+    assert (restores, unknown, arabic) == ([], [], []), unknown
+
+
+def test_option_english_lost_no_english_before():
+    written = [("option", "11"), ("value", "111"), ("value", "112")]
+    after = _oi_detail()                           # no English anywhere after
+    # no English before -> nothing to put back (Salla's own, never the sheet's)
+    assert mapping.option_english_lost(_oi_detail(), after, written) == ([], [], [])
+    assert mapping.option_english_lost(None, after, written) == ([], [], [])
+    # English under the wrong key / garbage translations = no English before
+    before = _oi_detail()
+    before["options"][0]["translations"] = {"en": {"name": "Size"}}
+    before["options"][0]["values"][0]["translations"] = ["en"]
+    before["options"][0]["values"][1]["translations"] = {"en": "1 L"}
+    assert mapping.option_english_lost(before, after, written) == ([], [], [])
+    # no Arabic name before: nothing known to compare or put back
+    before = _en(_oi_detail(), {111: "500 ml"})
+    before["options"][0]["values"][0]["name"] = ""
+    assert mapping.option_english_lost(before, after, [("value", "111")]) == ([], [], [])
+    # nothing written -> nothing checked
+    before = _en(_oi_detail(), {11: "Size", 111: "500 ml"})
+    assert mapping.option_english_lost(before, after, []) == ([], [], [])
+    assert mapping.option_english_lost(before, after, None) == ([], [], [])
+
+
+def test_option_image_lost():
+    links = [("111", "9003", "500 مل"), ("112", "9004", "1 لتر")]
+    detail = _oi_detail(display_type="image")
+    detail["options"][0]["values"][0]["display_value"] = 9003
+    detail["options"][0]["values"][1]["hashed_display_value"] = "9004"
+    assert mapping.option_image_lost(detail, "11", links) == []
+    assert mapping.option_image_lost(detail, 11, links) == []            # int id
+    # option back to text / a value lost its photo / relinked to another image
+    detail["options"][0]["display_type"] = "text"
+    detail["options"][0]["values"][1]["hashed_display_value"] = "9001"
+    assert mapping.option_image_lost(detail, "11", links) == [
+        "option الحجم is no longer image swatches (text)", "value 1 لتر lost its photo"]
+    # option_id "" = not checked (the option was put back to text on purpose)
+    assert mapping.option_image_lost(detail, "", links) == ["value 1 لتر lost its photo"]
+    # no display_type at all -> "?"
+    del detail["options"][0]["display_type"]
+    assert mapping.option_image_lost(detail, "11", [])[0] == \
+        "option الحجم is no longer image swatches (?)"
+    # missing from the answer
+    assert mapping.option_image_lost(_oi_detail(), "99", [("199", "9003", "2 لتر")]) == [
+        "option #99 not in Salla's answer", "value 2 لتر not in Salla's answer"]
+    assert mapping.option_image_lost(None, "11", links) == [
+        "option #11 not in Salla's answer", "value 500 مل not in Salla's answer",
+        "value 1 لتر not in Salla's answer"]
+    assert mapping.option_image_lost(_oi_detail(), "", []) == []
+    assert mapping.option_image_lost(_oi_detail(), None, None) == []
+
+
+def test_option_display_type():
+    detail = _oi_detail(display_type=" Image ")
+    assert mapping.option_display_type(detail, "11") == "image"
+    assert mapping.option_display_type(detail, 22) == "text"
+    assert mapping.option_display_type(detail, "99") == ""          # unknown option
+    assert mapping.option_display_type(detail, "111") == ""         # a value id, not option
+    assert mapping.option_display_type(_fc_detail(), "11") == ""    # no display_type
+    assert mapping.option_display_type(None, "11") == ""
+
+
+def test_wizard_option_images_static():
+    # Read as text / ast (the wizard imports odoo).
+    src, _ = _wizard_requests()
+    tree = _wizard_tree()
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    # Apply: the link runs after the gallery attach, inside the try whose finally keeps
+    # the product hidden
+    apply_src = ast.unparse(fns["_apply_product"])
+    assert apply_src.index("self._apply_images(") < apply_src.index(
+        "self._apply_option_images(") < apply_src.index("finally:"), "order in _apply_product"
+    # the attach answer id is kept per sort for gallery_image_ids
+    assert "res['image_ids'][sort] = image_id" in ast.unparse(fns["_apply_images"])
+    # the dry-run plan never calls Salla
+    plan = fns["_plan_option_images"]
+    assert not any(isinstance(n, ast.Attribute) and n.attr == "_request"
+                   for n in ast.walk(plan)), "dry run must not call _request"
+    link_src = ast.unparse(fns["_link_option_images"])
+    first_put = link_src.index("_request('PUT'")
+    # review B1: the time budget is checked once, before the first PUT, never between
+    assert link_src.count("state['deadline']") == 1, link_src.count("state['deadline']")
+    assert link_src.index("state['deadline']") < first_put
+    # the English is read BEFORE the first link PUT, re-checked in a finally
+    assert link_src.index("'with': 'translations'") < first_put
+    assert link_src.index("finally:") < link_src.index("self._recheck_option_english(")
+    # review S1: each (kind, id) is in `written` BEFORE its PUT (an unknown outcome is
+    # re-checked), and leaves it only on a real 4xx
+    for kind in ("option", "value"):
+        assert link_src.index("written.append(('%s'," % kind) < link_src.index(
+            "self._option_path('%s'," % kind), kind
+        removal = link_src.index("written.remove(('%s'," % kind)
+        assert link_src.rindex("if self._refused(e):", 0, removal) > link_src.rindex(
+            "except UserError", 0, removal), kind
+    # the revert only when the option was switched here and EVERY value was refused
+    assert "if option_write and writes and (refused == len(writes)) and (not linked):" \
+        in link_src
+    # the English restore only while English writes are allowed in this run
+    recheck_src = ast.unparse(fns["_recheck_option_english"])
+    gate = "state['en_supported'] and state['option_en']"
+    assert gate in recheck_src and recheck_src.index(gate) < recheck_src.index(
+        "_request('PUT'")
+    # never raises out of a product: the outer catches everything
+    outer = fns["_apply_option_images"]
+    handlers = [h for n in ast.walk(outer) if isinstance(n, ast.Try) for h in n.handlers]
+    assert any(isinstance(h.type, ast.Name) and h.type.id == "Exception" for h in handlers)
+
 if __name__ == "__main__":
     for fn in [test_signature_valid, test_signature_wrong_secret,
                test_signature_tampered_one_byte, test_signature_missing_or_empty_header,
@@ -5410,7 +6111,24 @@ if __name__ == "__main__":
                test_option_translation_payloads_already_in_salla_nothing,
                test_option_translation_payloads_two_options_share_a_value_name,
                test_option_translation_payloads_no_detail_or_no_options,
-               test_option_english_names_order_and_dedup, test_detail_option_name]:
+               test_option_english_names_order_and_dedup, test_detail_option_name,
+               # F8 photo per size (variant_image, v17.0.5.1.0, spike 2026-11-13)
+               test_upload_columns_variant_image_and_template,
+               test_option_images_happy_path, test_option_images_without_options_error,
+               test_option_images_option2_only_error, test_option_images_shared_file_warning,
+               test_option_images_partial_error,
+               test_option_images_same_value_different_files_error,
+               test_option_images_file_not_in_gallery_error,
+               test_option_images_case_insensitive_basename_ok,
+               test_gallery_image_ids_position_mapping, test_gallery_image_ids_never_guess,
+               test_option_image_plan_writes, test_option_image_plan_already_linked,
+               test_option_image_plan_problems_all_or_nothing,
+               test_option_image_plan_dry_run_pending,
+               test_option_english_lost_restore, test_option_english_lost_arabic_moved,
+               test_option_english_lost_unknown,
+               test_option_english_lost_no_english_before, test_option_image_lost,
+               test_option_display_type,
+               test_wizard_option_images_static]:
         fn()
         print(fn.__name__, "OK")
     print("all passed")

@@ -1312,3 +1312,73 @@ a **new** product, so paste it once per run. No token is printed or typed.
     - Copy for the developer: the Size `option #...` line, and the `value, raw:` lines of the value you linked by hand and of a value without an image. The difference shows which field the dashboard writes (`display_value`, `hashed_display_value`, `image_url` or another one).
     - `STOP: ...` = wrong backend or store. Nothing was read.
 194. **Clean-up and record.** The spike product stays **hidden** on the demo store (the script never deletes; delete it by hand if wanted). Ticket: the FINDINGS block, what the dashboard showed (191), the storefront result (192, or *not run*), the probe lines (193, or *not run*), and which steps passed / failed / were not run. No tokens, no URLs with tokens, no customer data.
+
+## U. Photo per size in the upload wizard (17.0.5.1.0)
+
+**DEMO STORE ONLY (`461067869`), never the real store.** New in 17.0.5.1.0: sheet column
+`variant_image` = the photo of the row's **option1** value (Size). Apply sets option1 to
+`display_type: image` and links each of its values to its gallery photo (`display_value`), after
+the gallery attach and after the option English. Rules and messages: `claude-docs/14-product-upload.md`
+§3 (`variant_image` row), §5 step 7b and §8. Paste the S helpers first (`BID` = the DEMO backend id),
+then this one (ids, sort numbers and names only):
+```python
+def sl_oi(pid):  # gallery (id, sort, main) + each option's display_type and its values' linked image
+    d = (b._request("GET", "/products/%s" % pid, lang="ar") or {}).get("data") or {}
+    return dict(status=mapping.detail_status(d),
+                images=[(i.get("id"), i.get("sort"), i.get("main"))
+                        for i in mapping.detail_images(d)],
+                options=[(o.get("id"), o.get("name"), o.get("display_type"),
+                          [(v.get("id"), v.get("name"), v.get("display_value"),
+                            v.get("hashed_display_value")) for v in o.get("values") or []])
+                         for o in d.get("options") or []])
+```
+
+195. **Build.** Build green; `salla_connector` upgrades to **17.0.5.1.0** with no error or warning about the module in the build log. On a new build redo step 37; **Test Connection** green on the demo backend. `python3 salla_connector/tests/test_mapping.py` ended `all passed` before the push.
+196. **(a) Download Template.** The **Products** sheet has the column `variant_image` (between `image_alt` and `salla_product_id`). The `example-options` rows: `image_1 = example-options-1.jpg`, `image_2 = example-options-500ml.jpg`, `image_3 = example-options-1l.jpg`; `variant_image` = `example-options-500ml.jpg` on the 500 مل row and `example-options-1l.jpg` on the 1 لتر row. `example-simple` has `variant_image` empty. The **Instructions** sheet has a `variant_image` row (level `variant`, required `no`) that says it must be one of image_1 ... image_10, the same file on every row of one option1 value, and not for a product without options.
+197. **Test files** (from the template, all values fake):
+    - `stg-u-sizes`: Size (500 مل / 1 لتر) x Scent (لافندر / ليمون), 4 rows `STG-U-001` ... `STG-U-004` (500/لافندر, 500/ليمون, 1 لتر/لافندر, 1 لتر/ليمون), prices 30 / 32 / 45 / 47, stock 4 / 0 / 12 / 3, weight 0.5 kg on all 4 rows, AR + EN names (option and values: Size / Scent, 500 ml / 1 L, Lavender / Lemon). `image_1 = stg-u-main.jpg`, `image_2 = stg-u-500.jpg`, `image_3 = stg-u-1l.jpg`. `variant_image` = `stg-u-500.jpg` on both 500 مل rows and `stg-u-1l.jpg` on both 1 لتر rows.
+    - Images ZIP (inside a folder, as a Mac zips it): the 3 files, 1200 x 1200 JPEG < 300 KB, easy to tell apart (e.g. grey **MAIN**, green **500**, orange **1L**).
+    - Broken copies of `stg-u-sizes` (same handle and SKUs, **Dry Run only, never Apply**), sheet rows 2-5 = `STG-U-001` ... `STG-U-004`:
+        - `partial`: `variant_image` of `STG-U-002` (row 3) empty.
+        - `mismatch`: `variant_image` of `STG-U-002` (row 3, a 500 مل row) = `stg-u-1l.jpg`.
+        - `outside`: `variant_image` of both 1 لتر rows = `stg-u-other.jpg` (in the ZIP, but in no `image_N` column).
+        - `simple`: one simple handle `stg-u-simple` (SKU `STG-U-090`, price 25, stock 3, weight 0.5 kg, `image_1 = stg-u-main.jpg`) with `variant_image = stg-u-main.jpg`.
+198. **(b) Dry Run, Step Everything** (as admin), good sheet + ZIP. Before: `sl_find("STG-U")` -> `[]`. Expected for `stg-u-sizes`:
+    - *would create it hidden with 4 variant(s)*, *would attach image(s) 1=stg-u-main.jpg, 2=stg-u-500.jpg, 3=stg-u-1l.jpg*.
+    - *would show الحجم as image swatches* and *would link size photos: 500 مل -> stg-u-500.jpg, 1 لتر -> stg-u-1l.jpg*. No *size photos would not be linked* warning.
+    - Same sheet **without the ZIP**: warning *size photos would not be linked: stg-u-500.jpg would not be attached; stg-u-1l.jpg would not be attached*.
+    - **No write:** `sl_find("STG-U")` still `[]`.
+    - **Broken copies** (each one, Dry Run): `stg-u-sizes` is listed with an error and skipped; no *would link size photos* line. Copy each error into the ticket. Expected texts:
+        - `partial`: *Row 3: variant_image is empty: once a row of stg-u-sizes has one, every row needs the photo of its option1 value (an image option cannot have a value without a photo)*.
+        - `mismatch`: *Row 3: variant_image stg-u-1l.jpg differs from row 2 (stg-u-500.jpg) for option1 value 500 مل: one photo per option1 value, the same on each of its rows*.
+        - `outside`: *Row 4: variant_image stg-u-other.jpg is not one of image_1 ... image_10 of stg-u-sizes: add it to the gallery columns (Salla links a value to a gallery photo)* and the same for row 5.
+        - `simple`: *Row 2: variant_image needs option1 (it is the photo of an option1 value); a product without options shows image_1* for `stg-u-simple`.
+    - Any broken copy that does **not** show its error, or shows *would link size photos*: **STOP U**, developer.
+199. **(c) Apply on a new demo product**, Step Everything, good sheet + ZIP, through the spy (shell, wizard `w` = `last_wiz()` with the same file): `calls = sl_spy(w, "stg-u-sizes", "apply"); print(opt_calls(calls))`. Expected:
+    - `stg-u-sizes` **created**. Result lines *size photos linked: 500 مل -> stg-u-500.jpg, 1 لتر -> stg-u-1l.jpg* and *الحجم shown as image swatches*; **no** *size photos not linked*, *not set to image swatches*, *not linked to*, *every size photo was refused*, *time budget reached: size photos not linked* or *Salla undid the size photo link* line. If one appears: copy it, **STOP U**, developer.
+    - `opt_calls(calls)`: the English option/value PUTs of S.5 (lang `ar`), then, **after** the 3 `POST /products/<id>/images` in `calls`, exactly one `("PUT", "/products/options/<Size option id>", "ar")` and two `("PUT", "/products/options/values/<Size value id>", "ar")`. Every option call has lang `ar` (never `en`, never a DELETE), and none is on the Scent option or its values.
+    - `sl_oi(<id>)`: `images` = 3 with `sort` **exactly 1, 2, 3** as the uploader sent them (sort 1 main = MAIN). If Salla shows other sort numbers (0-based, gaps), write them down and tell the developer: the link of images already in Salla relies on sort == sheet position. Size option `display_type` `image`; the 500 مل value `display_value` (or `hashed_display_value`) = the id of the **sort 2** image, 1 لتر = the id of **sort 3**. Scent `display_type` `text`, no `display_value`. Write down the ids.
+    - `sl(<id>)`: 4 variants with SKUs `STG-U-001` ... `004`, prices 30 / 32 / 45 / 47, stock 4 / 0 / 12 / 3 (the link did not touch them). `sl_options(<id>)`: Arabic names unchanged. `sl_options_en(<id>)`: Size / 500 ml / 1 L / Scent / Lavender / Lemon. If the result also says *Salla dropped the English name(s) ... on the size photo link: put back*, write it down (the first sighting; see 201).
+    - **Ends hidden:** `sl(<id>)["status"]` = `hidden` and Sales -> Configuration -> Salla -> **Products Kept Hidden** has no row for it. Not hidden: **STOP U**, developer.
+    - **Dashboard:** Products -> `stg-u-sizes`: Options -> Size shows **Option type: Image** with each value's thumbnail (500 مل = green, 1 لتر = orange); Scent stays Text; gallery MAIN (primary), 500, 1L in that order.
+    - **Storefront (demo only):** make the product **visible by hand**, open its page, pick 500 مل then 1 لتر: the swatches show the photos with the value name under them and the main photo switches to the green / orange image. Then **hide it again by hand** and reload the dashboard: **Hidden**.
+200. **(d) Re-run.** First **Dry Run** with the same files: *size photos already linked: 500 مل -> stg-u-500.jpg, 1 لتر -> stg-u-1l.jpg*, no *would show ... as image swatches*, no *would link size photos* (if it says *would link* again, write it down: the dry run reads the lookup answer, which may not carry `display_value`; tell the developer). Then **Apply** through the spy: `calls = sl_spy(w, "stg-u-sizes", "apply"); print(opt_calls(calls))` -> **no** `PUT` in the list. Result: *size photos already linked: ...*, no *size photos linked* line. `sl_oi(<id>)` and `sl(<id>)` identical to 199 (still 3 images, same ids, same variants), status `hidden`. Repeat with **Step Images only**, Apply: same result, no option PUT.
+201. **(e) English value names survive the link** (the open question of §8). Demo product `glass-cleaner` (doc §7.2: Size x Scent, English option/value names already shown on the English dashboard, no images).
+    - Before: write down `sl_options(<gc id>)`, `sl_options_en(<gc id>)`, `sl_oi(<gc id>)` and `sl(<gc id>)` (status, variants).
+    - Sheet: the Wave 1 rows of `glass-cleaner` only. Add `image_1` = a main photo and one `image_N` per size (placeholder pack shots are fine on the demo), and `variant_image` on every row = the photo of its size. ZIP with those files. **Only Handles** = `glass-cleaner`, **Step Images only**.
+    - **Dry Run:** *would attach image(s) ...*, *would show الحجم as image swatches*, *would link size photos: ...* (one entry per size).
+    - **Apply** through the spy: `calls = sl_spy(w, "glass-cleaner", "apply"); print(opt_calls(calls))`. Expected: *size photos linked: ...* and *الحجم shown as image swatches*; every option call lang `ar`.
+    - **English still there:** `sl_options_en(<gc id>)` shows the same English as before for Size and every Size value (`700 mL` ...), with lang en and in `translations.en`; the **English dashboard** shows them too. `sl_options(<gc id>)`: the Arabic unchanged. `sl(<gc id>)`: same variant ids, SKUs and prices; status as before (if it was hidden, still `hidden`).
+    - **Write down which line appeared** (this is the finding):
+        - no line about English -> Salla keeps the English through the link PUTs (`opt_calls` shows only the link PUTs);
+        - *Salla dropped the English name(s) X on the size photo link: put back* -> Salla drops it and the uploader put it back (`opt_calls` shows extra lang `ar` PUTs on the same paths after the link PUTs). Write down X.
+        - *Salla changed the Arabic value name X to Y on the size photo link: put back* (warning) -> Salla moved the Arabic and the uploader put it back: check `sl_options(<gc id>)` shows X again, write it down, tell the developer.
+        - *Salla did not keep the English name(s) ... put back*, *English names not read before the link*, *not re-checked after the size photo link*, *names put back after the size photo link but not verified*, *the Arabic ... name changed when its English was put back*, *... putting it back failed*, *Salla undid the size photo link when the names were put back*, or *Salla dropped ... English writes are stopped in this run*: copy it, **STOP U**, developer. Fix the English / Arabic / photo link by hand in the dashboard.
+    - Run Apply once more: *size photos already linked: ...*, no option PUT.
+201a. **Gallery changed by hand is not guessed** (separate throwaway product, so `stg-u-sizes` stays clean). Sheet `stg-u-gap`: Size only (500 مل / 1 لتر), 2 rows `STG-U-101` / `STG-U-102`, price 30 / 45, stock 2 / 5, weight 0.5 kg, `image_1..image_3 = stg-u-main.jpg, stg-u-500.jpg, stg-u-1l.jpg`, `variant_image` = `stg-u-500.jpg` / `stg-u-1l.jpg`. **Apply** (Step Everything, same ZIP): created, *size photos linked: ...*, hidden. Write down `sl_oi(<gap id>)` (3 images, sorts 1, 2, 3).
+    - In the demo dashboard **delete the middle image** (`stg-u-500`, sort 2) of `stg-u-gap` by hand. Write down `sl_oi(<gap id>)["images"]` (ids and sorts).
+    - **Dry Run** (Only Handles `stg-u-gap`, same sheet and ZIP). **Do not Apply** this state (Apply would attach `stg-u-1l.jpg` again at sort 3).
+    - If the sorts read **1, 3** (Salla did not renumber): expected warning *size photos would not be linked: option1 value 500 مل: no Salla image id for stg-u-500.jpg (not attached, or Salla's answer had no id: see the image messages, then re-upload the images with Images Only); Salla's images are not in the uploader's 1..2 order (deleted, added or moved by hand): which photo is which cannot be told; make the gallery in Salla match image_1..image_N*, and **no** *would link size photos* line.
+    - If the sorts read **1, 2** (Salla renumbered after the delete): the dry run cannot see the delete (doc §8, "Not detectable") and may say *would link size photos*: write that down, **do not Apply**, and tell the developer (it means a hand delete can make the uploader link the wrong photo).
+    - Leave `stg-u-gap` hidden (delete it by hand if wanted).
+202. **Clean-up and record.** `stg-u-sizes`, `stg-u-gap` and `glass-cleaner` stay **hidden** on the demo store (the uploader never deletes or publishes). Ticket: the dry-run and error texts (198), the spy lists and `sl_oi` before/after (199-201), the dashboard and storefront result (199), the English line of 201, the sorts and dry-run result of 201a, and which steps passed / failed / were not run. No tokens, no URLs with tokens, no customer data.

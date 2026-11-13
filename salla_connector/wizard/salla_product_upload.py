@@ -86,6 +86,11 @@ TEMPLATE_HELP = (
     ("image_1 ... image_10", "product", "no", "File names inside the images ZIP, in display "
      "order (1 = main). Square, 1200 px, up to 300 KB."),
     ("image_alt", "product", "no", "One alt text for all the images."),
+    ("variant_image", "variant", "no", "Photo of this row's option1 value (e.g. the pack "
+     "shot of the size): the file name of one of image_1 ... image_10. The same file on "
+     "every row of one option1 value; either every row has one or none. Salla then shows "
+     "option1 as image swatches (the value name under each) and switches the main photo "
+     "when the customer picks one. Not for a product without options."),
     ("salla_product_id", "product", "no", "Filled in the result sheet; when set it is used "
      "first to find the product."),
     ("", "", "", ""),
@@ -478,9 +483,11 @@ class SallaProductUpload(models.TransientModel):
     def _new_result(self, product, action, status, messages=None):
         # wrote: a write call to the product was STARTED (its outcome may be unknown).
         # leftover: a marker from an earlier run that did not finish on it.
+        # image_ids: {sort: Salla image id} of this run's attaches (photo per size).
         res = {"handle": product["handle"], "salla_id": product["salla_product_id"],
                "action": action, "status": status, "messages": list(messages or []),
-               "variant_ids": {}, "variants_set": 0, "images": 0, "wrote": False,
+               "variant_ids": {}, "variants_set": 0, "images": 0, "image_ids": {},
+               "photos_linked": 0, "photo_puts": False, "wrote": False,
                "leftover": False}
         if res["messages"] and status == "ok":
             res["status"] = "warning"
@@ -516,9 +523,10 @@ class SallaProductUpload(models.TransientModel):
                 _logger.exception("Salla upload: %s failed", product["handle"])
             res["action"] = res["action"] or "failed"
             self._flag(res, "error", _error_text(e))
-        _logger.info("Salla upload %s %s: Salla #%s, %s, %s; %s variant(s) set, %s image(s)",
-                     self.mode, product["handle"], res["salla_id"] or "-",
-                     res["action"] or "-", res["status"], res["variants_set"], res["images"])
+        _logger.info("Salla upload %s %s: Salla #%s, %s, %s; %s variant(s) set, %s image(s), "
+                     "%s size photo(s) linked", self.mode, product["handle"],
+                     res["salla_id"] or "-", res["action"] or "-", res["status"],
+                     res["variants_set"], res["images"], res["photos_linked"])
 
     # --- Salla reads ---
     def _get_product(self, product_id, lang=None, params=None):
@@ -691,6 +699,46 @@ class SallaProductUpload(models.TransientModel):
                 "%s=%s" % (sort, name) for sort, name in todo))
         if stop and state["archive"]:
             self._flag(res, "warning", _("images stop: %s") % stop)
+        # Without an archive nothing is attached: only images already in Salla link.
+        self._plan_option_images(product, detail, res,
+                                 [name for sort, name in todo] if state["archive"] else [])
+
+    def _plan_option_images(self, product, detail, res, pending):
+        """Dry run: the size photos (variant_image) Apply would link. `pending` = the
+        files Apply would attach first (their Salla id is known only then)."""
+        links = product["option_images"]
+        if not links or not product["options"]:
+            return
+        if not detail:
+            attach = {_basename(name) for name in pending}
+            missing = [name for ar, name in links if _basename(name) not in attach]
+            if missing:
+                self._flag(res, "warning", self._photos_skipped_message(
+                    [_("%s would not be attached") % name for name in missing],
+                    dry_run=True))
+                return
+            res["messages"].append(_("would show %s as image swatches") % product[
+                "options"][0]["ar"])
+            res["messages"].append(_("would link size photos: %s") % self._links_text(
+                (ar, name) for ar, name in links))
+            return
+        ids, reason = mapping.gallery_image_ids(product["images"],
+                                                mapping.detail_images(detail), {})
+        option_write, writes, linked, problems = mapping.option_image_plan(
+            product, detail, ids, pending)
+        if problems:
+            self._flag(res, "warning", self._photos_skipped_message(
+                problems + ([reason] if reason else []), dry_run=True))
+            return
+        if option_write:
+            res["messages"].append(_("would show %s as image swatches") % option_write[1][
+                "name"])
+        if writes:
+            res["messages"].append(_("would link size photos: %s") % self._links_text(
+                (ar, name) for value_id, ar, name, body in writes))
+        if linked:
+            res["messages"].append(_("size photos already linked: %s") % self._links_text(
+                linked))
 
     def _plan_variants(self, product, detail, res):
         if not product["options"]:
@@ -833,6 +881,10 @@ class SallaProductUpload(models.TransientModel):
                 self._keep_hidden(product, pid, before, created, res, state)
                 self._apply_english(product, detail, res, state)
             self._apply_images(product, detail, res, state)
+            # After the gallery: the ids of this run's images come from the attaches.
+            # So after the English step too: an English name a link PUT drops is put
+            # back by _recheck_option_english.
+            self._apply_option_images(product, detail, res, state)
         finally:
             # Again at the end, even when a later step failed: images may flip it too.
             self._keep_hidden(product, pid, before, created, res, state, final=True)
@@ -919,6 +971,9 @@ class SallaProductUpload(models.TransientModel):
             if not (created or res["leftover"]):
                 changed_after = _("image upload") if self.step == "images" \
                     else _("stock update")
+                if res["photo_puts"]:
+                    # The spike saw no flip from the link PUTs; not ruled out either.
+                    changed_after = _("%s or size photo link") % changed_after
             hidden = self._ensure_hidden(pid, res, verify_first=True,
                                          changed_after=changed_after)
         else:
@@ -1325,7 +1380,7 @@ class SallaProductUpload(models.TransientModel):
             # flipped the status), so the final status check must run.
             res["wrote"] = True
             try:
-                self.backend_id._request(
+                response = self.backend_id._request(
                     "POST", "/products/%s/images" % pid, idempotent=False, data=data,
                     files={"photo": (filename, content,
                                      IMAGE_MIMETYPES.get(ext, "application/octet-stream"))})
@@ -1341,8 +1396,308 @@ class SallaProductUpload(models.TransientModel):
                         name, _error_text(e)))
                 return
             res["images"] += 1
+            # Spike 2026-11-13: the answer's `id` is the gallery id a size links to. An
+            # answer without one leaves that image unlinkable (never guessed by sort).
+            image_id = mapping.clean_id(_data(response).get("id"))
+            if image_id:
+                res["image_ids"][sort] = image_id
         if stop:
             self._flag(res, "warning", _("images stop: %s") % stop)
+
+    def _apply_option_images(self, product, detail, res, state):
+        """Photo per size (variant_image; spike 2026-11-13, demo): option1 shown as
+        image swatches, each of its values linked to its gallery photo. PUT
+        /products/options/{id} {name, display_type: "image"}, then PUT
+        /products/options/values/{id} {name, display_value: "<image id>"}, both lang
+        ar with Salla's current Arabic name (mapping.option_image_plan): never
+        "values", price or quantity. Idempotent: what is already set is not sent
+        again. Never raises: a failure is this product's error line, and the links
+        already set stay (a re-run finishes them)."""
+        if not product["option_images"] or not product["options"]:
+            return
+        pid = mapping.detail_id(detail)
+        try:
+            self._link_option_images(product, detail, pid, res, state)
+        except Exception as e:
+            if not isinstance(e, UserError):
+                _logger.exception("Salla upload: size photos of %s failed", pid)
+            self._flag(res, "error", _("size photos not linked (%s): re-run this handle") %
+                       _error_text(e))
+
+    def _link_option_images(self, product, detail, pid, res, state):
+        # Plain read: the shape the spike read display_type / display_value / images
+        # from. `detail` is the gallery BEFORE this run's attaches (images_to_attach
+        # counted it): its images are the first ones of the sheet, by sort.
+        current = self._get_product(pid, lang="ar")
+        if not current:
+            raise UserError(_("product #%s not found") % pid)
+        ids, reason = mapping.gallery_image_ids(
+            product["images"], mapping.detail_images(detail), res["image_ids"])
+        option_write, writes, linked, problems = mapping.option_image_plan(
+            product, current, ids)
+        if problems:
+            self._flag(res, "warning", self._photos_skipped_message(
+                problems + ([reason] if reason else [])))
+            return
+        if linked:
+            res["messages"].append(_("size photos already linked: %s") % self._links_text(
+                linked))
+        if not option_write and not writes:
+            return
+        # Checked once, before the first PUT and never between them (review B1): an
+        # option switched to image swatches whose values then wait for the next run
+        # would show empty swatches, maybe on a published product. The few value PUTs
+        # fit in the slack the budget keeps (limit_time_real / 2).
+        if time.monotonic() > state["deadline"]:
+            self._flag(res, "warning", _("time budget reached: size photos not linked; "
+                                         "run this handle again"))
+            return
+        # The English Salla has now, to put back what a link PUT drops (not tested on
+        # the demo). Unread = not linked: the English must not be lost unseen.
+        try:
+            before = self._get_product(pid, lang="ar", params={"with": "translations"})
+        except Exception as e:
+            if not isinstance(e, UserError):
+                _logger.exception("Salla upload: translations read of %s failed", pid)
+            before, error = None, _error_text(e)
+        else:
+            error = _("product not found")
+        if not before:
+            self._flag(res, "warning", self._photos_skipped_message(
+                [_("English names not read before the link (%s); re-run") % error]))
+            return
+        # written: every PUT that may have reached Salla, added BEFORE the call and
+        # dropped only on a real 4xx (review S1): an unknown outcome may have dropped
+        # the English too. links: (value id, image id, label) set in this run.
+        written, done, links, refused, switched = [], [], [], 0, False
+        option_id = option_write[0] if option_write else ""
+        # The option the post-restore check expects as image swatches ("" = none).
+        check_option = option_id or self._option1_id(product, current)
+        res["wrote"] = res["photo_puts"] = True
+        try:
+            if option_write:
+                body = option_write[1]
+                written.append(("option", option_id))
+                path = self._option_path("option", option_id)
+                try:
+                    self.backend_id._request("PUT", path, lang="ar", payload=body)
+                except UserError as e:
+                    if self._refused(e):
+                        written.remove(("option", option_id))
+                    # A value photo on a text option shows nothing: stop here.
+                    self._flag(res, "error", _(
+                        "size photos not linked: %(option)s not set to image swatches "
+                        "(%(error)s); re-run this handle") % {
+                        "option": body["name"], "error": _error_text(e)})
+                    return
+                switched = True
+            for value_id, ar, name, body in writes:
+                written.append(("value", value_id))
+                path = self._option_path("value", value_id)
+                try:
+                    self.backend_id._request("PUT", path, lang="ar", payload=body)
+                except UserError as e:
+                    if self._refused(e):
+                        written.remove(("value", value_id))
+                        refused += 1
+                    self._flag(res, "error", _("size photo %(name)s not linked to %(value)s: "
+                                               "%(error)s; re-run this handle") % {
+                        "name": name, "value": ar, "error": _error_text(e)})
+                    continue
+                done.append((ar, name))
+                links.append((value_id, body["display_value"], ar))
+            if option_write and writes and refused == len(writes) and not linked:
+                # Switched in this run and every value refused for sure: put the option
+                # back so the storefront does not show swatches without photos.
+                check_option = self._revert_option_display(
+                    option_write, mapping.option_display_type(current, option_id) or "text",
+                    res)
+        finally:
+            res["photos_linked"] += len(done)
+            if done:
+                res["messages"].append(_("size photos linked: %s") % self._links_text(done))
+            if switched and check_option:
+                res["messages"].append(_("%s shown as image swatches") % option_write[1][
+                    "name"])
+            self._recheck_option_english(pid, before, written, check_option, links, res,
+                                         state)
+
+    @staticmethod
+    def _option1_id(product, detail):
+        """Salla id of the sheet's option1 in `detail`, "" when not matched once."""
+        key = mapping.norm_label(product["options"][0]["ar"])
+        hits = [o for o in (detail.get("options") or []) if isinstance(o, dict)
+                and mapping.norm_label(mapping.detail_option_name(
+                    detail, "option", o.get("id"))) == key]
+        return mapping.clean_id(hits[0].get("id")) if len(hits) == 1 else ""
+
+    @staticmethod
+    def _refused(error):
+        """Salla answered and refused (4xx): the write did not happen. Anything else
+        (no answer, 5xx after the retries) may have reached Salla."""
+        status = getattr(error, "http_status", None)
+        return status is not None and 400 <= status < 500
+
+    def _revert_option_display(self, option_write, display_type, res):
+        """Put option1 back to `display_type` after every value photo was refused.
+        -> "" (no link left to check) when done, the option id when it stays image."""
+        option_id, body = option_write
+        revert = {"name": body["name"], "display_type": display_type}
+        path = self._option_path("option", option_id)
+        try:
+            self.backend_id._request("PUT", path, lang="ar", payload=revert)
+        except UserError as e:
+            self._flag(res, "error", _(
+                "every size photo was refused and %(option)s could not be put back to "
+                "%(type)s (%(error)s): set its option type back by hand in Salla, or fix "
+                "and re-run") % {"option": body["name"], "type": display_type,
+                                 "error": _error_text(e)})
+            return option_id
+        self._flag(res, "error", _(
+            "every size photo was refused: %(option)s put back to %(type)s; fix and "
+            "re-run") % {"option": body["name"], "type": display_type})
+        return ""
+
+    def _recheck_option_english(self, pid, before, written, option_id, links, res, state):
+        """After the link PUTs, the names Salla had before (mapping.option_english_lost):
+        an English lost or changed is put back through the v17.0.5.0.2 path (lang ar,
+        the Arabic BEFORE + translations.en), an Arabic the link moved is put back
+        ({"name": <before>}, as _option_english_kept does). Then one verify read: the
+        Arabic (moved again -> put back, error, no more English option names), the
+        English, and the links themselves (option_id still image swatches, `links`
+        still linked): the name PUTs carry neither field and might drop them, as the
+        link PUT might drop the English (review S2). English is not put back when this
+        run stopped English writes: then only reported."""
+        if not written:
+            return
+        try:
+            after = self._get_product(pid, lang="ar", params={"with": "translations"})
+        except Exception as e:
+            if not isinstance(e, UserError):
+                _logger.exception("Salla upload: translations read of %s failed", pid)
+            after, error = None, _error_text(e)
+        else:
+            error = _("product not found")
+        if not after:
+            self._flag(res, "warning", _(
+                "English option/value names not re-checked after the size photo link "
+                "(%s): check them in Salla") % error)
+            return
+        restores, unknown, arabic = mapping.option_english_lost(before, after, written)
+        for kind, item_id, english in unknown:
+            self._flag(res, "warning", _(
+                "English %(kind)s name %(en)s not re-checked after the size photo link "
+                "(#%(id)s not in Salla's answer): check it in Salla") % {
+                "kind": kind, "en": english, "id": item_id})
+        lost = ", ".join(body["translations"]["en"][mapping.OPTION_EN_KEYS[kind]]
+                         for kind, item_id, body in restores)
+        if restores and not (state["en_supported"] and state["option_en"]):
+            self._flag(res, "warning", _(
+                "Salla dropped the English name(s) %s on the size photo link; English "
+                "writes are stopped in this run: enter them by hand in Salla") % lost)
+            # Their restore would also have put the Arabic back: an Arabic the link
+            # moved still is, name only (review round 2).
+            for kind, item_id, body in restores:
+                now = mapping.detail_option_name(after, kind, item_id)
+                if now is not None and not mapping.translation_kept(body["name"], now):
+                    arabic.append((kind, item_id, body["name"], now))
+            restores = []
+        put_back = []
+        for kind, item_id, old, new in arabic:
+            path = self._option_path(kind, item_id)
+            try:
+                self.backend_id._request("PUT", path, lang="ar", payload={"name": old})
+            except UserError as e:
+                self._flag(res, "error", _(
+                    "Salla changed the Arabic %(kind)s name %(old)s to %(new)s on the size "
+                    "photo link and putting it back failed (%(error)s): set it back to "
+                    "%(old)s on #%(pid)s in Salla by hand") % {
+                    "kind": kind, "old": old, "new": new, "error": _error_text(e),
+                    "pid": pid})
+                continue
+            self._flag(res, "warning", _(
+                "Salla changed the Arabic %(kind)s name %(old)s to %(new)s on the size "
+                "photo link: put back") % {"kind": kind, "old": old, "new": new})
+            put_back.append((kind, item_id, {"name": old}))
+        for kind, item_id, body in restores:
+            path = self._option_path(kind, item_id)
+            try:
+                self.backend_id._request("PUT", path, lang="ar", payload=body)
+            except UserError as e:
+                self._flag(res, "warning", _(
+                    "English %(kind)s name %(en)s lost on the size photo link and not put "
+                    "back (%(error)s): enter it by hand in Salla") % {
+                    "kind": kind, "error": _error_text(e),
+                    "en": body["translations"]["en"][mapping.OPTION_EN_KEYS[kind]]})
+                continue
+            put_back.append((kind, item_id, body))
+        if not put_back:
+            return
+        try:
+            check = self._get_product(pid, lang="ar", params={"with": "translations"})
+            # Plain read for the links: the shape the spike read them from.
+            shown = self._get_product(pid, lang="ar")
+        except Exception as e:
+            if not isinstance(e, UserError):
+                _logger.exception("Salla upload: read-back of %s failed", pid)
+            check = shown = None
+        if not check or not shown:
+            self._flag(res, "warning", _(
+                "names put back after the size photo link but not verified: check the "
+                "option names and size photos of #%s in Salla") % pid)
+            return
+        for kind, item_id, body in put_back:
+            now = mapping.detail_option_name(check, kind, item_id)
+            # None = not in the answer: reported below as not kept, never "changed".
+            if now is None or mapping.translation_kept(body["name"], now):
+                continue
+            state["option_en"] = False
+            try:
+                self.backend_id._request("PUT", self._option_path(kind, item_id), lang="ar",
+                                         payload={"name": body["name"]})
+            except UserError as e:
+                self._flag(res, "error", _(
+                    "the Arabic %(kind)s name changed when its English was put back and "
+                    "restoring it failed (%(error)s): set it back to %(name)s on #%(pid)s "
+                    "in Salla by hand (no more English option names in this run)") % {
+                    "kind": kind, "error": _error_text(e), "name": body["name"],
+                    "pid": pid})
+                continue
+            self._flag(res, "error", _(
+                "the Arabic %(kind)s name changed when its English was put back: Arabic "
+                "%(name)s restored; check #%(pid)s in Salla and enter the English by hand "
+                "(no more English option names in this run)") % {
+                "kind": kind, "name": body["name"], "pid": pid})
+        english = [(kind, item_id) for kind, item_id, body in put_back if "translations" in body]
+        still, gone, moved = mapping.option_english_lost(before, check, english)
+        missing = [body["translations"]["en"][mapping.OPTION_EN_KEYS[kind]]
+                   for kind, item_id, body in still] + [en for kind, item_id, en in gone]
+        if missing:
+            self._flag(res, "warning", _(
+                "Salla did not keep the English name(s) %s put back after the size photo "
+                "link: enter them by hand in Salla") % ", ".join(missing))
+        undone = mapping.option_image_lost(shown, option_id, links)
+        if undone:
+            self._flag(res, "error", _(
+                "Salla undid the size photo link when the names were put back (%s): link "
+                "the photos by hand in Salla and report it") % "; ".join(undone))
+            return
+        if english and not missing:
+            # A finding worth seeing (the demo never showed it), not a problem.
+            res["messages"].append(_(
+                "Salla dropped the English name(s) %s on the size photo link: put back")
+                % lost)
+
+    @staticmethod
+    def _links_text(links):
+        return ", ".join("%s -> %s" % (ar, name) for ar, name in links)
+
+    @staticmethod
+    def _photos_skipped_message(reasons, dry_run=False):
+        if dry_run:
+            return _("size photos would not be linked: %s") % "; ".join(reasons)
+        return _("size photos not linked (nothing changed for them): %s") % "; ".join(
+            reasons)
 
     @staticmethod
     def _webp_to_jpeg(content, filename):
@@ -1533,11 +1888,13 @@ class SallaProductUpload(models.TransientModel):
              "option2_value_ar": "منعش", "option2_value_en": "Fresh",
              "price": "30", "sale_price": "27", "stock": "50", "weight": "600",
              "weight_unit": "g", "image_1": "example-options-1.jpg",
-             "image_2": "example-options-2.jpg"},
+             "image_2": "example-options-500ml.jpg", "image_3": "example-options-1l.jpg",
+             "variant_image": "example-options-500ml.jpg"},
             {"handle": "example-options", "sku": "EXAMPLE-002-1000",
              "option1_value_ar": "1 لتر", "option1_value_en": "1 L",
              "option2_value_ar": "منعش", "option2_value_en": "Fresh",
-             "price": "50", "stock": "50", "weight": "1.1", "weight_unit": "kg"},
+             "price": "50", "stock": "50", "weight": "1.1", "weight_unit": "kg",
+             "variant_image": "example-options-1l.jpg"},
         ]
         for line, example in enumerate(examples, start=1):
             for col, name in enumerate(columns):
