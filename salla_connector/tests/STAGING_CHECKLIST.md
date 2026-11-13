@@ -1,4 +1,4 @@
-# salla_connector: staging checklist (odoo.sh `mainTest` build): F1 (A-I), F2a (J-N), F2b (O), F2a post-meeting (P), F3 (Q), F5 (R), F8 (S)
+# salla_connector: staging checklist (odoo.sh `mainTest` build): F1 (A-I), F2a (J-N), F2b (O), F2a post-meeting (P), F3 (Q), F5 (R), F8 (S), option images spike (T)
 
 Manual run by a human on the odoo.sh staging build. There is no local Odoo.
 Run the standalone suite first: `python3 salla_connector/tests/test_mapping.py` must end in `all passed`.
@@ -1254,3 +1254,61 @@ since Orders Synced Until.
     and both counts of step 181 unchanged. Any real-store order event in the build log reads `ok:ignored:catalog_only`. If a single real order appears in staging: **STOP**, uninstall the app from the real store, tell the lead (do not confirm, invoice or delete it by hand).
 186. Run the upload on the real store with **this** backend picked in the wizard, Dry Run first. Leave Import Orders off for the whole real run.
 187. **Every new build** (each push to `mainTest` = clean prod DB copy, no real backend): repeat 181-185 in the same order (create with Import Orders off, check it reads off) **before** the Webhook URL is updated in the Partners Portal or the app is reinstalled on the real store.
+
+## T. Option images spike (photo per size)
+
+**DEMO STORE ONLY (`461067869`).** Script: `tests/staging_option_images_spike.py`. It settles
+whether each **Size** value of a Salla product can show its own gallery photo through the API,
+and whether linking the photo damages the variants. It creates **one** throwaway product
+`SPIKE-OI-<yymmddhhmmss>` (Size صغير / كبير x Scent رائحة أ / رائحة ب = 4 variants, prices
+10 / 11 / 20 / 21, stock 3 / 4 / 5 / 6) and attaches 3 fake PNGs (grey **MAIN**, green **SMALL**,
+orange **LARGE**). It sets the Size option to `display_type: image` (A), then sets each Size value's
+`display_value` to its image id (B). After that it only reads. It refuses any store but the demo
+(checked on the backend and with `GET /store/info`), never deletes and never sends a status other
+than `hidden`. It writes only to the ids it created in the run, never sends `values` in an option PUT,
+never sends price or quantity in a value PUT, and never creates a value or a variant. Every paste creates
+a **new** product, so paste it once per run. No token is printed or typed.
+
+188. **Build and backend.** Build green with `salla_connector` **17.0.5.0.0 or later** (`_request` with `lang=` / `files=`). The demo backend (`store_id` `461067869`) exists and **Test Connection** is green. On a new build, redo step 37 first.
+189. **Run it.** odoo.sh > branch `mainTest` > current build > **Shell** tab > `odoo-bin shell`. Paste the **whole** file as it is in the repo (`RUN_SPIKE = True`). Expected: `store verified: demo 461067869`, some raw prints (keys, one value, the option GETs), then the block `===== OPTION IMAGES SPIKE FINDINGS (demo store 461067869, product #<id>, parent SKU SPIKE-OI-...) =====`, which ends with `Product #<id> left HIDDEN on the demo store, never deleted. ...` (or `Product #<id> NOT confirmed hidden (last status read '...'): hide it BY HAND ...`; see 190). If it prints `STOP: ...`, nothing was sent. Fix what it says (no backend bound to the demo store, module not upgraded, or `/store/info` answered another store), then paste again.
+190. **Copy only the FINDINGS block into the ticket** (from the `=====` line to the closing `Product #...` line, or to the last finding when no product was created). It holds only ids, statuses, HTTP codes and Salla error messages. If the developer asks for the raw prints above it, paste those to them as well: they contain only spike data and image file names. Read the lines like this:
+
+    | Finding | If it says | Then |
+    |---|---|---|
+    | `0 product created by this run` | an id | The spike product: check it in 191-192 |
+    | `0 product created by this run` | `none`, with `1 create outcome unknown: GET /products/sku/<parent> answered no product id ...: check the demo by hand` or `... not found by parent SKU (HTTP ...)` | The create timed out and the product could not be adopted, but it **may still exist** (created hidden, nothing else written to it). Search `SPIKE-OI-` in the demo dashboard, write down what you find and tell the developer |
+    | `1 create outcome unknown` | `adopted #<id> by parent SKU` | The create timed out but the spike found its product and went on: fine |
+    | `1 create` | `FAILED ...` | Nothing else ran. Send the line to the developer |
+    | `2 image ids` | each file `-> <id> (..., response id)` or `(..., detail, sort N)` | OK. `NOT FOUND` for the small or large file: that size is not linked (its `5 value ...` line says `SKIPPED: no image id`). Tell the developer |
+    | `2 attach stopped` | `unknown outcome on <file>: not re-sent` | Expected behaviour after a timeout. The later images were not sent. Paste again later (a new product) |
+    | `4 PUT /products/options/<size> {name, display_type: image}` | `ok`, or `HTTP 422 ...` | Write it down. On 422, look at the `5r ...` lines (A is retried once after B linked the images) |
+    | `4 Size after: display_type / type / name kept` (or `5r ...`) | `'image' / ... / True` | Salla took the image display type |
+    | `5 value #<id> (صغير)` / `(كبير)` | `display_value '<id>' (str): ok`, or `... HTTP 422 ... \| display_value <id> (int): ok` | Write down which type Salla accepted. `HTTP 422` on both: the API link with `display_value` does not work. Do 193 (link by hand + probe) |
+    | `5 value #<id> after: display_value / hashed / image_url -> linked to <file>: True/False` | `True` for both sizes | The API link works |
+    | `4` / `5` / `5r` / `7 variants/options intact after ...` | `yes` / `NO: ...` / `unknown: product unreadable ...` | Per-write detail for the verdict below |
+    | `7 VARIANTS INTACT` | `yes (option/value ids, names, prices, quantities; variant ids, skus, prices, stock, related_option_values identical at every step)` | Expected. Linking the photos does not touch the variants |
+    | `7 VARIANTS INTACT` | `NO: changed at step(s) [...]` | **STOP.** That write regenerated or changed the values or variants. Do not use option images in the uploader. Send every `variants/options intact` line to the developer and check the spike product's variants in the dashboard (191) |
+    | `7 VARIANTS INTACT` | `UNKNOWN: product unreadable at step(s) [...]` | A read failed (no change was seen in the other reads). Check the variants by hand in 191, or paste again later |
+    | `7 VARIANTS INTACT` | `unknown: no step 3 snapshot` | `3 snapshot FAILED`: A and B were not run (`step_a crashed` / `step_b crashed` with *no step 3 snapshot* is expected then). Paste again later |
+    | `<n> status after <write>` | `sale`, then `<n> POST status hidden: ok` and `<n> status after the POST (GET): hidden` | Expected: that write published the product and the spike hid it again. Write down which write it was |
+    | `<n> POST status hidden` | an HTTP error, or the last `status after ...` line is not `hidden` | **Hide the product by hand now** in the demo dashboard. Tell the developer |
+    | `7 product` and the closing `Product #...` line | `#<id> left HIDDEN on the demo store, never deleted.` | The last status the spike **read** was hidden. Confirm it in 191 |
+    | `7 product` and the closing `Product #...` line | `#<id> NOT confirmed hidden (last status read '<status>'): hide it BY HAND in the demo dashboard now.` | **Hide it by hand now**, reload the dashboard to confirm **Hidden**, and tell the developer |
+    | `7 final POST status hidden` / `7 final hide` | present | A step crashed or was refused, so the spike hid the product once more. If `7 final hide: FAILED ...: hide #<id> by hand` appears, **hide it by hand** (the closing line then says `NOT confirmed hidden (last status read None)`) |
+    | `REFUSED` | any | The guard stopped the run before a write it does not allow. Nothing outside the spike product was written. Send the line to the developer |
+    | `... crashed` | any | Send the line as it is to the developer |
+    | `6 GET ...` / `6 ?with=translations ...` | keys and values | Read-only. Write them down for the developer (where Salla keeps the link) |
+
+191. **Demo dashboard.** Products > search `SPIKE-OI-` > open the product with the id from `0 product created by this run`. Check and write down:
+    - Status **Hidden**.
+    - **Options:** Size (الحجم) shows as an image option, and each value shows its photo: صغير = green **SMALL**, كبير = orange **LARGE**. The grey **MAIN** image is linked to no size. Scent (الرائحة) is still a text option with no images.
+    - **Variants:** 4, SKUs `SPIKE-OI-...-S-A`, `-S-B`, `-L-A`, `-L-B`, prices 10 / 11 / 20 / 21, stock 3 / 4 / 5 / 6.
+    - A screenshot in the ticket is fine (only fake spike data).
+192. **Optional, storefront (demo only, never on the real store).** In the demo dashboard, make the spike product **visible by hand**. Open its page in the demo storefront, pick صغير, then كبير. Write down whether the main photo switches to the green SMALL / orange LARGE image. Then **hide it again by hand** and reload the dashboard to confirm it shows **Hidden**.
+193. **Probe after linking an image by hand** (when 190 shows the API link failing, or to compare with what the dashboard writes):
+    - In the demo dashboard, on the spike product (or another throwaway demo product with a size option), link an image to a size value by hand.
+    - Shell: in your copy of the file, change `RUN_SPIKE = True` to `RUN_SPIKE = False` **before** pasting (then nothing is created or written), paste it, and call `probe(<product id>)`. In a shell where the spike already ran, call `probe(<product id>)` directly.
+    - Expected: `store verified: demo 461067869`, then the product keys, each image (raw), `option #<id> '<name>' display_type ... type ..., keys [...]`, a `value, raw: {...}` line per value, the sku lines, the `?with=translations` lines and the `GET /products/options/...` lines. It sends GETs only (a write would raise `REFUSED: probe() never writes`).
+    - Copy for the developer: the Size `option #...` line, and the `value, raw:` lines of the value you linked by hand and of a value without an image. The difference shows which field the dashboard writes (`display_value`, `hashed_display_value`, `image_url` or another one).
+    - `STOP: ...` = wrong backend or store. Nothing was read.
+194. **Clean-up and record.** The spike product stays **hidden** on the demo store (the script never deletes; delete it by hand if wanted). Ticket: the FINDINGS block, what the dashboard showed (191), the storefront result (192, or *not run*), the probe lines (193, or *not run*), and which steps passed / failed / were not run. No tokens, no URLs with tokens, no customer data.
