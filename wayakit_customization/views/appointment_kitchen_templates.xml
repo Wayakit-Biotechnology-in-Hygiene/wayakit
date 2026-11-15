@@ -11,12 +11,26 @@
         </xpath>
     </template>
 
+    <!-- Pattern/title/placeholder come from models/appointment_phone.py so the
+         browser hint and the controller check share one KSA rule; the
+         dynamic t-att wins over the native static placeholder -->
     <template id="appointment_form_phone" inherit_id="appointment.appointment_form">
         <xpath expr="//input[@name='phone']" position="attributes">
             <attribute name="required">1</attribute>
-            <attribute name="pattern">\+?[\d\s]{8,20}</attribute>
-            <attribute name="title">Please enter numbers only, e.g. 05X XXX XXXX</attribute>
-            <attribute name="placeholder">05X XXX XXXX</attribute>
+            <attribute name="t-att">appointment_type._wk_phone_input_attrs()</attribute>
+        </xpath>
+        <xpath expr="//input[@name='phone']" position="after">
+            <small t-if="appointment_type._wk_is_ksa()" class="form-text o_wk_phone_note">
+                <i class="fa fa-lightbulb-o ms-2 me-1"></i>
+                Please enter your correct mobile number. Our team may contact you to confirm your booking, coordinate your appointment, and ensure the best service experience.
+            </small>
+        </xpath>
+    </template>
+
+    <!-- KSA shows its own note above instead of the SMS reminder hint -->
+    <template id="appointment_form_phone_sms" inherit_id="appointment_sms.appointment_form">
+        <xpath expr="//small[hasclass('form-text')][contains(@t-if, 'alarm_type')]" position="attributes">
+            <attribute name="t-if">appointment_type.reminder_ids.filtered(lambda r:r.alarm_type == 'sms') and not appointment_type._wk_is_ksa()</attribute>
         </xpath>
     </template>
 
@@ -33,6 +47,7 @@
                 <p class="mb-0">
                     <strong>Appointment failed!</strong>
                     Please book again with a valid phone number so our team can reach you.
+                    <t t-if="appointment_type._wk_is_ksa()">It must be a Saudi mobile number starting with 05, e.g. 05X XXX XXXX.</t>
                 </p>
             </div>
         </xpath>

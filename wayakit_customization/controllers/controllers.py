@@ -45,13 +45,14 @@ from odoo.addons.appointment.controllers.appointment import AppointmentControlle
 from odoo.addons.base.models.ir_qweb import keep_query
 import re
 
+from ..models.appointment_phone import phone_is_valid
+
 _logger = logging.getLogger(__name__)
 
 # HOME Deep Cleaning Care (formerly Curtain and Furniture Care). Matched by
 # ID first: the name was renamed once already and is translatable (Arabic site).
 HOME_DEEP_CLEANING_TYPE_ID = 3
 HOME_DEEP_CLEANING_NAMES = {"home deep cleaning care", "curtain and furniture care"}
-MIN_PHONE_DIGITS = 8
 
 # Car Wash Care for Al Khozama hotel guests (KAUST), reached by QR. Duplicate
 # of the Car Wash Care type with its own location and schedule; its orders get
@@ -100,10 +101,11 @@ class CustomAppointmentController(AppointmentController):
     def appointment_form_submit(self, appointment_type_id, datetime_str, duration_str, name, phone, email, staff_user_id=None, available_resource_ids=None, asked_capacity=1,
                                 guest_emails_str=None, **kwargs):
         kwargs.pop('duration_str', None)
-        if len(re.sub(r'\D', '', phone or '')) < MIN_PHONE_DIGITS:
+        appointment_type = request.env['appointment.type'].sudo().browse(appointment_type_id)
+        # Server-side guard: the form's HTML pattern can be bypassed
+        if not phone_is_valid(phone, appointment_type._wk_is_ksa()):
             return request.redirect('/appointment/%s?%s' % (
                 appointment_type_id, keep_query('*', state='failed-phone')))
-        appointment_type = request.env['appointment.type'].sudo().browse(appointment_type_id)
         if appointment_type and _is_home_deep_cleaning(appointment_type):
             # Kitchen keeps the full 2 h slot so availability is checked for
             # the longest possible visit; the real duration is set later

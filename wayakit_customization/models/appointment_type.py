@@ -3,6 +3,8 @@ from datetime import datetime, timedelta
 import requests
 import logging
 
+from .appointment_phone import KSA_COMPANY_ID, phone_input_attrs
+
 _logger = logging.getLogger(__name__)
 
 class AppointmentType(models.Model):
@@ -18,6 +20,16 @@ class AppointmentType(models.Model):
     completion_notification_title = fields.Char()
     completion_notification_body = fields.Text()
     product_tmpl_id = fields.Many2one('product.template', string='Product')
+
+    def _wk_is_ksa(self):
+        """True for types published on a KSA website. Single source for the
+        form template and the submit controller; never matched by name."""
+        # sudo: the public user cannot read res.company; exists(): the
+        # controller browses the id straight from the URL
+        return self.sudo().exists()[:1].website_id.company_id.id == KSA_COMPANY_ID
+
+    def _wk_phone_input_attrs(self):
+        return phone_input_attrs(self._wk_is_ksa())
 
     def status_notification_update(self):
         token = self.env['ir.config_parameter'].sudo().get_param('wayakit_customization.notification_token')
