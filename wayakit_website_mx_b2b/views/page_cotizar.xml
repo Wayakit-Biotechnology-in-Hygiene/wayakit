@@ -42,7 +42,7 @@
                             <label for="k01-ciudad" class="xf-ancho">Ciudad<input id="k01-ciudad" name="Ciudad"/></label>
                             <label for="k01-msg" class="xf-ancho">Mensaje (opcional)<textarea id="k01-msg" name="Mensaje"/></label>
                           </div>
-                          <label class="xf-acepto" for="k01-aviso"><input id="k01-aviso" type="checkbox" required="required" name="Aviso de Privacidad" value="Aceptado"/>Acepto el Aviso de Privacidad. * <a href="#">Leer aviso</a></label>
+                          <label class="xf-acepto" for="k01-aviso"><input id="k01-aviso" type="checkbox" required="required" name="Aviso de Privacidad" value="Aceptado"/>Acepto el Aviso de Privacidad. * <a href="https://wayakit.mx/pages/aviso-de-privacidad" target="_blank" rel="noopener">Leer aviso</a></label>
                           <div class="xf-env"><button class="wk-btn wk-btn-pri" type="submit"><span data-solo="demo">Agenda una DEMO</span><span data-solo="cot" hidden="hidden">Contáctenme</span> →</button><a class="wk-link" href="https://wa.me/525519054912">o escríbenos por WhatsApp</a><span id="s_website_form_result"/></div>
                           <input type="hidden" name="Origen" value="Página Cotizar y contacto"/>
                         </form>

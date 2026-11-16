@@ -360,7 +360,7 @@
                               </select></label>
                             <label for="f14-msg" class="f14-ancho">Mensaje (opcional)<textarea id="f14-msg" name="Mensaje"/></label>
                           </div>
-                          <label class="f14-acepto" for="f14-aviso"><input id="f14-aviso" type="checkbox" required="required" name="Aviso de Privacidad" value="Aceptado"/>Acepto el Aviso de Privacidad. * <a href="#">Leer aviso</a></label>
+                          <label class="f14-acepto" for="f14-aviso"><input id="f14-aviso" type="checkbox" required="required" name="Aviso de Privacidad" value="Aceptado"/>Acepto el Aviso de Privacidad. * <a href="https://wayakit.mx/pages/aviso-de-privacidad" target="_blank" rel="noopener">Leer aviso</a></label>
                           <div class="f14-env">
                             <button class="wk-btn wk-btn-pri" type="submit">Contáctenme →</button>
                             <a class="wk-link" href="https://wa.me/525519054912">o escríbenos por WhatsApp</a>
