@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from the approved design (paginas/<page>/ or rows/02-14). Copy is kept verbatim. -->
+<odoo>
+    <!-- noupdate: once installed the page belongs to the website editor; a module upgrade
+         must not overwrite what was edited in the UI. website_id is set by
+         website._wk_b2b_mx_bind (data/website_bind.xml), never here. -->
+    <data noupdate="1">
+        <template id="page_productos" name="WAYAKIT B2B · Productos">
+            <t t-call="website.layout">
+                <div id="wrap" class="oe_structure wk">
+                    <section class="wk-banda xh xh-claro">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/fondo-claro.jpg" alt="" loading="eager"/>
+                      <div class="wk-in">
+                        <p class="wk-ceja">Productos</p>
+                        <h1 class="wk-h1">Productos de limpieza (sin agua) para cada necesidad</h1>
+                        <p class="wk-lead">Portafolio profesional para tu empresa y líneas para casa, mascotas y autos en la tienda en línea.</p>
+                      </div>
+                    </section>
+                    <section class="wk-banda p02">
+                      <div class="wk-in wk-noche">
+                        <div class="p02-foto"><img src="/wayakit_website_mx_b2b/static/src/img/esc-medida.jpg" alt="Planta industrial limpia y luminosa"/></div>
+                        <div class="p02-txt">
+                          <p class="wk-ceja">Para tu empresa</p>
+                          <h2 class="wk-h2">Hacemos soluciones a tu medida</h2>
+                          <p>Tenemos productos para cada industria. Compartimos el portafolio profesional bajo solicitud.</p>
+                          <p>Déjanos tus datos y te contactaremos, en WAYAKIT creamos el producto adecuado para tu negocio y sus necesidades.</p>
+                          <h3>Conoce cada industria</h3>
+                          <div class="p02-ind">
+                            <a class="wk-vidrio-osc" href="/aviacion"><img src="/wayakit_website_mx_b2b/static/src/img/ico-avion.png" alt=""/>Aviación</a>
+                            <a class="wk-vidrio-osc" href="/transporte"><img src="/wayakit_website_mx_b2b/static/src/img/ico-camion.png" alt=""/>Transporte y flotillas</a>
+                            <a class="wk-vidrio-osc" href="/hospitales"><img src="/wayakit_website_mx_b2b/static/src/img/ico-hospital.png" alt=""/>Hospitales</a>
+                            <a class="wk-vidrio-osc" href="/restaurantes"><img src="/wayakit_website_mx_b2b/static/src/img/ico-restaurante.png" alt=""/>Restaurantes</a>
+                          </div>
+                          <a class="wk-btn wk-btn-pri" href="/cotizar#cotizacion">Solicita una cotización</a>
+                        </div>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-s2 p03">
+                      <div class="wk-in">
+                        <div class="wk-cabeza"><div><p class="wk-ceja">Para tu casa</p><h2 class="wk-h2">Líneas para tu casa</h2></div></div>
+                        <div class="wk-g3">
+                          <a class="wk-vidrio" href="https://mx-shop.wayakit.com/collections/biohome"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-casa.png" alt=""/><h3 class="wk-h3">Casa</h3><p>Productos biodegradables y de ahorro total de agua, para la efectiva limpieza integral del hogar.</p><small>Ver en la tienda ↗</small></a>
+                          <a class="wk-vidrio" href="https://mx-shop.wayakit.com/collections/bio-tech-mascotas-wayakit"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-huella.png" alt=""/><h3 class="wk-h3">Mascotas</h3><p>Desinfección y baño en seco de mascotas, elimina olores y repele pulgas y garrapatas.</p><small>Ver en la tienda ↗</small></a>
+                          <a class="wk-vidrio" href="https://mx-shop.wayakit.com/collections/biodrive"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-auto.png" alt=""/><h3 class="wk-h3">Autos</h3><p>Productos no corrosivos, para un eco-lavado en seco para todo tipo de vehículo.</p><small>Ver en la tienda ↗</small></a>
+                        </div>
+                        <div class="p03-tienda"><p>Todos nuestros productos para casa, mascotas y autos están en nuestra tienda en línea.</p><a class="wk-btn wk-btn-sec" href="https://mx-shop.wayakit.com/">Ir a la tienda en línea ↗</a></div>
+                      </div>
+                    </section>
+                    <section class="wk-banda p04">
+                      <div class="wk-in">
+                        <div class="wk-cabeza">
+                          <div><p class="wk-ceja">Reseñas</p><h2 class="wk-h2">Lo que dicen de nuestra línea para mascotas</h2></div>
+                          <a class="wk-link" href="https://mx-shop.wayakit.com/collections/bio-tech-mascotas-wayakit">Ver la línea para mascotas ↗</a>
+                        </div>
+                        <div class="wk-g3">
+                          <figure class="wk-vidrio"><img src="/wayakit_website_mx_b2b/static/src/img/resena-coco.jpg" alt="Coco, perro salchicha"/><blockquote>“Tengo un salchicha de mascota, Coco, le gusta jugar mucho con los perros, pero siempre termina babeado y el olor puede ser desagradable, pero con el baño en seco le quita completamente el olor con solo cepillarlo.”</blockquote><figcaption><b>Adriana Consejo</b>CDMX</figcaption></figure>
+                          <figure class="wk-vidrio"><img src="/wayakit_website_mx_b2b/static/src/img/resena-michelle.jpg" alt="Michelle con su perro"/><blockquote>“Lo uso mucho entre baños, mi perro es grande y tiene mucho pelo, sé que no lo debo bañar seguido, entonces WAYAKIT me ofrece una solución para cuando tengo que esperar a bañarlo y que no huela mal mi perro ni esté sucio.”</blockquote><figcaption><b>Michelle Bello</b>Puebla</figcaption></figure>
+                          <figure class="wk-vidrio"><img src="/wayakit_website_mx_b2b/static/src/img/resena-albergue.jpg" alt="Perros del albergue"/><blockquote>“Es mucho más práctico y más funcional que la espuma, menos complicado y de más fácil aplicación. En días nublados me sirve para bañar a los perros sin exponerlos a que se enfermen.”</blockquote><figcaption><b>Cristóbal de Albergue Canino</b>San Cristóbal, CDMX</figcaption></figure>
+                        </div>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-noche p05">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/banda-resultados.jpg" alt=""/>
+                      <div class="wk-in">
+                        <div><h2 class="wk-h2">¿Tu industria no está aquí?</h2><p class="wk-lead">Te acompañamos a desarrollar el proceso adecuado de limpieza acorde a tus instalaciones y brindamos capacitación a todo el personal involucrado.</p></div>
+                        <a class="wk-btn wk-btn-pri" href="/cotizar#cotizacion">Hacemos soluciones a tu medida</a>
+                      </div>
+                    </section>
+                </div>
+            </t>
+        </template>
+
+        <record id="page_productos_page" model="website.page">
+            <field name="url">/productos</field>
+            <field name="view_id" ref="page_productos"/>
+            <field name="is_published" eval="True"/>
+            <field name="website_meta_title">WAYAKIT B2B · Productos</field>
+        </record>
+    </data>
+</odoo>

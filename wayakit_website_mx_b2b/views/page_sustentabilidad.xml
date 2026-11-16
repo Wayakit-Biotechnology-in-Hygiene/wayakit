@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from the approved design (paginas/<page>/ or rows/02-14). Copy is kept verbatim. -->
+<odoo>
+    <!-- noupdate: once installed the page belongs to the website editor; a module upgrade
+         must not overwrite what was edited in the UI. website_id is set by
+         website._wk_b2b_mx_bind (data/website_bind.xml), never here. -->
+    <data noupdate="1">
+        <template id="page_sustentabilidad" name="WAYAKIT B2B · Sustentabilidad">
+            <t t-call="website.layout">
+                <div id="wrap" class="oe_structure wk">
+                    <section class="wk-banda xh xh-claro">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/fondo-claro.jpg" alt="" loading="eager"/>
+                      <div class="wk-in">
+                        <p class="wk-ceja">Obtén un certificado ambiental para tu negocio</p>
+                        <h1 class="wk-h1">Certificación del Círculo Medioambiental</h1>
+                        <p class="wk-lead">Al usar y promover los productos WAYAKIT aportas al cuidado del medio ambiente y a la conservación del agua en el planeta.</p>
+                        <p class="wk-lead">Al tener una certificación medioambiental en tu negocio generas un impacto positivo a tus clientes y tienes la oportunidad de alcanzar nuevos mercados.</p>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-s2 s02">
+                      <div class="wk-in">
+                        <div class="wk-cabeza"><div><p class="wk-ceja"><b>01</b>¿Cómo obtengo un certificado?</p><h2 class="wk-h2">Conoce los distintos sellos</h2></div></div>
+                        <ul>
+                          <li><img src="/wayakit_website_mx_b2b/static/src/img/circulo-verde.png" alt=""/><div class="wk-vidrio" style="height:130px"><small>Nivel 1 de 6</small><b>Círculo Verde</b><span>20 a 239 L al año</span></div></li>
+                          <li><img src="/wayakit_website_mx_b2b/static/src/img/circulo-azul.png" alt=""/><div class="wk-vidrio" style="height:164px"><small>Nivel 2 de 6</small><b>Círculo Azul</b><span>240 a 999 L al año</span></div></li>
+                          <li><img src="/wayakit_website_mx_b2b/static/src/img/circulo-bronce.png" alt=""/><div class="wk-vidrio" style="height:198px"><small>Nivel 3 de 6</small><b>Círculo Bronce</b><span>1,000 a 9,999 L al año</span></div></li>
+                          <li><img src="/wayakit_website_mx_b2b/static/src/img/circulo-plata.png" alt=""/><div class="wk-vidrio" style="height:232px"><small>Nivel 4 de 6</small><b>Círculo Plata</b><span>10,000 a 49,999 L al año</span></div></li>
+                          <li><img src="/wayakit_website_mx_b2b/static/src/img/circulo-oro.png" alt=""/><div class="wk-vidrio" style="height:266px"><small>Nivel 5 de 6</small><b>Círculo Oro</b><span>50,000 a 199,999 L al año</span></div></li>
+                          <li><img src="/wayakit_website_mx_b2b/static/src/img/circulo-platinum.png" alt=""/><div class="wk-vidrio" style="height:300px"><small>Nivel 6 de 6</small><b>Círculo Platinum</b><span>Más de 200,000 L al año</span></div></li>
+                        </ul>
+                        <p class="s02-nota">Nivel según los litros de fórmulas WAYAKIT que el negocio consume al año. La altura de cada barra marca el nivel, no la escala.</p>
+                      </div>
+                    </section>
+                    <section class="wk-banda s03">
+                      <div class="wk-in">
+                        <div>
+                          <div class="wk-cabeza"><div><p class="wk-ceja"><b>02</b>Impacto</p><h2 class="wk-h2">Categorías de impacto en sustentabilidad</h2></div></div>
+                          <ul>
+                            <li class="wk-vidrio"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-agua.png" alt=""/><b>Agua</b></li>
+                            <li class="wk-vidrio"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-hoja.png" alt=""/><b>Contaminación</b></li>
+                            <li class="wk-vidrio"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-energia.png" alt=""/><b>Energía</b></li>
+                            <li class="wk-vidrio"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-salud.png" alt=""/><b>Salud</b></li>
+                            <li class="wk-vidrio"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-sociedad.png" alt=""/><b>Sociedad</b></li>
+                          </ul>
+                        </div>
+                        <div class="wk-noche s03-ods" style="border-radius:var(--r-card);box-shadow:var(--sombra-osc)"><img src="/wayakit_website_mx_b2b/static/src/img/ods.png" alt="Objetivos de Desarrollo Sostenible de la ONU"/><strong>13 de 17</strong><p>Contribuyendo a 13 de 17 de los Objetivos de Desarrollo Sostenible de las Naciones Unidas.</p></div>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-noche s04">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/banda-resultados.jpg" alt=""/>
+                      <div class="wk-in">
+                        <div><h2 class="wk-h2">Certifica tu negocio al usar WAYAKIT</h2><p class="wk-lead">Cuéntanos cuántos litros usa tu operación y te decimos a qué círculo corresponde.</p></div>
+                        <a class="wk-btn wk-btn-sec" href="/cotizar#cotizacion">Solicita una cotización</a>
+                      </div>
+                    </section>
+                </div>
+            </t>
+        </template>
+
+        <record id="page_sustentabilidad_page" model="website.page">
+            <field name="url">/sustentabilidad</field>
+            <field name="view_id" ref="page_sustentabilidad"/>
+            <field name="is_published" eval="True"/>
+            <field name="website_meta_title">WAYAKIT B2B · Sustentabilidad</field>
+        </record>
+    </data>
+</odoo>

@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from the approved design (paginas/<page>/ or rows/02-14). Copy is kept verbatim. -->
+<odoo>
+    <!-- noupdate: once installed the page belongs to the website editor; a module upgrade
+         must not overwrite what was edited in the UI. website_id is set by
+         website._wk_b2b_mx_bind (data/website_bind.xml), never here. -->
+    <data noupdate="1">
+        <template id="page_hospitales" name="WAYAKIT B2B · Industria · Hospitales">
+            <t t-call="website.layout">
+                <div id="wrap" class="oe_structure wk">
+                    <section class="wk-banda wk-noche i01">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/esc-hospital.jpg" alt="Habitación de hospital limpia y luminosa" loading="eager"/>
+                      <div class="wk-in">
+                        <div class="i01-txt">
+                          <span class="wk-pildora">Máxima limpieza y desinfección certificada</span>
+                          <h1 class="wk-h1">WAYAKIT para hospitales</h1>
+                          <p class="wk-lead">Limpieza y desinfección eficaz de superficies de cualquier material, elimina olores, manchas, gérmenes y bacterias ahorrando tiempo y agua.</p>
+                          <a class="wk-btn wk-btn-pri" href="/hospitales#cotizar">Solicita una cotización</a>
+                        </div>
+                        <ul class="i01-datos">
+                          <li class="wk-vidrio-osc"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-escudo.png" alt=""/><div><small>Desinfección</small><b>99.999% en 30 segundos</b></div></li>
+                          <li class="wk-vidrio-osc"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-hospital.png" alt=""/><div><small>Zonas</small><b>Áreas comunes, zona gris y equipos médicos</b></div></li>
+                          <li class="wk-vidrio-osc"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-sello.png" alt=""/><div><small>Registro sanitario</small><b>COFEPRIS e INVIMA</b></div></li>
+                        </ul>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-s1 i03">
+                      <div class="wk-in">
+                        <div class="wk-cabeza"><div><p class="wk-ceja"><b>01</b>Ventajas</p><h2 class="wk-h2">Beneficios de usar WAYAKIT</h2></div></div>
+                        <ol>
+                          <li class="wk-vidrio"><span>01</span><p><b>Menor exposición a productos químicos agresivos:</b> Beneficia al personal médico y a los pacientes, disminuyendo el riesgo de irritaciones, alergias o efectos adversos asociados con químicos fuertes.</p></li>
+                          <li class="wk-vidrio"><span>02</span><p><b>Impacto ambiental reducido:</b> WAYAKIT es biodegradable y menos perjudicial para el medio ambiente.</p></li>
+                          <li class="wk-vidrio"><span>03</span><p><b>Seguridad para pacientes y personal:</b> Al evitar químicos fuertes, se reduce el riesgo de toxicidad o reacciones adversas en pacientes con sistemas inmunológicos comprometidos o sensibilidades químicas.</p></li>
+                          <li class="wk-vidrio"><span>04</span><p><b>Actividad antimicrobiana y antiviral:</b> WAYAKIT combate bacterias y virus gracias a sus ingredientes activos con propiedades antimicrobianas.</p></li>
+                          <li class="wk-vidrio"><span>05</span><p><b>Olores más agradables:</b> Proporciona un aroma fresco y agradable en las áreas desinfectadas, mejorando la experiencia de los pacientes.</p></li>
+                        </ol>
+                      </div>
+                    </section>
+                    <section class="wk-banda i04">
+                      <div class="wk-in">
+                        <div class="i04-usos">
+                          <div class="wk-cabeza" style="margin:0"><div><p class="wk-ceja"><b>02</b>Usos</p><h2 class="wk-h2">Dónde y cómo se aplica</h2></div></div>
+                          <ol>
+                            <li><span>01</span><p><b>Superficies hospitalarias:</b> Mesas, mostradores, camas y sillas, siempre que no estén en áreas blancas.</p></li>
+                            <li><span>02</span><p><b>Áreas comunes:</b> Salas de espera, pasillos y salas de descanso para reducir la propagación de gérmenes y bacterias.</p></li>
+                            <li><span>03</span><p><b>Baños hospitalarios:</b> Inodoros, lavamanos, pisos y otros accesorios, eliminando gérmenes, bacterias y olores no deseados.</p></li>
+                            <li><span>04</span><p><b>Habitaciones de pacientes:</b> Incluyendo elementos como las barandillas de las camas, proporcionando un ambiente limpio y saludable.</p></li>
+                          </ol>
+                        </div>
+                        <aside class="wk-noche i04-pres" style="border-radius:var(--r-lg);box-shadow:var(--sombra-osc)">
+                          <h3>Presentaciones</h3>
+                          <ul><li>Botellas de 1L con aspersor industrial</li><li>Garrafones de 5L</li><li>Garrafones de concentrado 5L</li><li>Bidón 20L</li><li>Bidón de concentrado 20L</li></ul>
+                          <p>Presentaciones disponibles para la línea profesional. Te ayudamos a elegir la adecuada para tu operación.</p>
+                          <a class="wk-btn wk-btn-pri" href="/hospitales#cotizar">Cotizar</a>
+                        </aside>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-noche i07">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/banda-resultados.jpg" alt=""/>
+                      <div class="wk-in">
+                        <div><strong>99.999%</strong><p class="i07-k">de efectividad en tan solo 30 segundos</p></div>
+                        <div class="i07-txt"><p>WAYAKIT es altamente efectivo para eliminar bacterias, virus y otros microorganismos perjudiciales.</p><p>Al limpiar y desinfectar con un solo producto hay una reducción en el tiempo de limpieza y por lo tanto una reducción de costos.</p></div>
+                      </div>
+                    </section>
+                    <section class="wk-banda i08">
+                      <div class="wk-in">
+                        <div class="wk-cabeza"><div><p class="wk-ceja"><b>03</b>Registros</p><h2 class="wk-h2">Desinfección antiviral certificada para todo tipo de superficies</h2></div></div>
+                        <ul class="wk-vidrio xr-tabla">
+                          <li><span class="xr-sello"><img src="/wayakit_website_mx_b2b/static/src/img/sello-cofepris.png" alt="COFEPRIS"/></span><b>Comisión Federal para la Protección contra Riesgos Sanitarios <span>(COFEPRIS)</span></b><dl><div><dt>Registro No.</dt> <dd>203300518X0392</dd></div></dl></li>
+                          <li><span class="xr-sello"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-matraz.png" alt=""/></span><b>Evaluación de actividad viricida y antimicrobiana</b><dl><div><dt>Estándar mexicano</dt> <dd>NMX-BB-040-SCFI-1999</dd></div></dl></li>
+                          <li><span class="xr-sello"><img src="/wayakit_website_mx_b2b/static/src/img/sello-invima.png" alt="INVIMA"/></span><b>Instituto Nacional de Vigilancia de Medicamentos y Alimentos <span>(INVIMA)</span></b><dl><div><dt>Registro No.</dt> <dd>NSOH09568-21CO</dd></div></dl></li>
+                          <li><span class="xr-sello"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-piel.png" alt=""/></span><b>Irritabilidad y sensibilización dérmica despreciable</b><dl><div><dt>Referencia</dt> <dd>OECD-406</dd></div></dl></li>
+                        </ul>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-noche i09" id="cotizar">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/banda-noche.jpg" alt=""/>
+                      <div class="wk-in">
+                        <div class="i09-izq">
+                          <p class="wk-ceja">Cotización</p>
+                          <h2 class="wk-h2">Hacemos soluciones a tu medida</h2>
+                          <p>Desinfección certificada para mantener tu hospital limpio y seguro, reduciendo costos operativos y cuidando del medio ambiente.</p>
+                          <div class="i09-wa"><span>¿Prefieres hablar ahora?</span><a class="wk-btn wk-btn-osc" href="https://wa.me/525519054912">¡Escríbenos por WhatsApp!</a></div>
+                        </div>
+                        <div class="s_website_form wk-form">
+                        <form class="wk-vidrio-osc xf" action="/website/form/" method="post" enctype="multipart/form-data" data-model_name="mail.mail" data-success-mode="message" hide-change-model="true">
+                          <!-- email_to stays empty: recipients are set server-side from the system parameter wayakit_website_mx_b2b.form_email_to; the input only makes Odoo add the form signature. -->
+                          <input type="hidden" name="email_to" value=""/>
+                          <input type="hidden" name="subject" value="B2B MX web — Cotización Hospitales"/>
+                          <input type="hidden" name="Industria" value="Hospitales"/>
+                          <h3 class="wk-h3">Solicita una cotización</h3>
+                          <p>Déjanos tus datos y te contactaremos. Los campos con * son obligatorios.</p>
+                          <div class="xf-campos">
+                            <label for="i09-empresa">Empresa *<input id="i09-empresa" name="Empresa" required="required"/></label>
+                            <label for="i09-nombre">Nombre *<input id="i09-nombre" name="Nombre" required="required"/></label>
+                            <label for="i09-correo">Correo electrónico *<input id="i09-correo" name="email_from" type="email" required="required"/></label>
+                            <label for="i09-tel">Teléfono<input id="i09-tel" name="Teléfono" type="text" inputmode="tel" autocomplete="tel"/></label>
+                            <label for="i09-msg" class="xf-ancho">Mensaje (opcional)<textarea id="i09-msg" name="Mensaje"/></label>
+                          </div>
+                          <label class="xf-acepto" for="i09-aviso"><input id="i09-aviso" type="checkbox" required="required" name="Aviso de Privacidad" value="Aceptado"/>Acepto el Aviso de Privacidad. * <a href="#">Leer aviso</a></label>
+                          <div class="xf-env"><button class="wk-btn wk-btn-pri" type="submit">Contáctenme →</button><a class="wk-link" href="https://wa.me/525519054912">o escríbenos por WhatsApp</a><span id="s_website_form_result"/></div>
+                          <input type="hidden" name="Origen" value="Página Hospitales"/>
+                        </form>
+                        <div class="s_website_form_end_message d-none"><div class="wk-vidrio-osc xf"><h3 class="wk-h3">¡Gracias por escribirnos!</h3><p>Recibimos tus datos. Un miembro del equipo WAYAKIT te contactará muy pronto.</p></div></div>
+                        </div>
+                      </div>
+                    </section>
+                </div>
+            </t>
+        </template>
+
+        <record id="page_hospitales_page" model="website.page">
+            <field name="url">/hospitales</field>
+            <field name="view_id" ref="page_hospitales"/>
+            <field name="is_published" eval="True"/>
+            <field name="website_meta_title">WAYAKIT B2B · Industria · Hospitales</field>
+        </record>
+    </data>
+</odoo>

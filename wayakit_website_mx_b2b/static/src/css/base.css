@@ -1,0 +1,47 @@
+/* WAYAKIT B2B MX: the Odoo side of the port (design.css holds the design itself).
+   web.assets_frontend is shared by every website of the DB: every rule is scoped to .wk. */
+
+/* The static design relied on browser defaults that Bootstrap's reboot changes (heading
+   weight/size/colour, list padding, dt weight, small size...). Revert them inside .wk only.
+   :where() gives these rules the specificity of a bare element selector, so any rule of
+   the design still wins over them. */
+:where(.wk) :is(h1,h2,h3,h4,h5,h6){margin:revert;font-size:revert;font-weight:revert;line-height:revert;color:revert}
+:where(.wk) :is(p,ol,ul,dl,dd){margin:revert}
+:where(.wk) :is(ol,ul){padding-left:revert}
+:where(.wk) dt{font-weight:revert}
+:where(.wk) small{font-size:revert}
+:where(.wk) label{display:revert;margin:revert}
+:where(.wk) :is(img,svg){vertical-align:revert}
+:where(.wk) button{border-radius:revert}
+:where(.wk) :is(button,input,select,textarea){margin:revert;font-family:revert;font-size:revert;line-height:revert}
+:where(.wk) :is(blockquote,figure){margin:revert;padding:revert;border:revert;font-style:revert}
+:where(.wk) a{text-decoration:revert}
+/* Odoo's a:hover (underline) outranks the design's .wk-btn{text-decoration:none}. */
+:where(.wk) a.wk-btn:hover{text-decoration:none}
+/* Tabs, DEMO/quote toggle and carousel hide content with the hidden attribute. */
+:where(.wk) [hidden]{display:none!important}
+
+/* Odoo's #wrapwrap is a flex column: main and the footer are snapped to pixels separately
+   and, with a fractional page height, a 1px white seam showed above the footer. */
+.wk.wk-pie{background:var(--noche);box-shadow:0 -1px 0 var(--noche)}
+
+/* Below 768px Odoo sets img:not(.o_animate){transform:none!important}, which removed the
+   design's mirrored background photos. Same mirror rules as design.css, forced back. */
+@media (max-width:767.98px){
+.wk .f07>.wk-bg,.wk .f11 .wk-bg,.wk .f14 .wk-bg,.wk .i09 .wk-bg,.wk .xh.wk-noche .wk-bg,.wk .k01 .wk-bg,
+.wk .wk-bg[style*="scaleX(-1)"]{transform:scaleX(-1)!important}
+}
+
+/* Floating WhatsApp button: the assembler's #wk-editor (container) and
+   #wk-editor > a / > #wk-wa rules, merged. */
+.wk.wk-flotante{position:fixed;right:max(16px,env(safe-area-inset-right,0px));bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:100;font:500 13px "Poppins",system-ui,sans-serif;display:grid;justify-items:end;gap:8px;background:none}
+.wk #wk-wa{border:0;border-radius:999px;color:#fff;cursor:pointer;font:inherit;text-decoration:none;width:56px;height:56px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#25d366;box-shadow:0 8px 20px rgba(3,18,34,.3);transition:transform .15s}
+.wk #wk-wa:hover{transform:translateY(-2px)}
+.wk #wk-wa:focus-visible{outline:3px solid rgba(58,155,212,.6);outline-offset:3px}
+.wk #wk-wa svg{width:30px;height:30px}
+/* In the design the button sat outside .wk, so the design's reduced-motion rule didn't reach it. */
+@media (prefers-reduced-motion:reduce){.wk #wk-wa{transition:transform .15s!important}}
+
+/* Website form status (Odoo renders it with .text-danger, unreadable on the night bands). */
+.wk .wk-form #s_website_form_result{font:500 14px var(--head)}
+.wk .wk-form #s_website_form_result.text-danger{color:#ffc9c9!important}

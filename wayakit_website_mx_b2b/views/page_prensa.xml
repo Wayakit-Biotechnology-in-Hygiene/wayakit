@@ -1,0 +1,207 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from the approved design (paginas/<page>/ or rows/02-14). Copy is kept verbatim. -->
+<odoo>
+    <!-- noupdate: once installed the page belongs to the website editor; a module upgrade
+         must not overwrite what was edited in the UI. website_id is set by
+         website._wk_b2b_mx_bind (data/website_bind.xml), never here. -->
+    <data noupdate="1">
+        <template id="page_prensa" name="WAYAKIT B2B · Prensa">
+            <t t-call="website.layout">
+                <div id="wrap" class="oe_structure wk">
+                    <section class="wk-banda wk-noche xh">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/banda-noche.jpg" alt="" loading="eager"/>
+                      <div class="wk-in">
+                        <p class="wk-ceja">Prensa</p>
+                        <h1 class="wk-h1">WAYAKIT en los medios</h1>
+                        <p class="wk-lead">Lo que medios de México y del mundo han publicado sobre WAYAKIT.</p>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-s1 r02">
+                      <div class="wk-in">
+                        <p class="wk-ceja" style="margin-bottom:18px">Nota destacada</p>
+                        <article class="wk-vidrio">
+                          <img src="/wayakit_website_mx_b2b/static/src/img/nota-sgs.jpg" alt="Personal de limpieza en la cabina de un avión"/>
+                          <div>
+                            <span class="wk-pildora">Aviación · −39% costos</span>
+                            <h2 class="wk-h3">Alianza con Saudi Ground Services (SGS) para limpieza sostenible de aeronaves en Arabia Saudita</h2>
+                            <p class="r02-big"><strong>39%</strong>de reducción de costos en la operación de SGS</p>
+                            <p class="r02-meta">Saudi Gazette · 2023</p>
+                            <a class="wk-link" href="https://saudigazette.com.sa/article/635683/SAUDI-ARABIA/WAYAKIT-partners-with-SGS-to-provide-sustainable-aircraft-cleaning-solutions-across-Saudi-Arabia">Leer nota ↗</a>
+                          </div>
+                        </article>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-s2 xc">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/fondo-claro.jpg" alt="" style="transform:scaleX(-1)"/>
+                      <div class="wk-in">
+                        <div class="wk-cabeza"><div><p class="wk-ceja"><b>01</b>México</p><h2 class="wk-h2">En medios de México</h2></div></div>
+                        <div class="xc-grid" data-carrusel="">
+                          <div class="xc-escena" aria-live="polite">
+                            <article class="xc-diapo activa" data-diapo="0">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-premio.jpg" alt="Luisa Javier en el laboratorio de WAYAKIT" loading="eager"/>
+                              <div class="wk-vidrio" style="background:none;border:0;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;border-radius:0">
+                                <span class="wk-pildora">Premio EXATEC 2026</span>
+                                <h3 class="wk-h3">Luisa Javier, cofundadora de WAYAKIT, recibe el Premio al Mérito EXATEC 2026</h3>
+                                <p>Más del 60% de la operación de WAYAKIT está a cargo de mujeres.</p>
+                                <p class="xc-meta">CONECTA · Tec de Monterrey · 20 feb 2026</p>
+                                <a class="wk-link" href="https://conecta.tec.mx/es/noticias/cuernavaca/emprendedores/premio-al-merito-es-para-egresada-de-cuernavaca-en-arabia-saudita">Leer nota ↗</a>
+                              </div>
+                            </article>
+                            <article class="xc-diapo" data-diapo="1">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-estancias.jpg" alt="Estudiantes del Tec en su estancia en WAYAKIT" loading="eager"/>
+                              <div class="wk-vidrio" style="background:none;border:0;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;border-radius:0">
+                                <span class="wk-pildora">−50% tiempo de producción</span>
+                                <h3 class="wk-h3">Estudiantes del Tec Campus Cuernavaca hacen estancias en la planta de WAYAKIT</h3>
+                                <p>Una estudiante diseñó una máquina que redujo en 50% el tiempo de producción de un producto.</p>
+                                <p class="xc-meta">CONECTA · Tec de Monterrey · 17 feb 2025</p>
+                                <a class="wk-link" href="https://conecta.tec.mx/es/noticias/cuernavaca/educacion/de-cuernavaca-arabia-saudita-estudiantes-hacen-estancias-en-wayakit">Leer nota ↗</a>
+                              </div>
+                            </article>
+                            <article class="xc-diapo" data-diapo="2">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-avion.jpg" alt="Limpieza de una superficie de avión con producto WAYAKIT" loading="eager"/>
+                              <div class="wk-vidrio" style="background:none;border:0;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;border-radius:0">
+                                <span class="wk-pildora">30 segundos</span>
+                                <h3 class="wk-h3">Cómo limpiar y desinfectar un avión en 30 segundos</h3>
+                                <p>Cumple estándares de Boeing y Airbus para limpieza de interiores sin dañar plástico, cuero, vidrio ni acrílico.</p>
+                                <p class="xc-meta">A21 · 13 nov 2023</p>
+                                <a class="wk-link" href="https://a21.com.mx/aerolineas/2023/11/13/como-limpiar-y-sanitizar-al-maximo-un-avion-en-30-segundos/">Leer nota ↗</a>
+                              </div>
+                            </article>
+                            <article class="xc-diapo" data-diapo="3">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-exatec2023.jpg" alt="Fundadoras de WAYAKIT en el laboratorio" loading="eager"/>
+                              <div class="wk-vidrio" style="background:none;border:0;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;border-radius:0">
+                                <span class="wk-pildora">Aviación</span>
+                                <h3 class="wk-h3">Egresada del Tec emprende con WAYAKIT en limpieza para el sector aerocomercial</h3>
+                                <p>Su desinfectante actúa en 30 segundos.</p>
+                                <p class="xc-meta">CONECTA · Tec de Monterrey · 1 sep 2023</p>
+                                <a class="wk-link" href="https://conecta.tec.mx/es/noticias/cuernavaca/emprendedores/exatec-emprende-en-servicios-aerocomerciales-de-limpieza">Leer nota ↗</a>
+                              </div>
+                            </article>
+                            <article class="xc-diapo" data-diapo="4">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-lideres.jpg" alt="Portada de Líderes Mexicanos, edición 369" loading="eager"/>
+                              <div class="wk-vidrio" style="background:none;border:0;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;border-radius:0">
+            
+                                <h3 class="wk-h3">WAYAKIT en Líderes Mexicanos, edición 369 (pág. 90)</h3>
+                                <p class="xc-meta">Líderes Mexicanos · jun 2021</p>
+                                <a class="wk-link" href="https://issuu.com/lideres_mexicanos/docs/lm369-junio">Leer nota ↗</a>
+                              </div>
+                            </article>
+                          </div>
+                          <div class="xc-lista" role="tablist" aria-label="Notas de prensa">
+                            <button type="button" role="tab" data-ir="0" aria-selected="true"><span class="xc-meta">CONECTA · Tec de Monterrey · 20 feb 2026</span><span class="xc-t">Luisa Javier, cofundadora de WAYAKIT, recibe el Premio al Mérito EXATEC 2026</span><span class="wk-pildora">Premio EXATEC 2026</span></button>
+                            <button type="button" role="tab" data-ir="1" aria-selected="false"><span class="xc-meta">CONECTA · Tec de Monterrey · 17 feb 2025</span><span class="xc-t">Estudiantes del Tec Campus Cuernavaca hacen estancias en la planta de WAYAKIT</span><span class="wk-pildora">−50% tiempo de producción</span></button>
+                            <button type="button" role="tab" data-ir="2" aria-selected="false"><span class="xc-meta">A21 · 13 nov 2023</span><span class="xc-t">Cómo limpiar y desinfectar un avión en 30 segundos</span><span class="wk-pildora">30 segundos</span></button>
+                            <button type="button" role="tab" data-ir="3" aria-selected="false"><span class="xc-meta">CONECTA · Tec de Monterrey · 1 sep 2023</span><span class="xc-t">Egresada del Tec emprende con WAYAKIT en limpieza para el sector aerocomercial</span><span class="wk-pildora">Aviación</span></button>
+                            <button type="button" role="tab" data-ir="4" aria-selected="false"><span class="xc-meta">Líderes Mexicanos · jun 2021</span><span class="xc-t">WAYAKIT en Líderes Mexicanos, edición 369 (pág. 90)</span></button>
+                          </div>
+                        </div>
+                      </div>
+                    </section>
+                    <section class="wk-banda xc">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/fondo-claro.jpg" alt="" style="transform:scaleX(-1)"/>
+                      <div class="wk-in">
+                        <div class="wk-cabeza"><div><p class="wk-ceja"><b>02</b>Internacional</p><h2 class="wk-h2">En medios internacionales</h2></div></div>
+                        <div class="xc-grid" data-carrusel="">
+                          <div class="xc-escena" aria-live="polite">
+                            <article class="xc-diapo activa" data-diapo="0">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-esg.jpg" alt="Imagen de la nota de Arab News" loading="eager"/>
+                              <div class="wk-vidrio" style="background:none;border:0;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;border-radius:0">
+                                <span class="wk-pildora">93% biodegradable</span>
+                                <h3 class="wk-h3">WAYAKIT, biotecnológica dirigida por mujeres, entre las empresas que redefinen el liderazgo ESG</h3>
+                                <p>Su desinfectante insignia elimina 99.999% de virus y bacterias en 30 segundos y tiene 93% de componentes biodegradables.</p>
+                                <p class="xc-meta">Arab News · 4 abr 2025</p>
+                                <a class="wk-link" href="https://www.arabnews.com/node/2595953/saudi-arabia">Leer nota ↗</a>
+                              </div>
+                            </article>
+                            <article class="xc-diapo" data-diapo="1">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-entrepreneur.jpg" alt="Fundadoras de WAYAKIT con sus productos" loading="eager"/>
+                              <div class="wk-vidrio" style="background:none;border:0;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;border-radius:0">
+                                <span class="wk-pildora">Air France · KLM</span>
+                                <h3 class="wk-h3">WAYAKIT crea productos no tóxicos para viajar más seguro</h3>
+                                <p>Su desinfectante se usa en cabinas de Air France y KLM.</p>
+                                <p class="xc-meta">Entrepreneur Middle East · 14 sep 2021</p>
+                                <a class="wk-link" href="https://mena.entrepreneur.com/article/385221">Leer nota ↗</a>
+                              </div>
+                            </article>
+                            <article class="xc-diapo" data-diapo="2">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-planta.jpg" alt="Inauguración de la planta piloto de WAYAKIT" loading="eager"/>
+                              <div class="wk-vidrio" style="background:none;border:0;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;border-radius:0">
+                                <span class="wk-pildora">20,000 L/día</span>
+                                <h3 class="wk-h3">WAYAKIT inaugura su primera planta piloto de producción en Arabia Saudita</h3>
+                                <p>Capacidad de hasta 20,000 litros diarios de bioformulaciones.</p>
+                                <p class="xc-meta">KAUST News · 29 abr 2021</p>
+                                <a class="wk-link" href="https://www.kaust.edu.sa/en/news/wayakit-inaugurates-pilot-production-facility">Leer nota ↗</a>
+                              </div>
+                            </article>
+                            <article class="xc-diapo" data-diapo="3">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-aeropuerto.jpg" alt="Personal de Swissport desinfectando un autobús de aeropuerto" loading="eager"/>
+                              <div class="wk-vidrio" style="background:none;border:0;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;border-radius:0">
+                                <span class="wk-pildora">3 aeropuertos</span>
+                                <h3 class="wk-h3">Alianza con Swissport para desinfectar aviones y autobuses en aeropuertos de Arabia Saudita</h3>
+                                <p>En los aeropuertos de Jeddah, Dammam y Riad.</p>
+                                <p class="xc-meta">KAUST News · 26 jul 2020</p>
+                                <a class="wk-link" href="https://www.kaust.edu.sa/en/news/wayakit-and-swissport-partner-to-protect-travelers">Leer nota ↗</a>
+                              </div>
+                            </article>
+                            <article class="xc-diapo" data-diapo="4">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-startup.jpg" alt="Fundadoras de WAYAKIT con un producto" loading="eager"/>
+                              <div class="wk-vidrio" style="background:none;border:0;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;border-radius:0">
+                                <span class="wk-pildora">Incubada en KAUST</span>
+                                <h3 class="wk-h3">Startup de la semana: WAYAKIT, la biotecnológica incubada por KAUST</h3>
+                                <p>Sus fundadoras entrevistaron a más de 100 viajeros de 23 nacionalidades antes de crear su primer producto.</p>
+                                <p class="xc-meta">Arab News · 9 dic 2019</p>
+                                <a class="wk-link" href="https://www.arabnews.com/node/1596551/saudi-arabia">Leer nota ↗</a>
+                              </div>
+                            </article>
+                            <article class="xc-diapo" data-diapo="5">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-aroma.jpg" alt="Productos de WAYAKIT" loading="eager"/>
+                              <div class="wk-vidrio" style="background:none;border:0;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;border-radius:0">
+                                <span class="wk-pildora">Origen KAUST</span>
+                                <h3 class="wk-h3">WAYAKIT: el dulce aroma del éxito</h3>
+                                <p>Creado por estudiantes de doctorado de KAUST.</p>
+                                <p class="xc-meta">KAUST News · 16 jun 2019</p>
+                                <a class="wk-link" href="https://www.kaust.edu.sa/en/news/wayakit-the-sweet-smell-of-success">Leer nota ↗</a>
+                              </div>
+                            </article>
+                            <article class="xc-diapo" data-diapo="6">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-contacto.jpg" alt="Sandra Medina y Luisa Javier en el laboratorio" loading="eager"/>
+                              <div class="wk-vidrio" style="background:none;border:0;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;border-radius:0">
+                                <span class="wk-pildora">TAQADAM</span>
+                                <h3 class="wk-h3">Egresada de Los Andes y una ingeniera mexicana crean en KAUST un producto biotecnológico</h3>
+                                <p>Competía con otras 50 startups por un premio de 100,000 USD de TAQADAM.</p>
+                                <p class="xc-meta">Revista Contacto · Universidad de los Andes · 2018–2019 · pág. 41</p>
+                                <a class="wk-link" href="https://ingenieria.uniandes.edu.co/sites/default/files/facultad-ingenieria/revista-contacto/revista-contacto-agua-investigacion.pdf#page=41">Leer nota ↗</a>
+                              </div>
+                            </article>
+                          </div>
+                          <div class="xc-lista" role="tablist" aria-label="Notas de prensa">
+                            <button type="button" role="tab" data-ir="0" aria-selected="true"><span class="xc-meta">Arab News · 4 abr 2025</span><span class="xc-t">WAYAKIT, biotecnológica dirigida por mujeres, entre las empresas que redefinen el liderazgo ESG</span><span class="wk-pildora">93% biodegradable</span></button>
+                            <button type="button" role="tab" data-ir="1" aria-selected="false"><span class="xc-meta">Entrepreneur Middle East · 14 sep 2021</span><span class="xc-t">WAYAKIT crea productos no tóxicos para viajar más seguro</span><span class="wk-pildora">Air France · KLM</span></button>
+                            <button type="button" role="tab" data-ir="2" aria-selected="false"><span class="xc-meta">KAUST News · 29 abr 2021</span><span class="xc-t">WAYAKIT inaugura su primera planta piloto de producción en Arabia Saudita</span><span class="wk-pildora">20,000 L/día</span></button>
+                            <button type="button" role="tab" data-ir="3" aria-selected="false"><span class="xc-meta">KAUST News · 26 jul 2020</span><span class="xc-t">Alianza con Swissport para desinfectar aviones y autobuses en aeropuertos de Arabia Saudita</span><span class="wk-pildora">3 aeropuertos</span></button>
+                            <button type="button" role="tab" data-ir="4" aria-selected="false"><span class="xc-meta">Arab News · 9 dic 2019</span><span class="xc-t">Startup de la semana: WAYAKIT, la biotecnológica incubada por KAUST</span><span class="wk-pildora">Incubada en KAUST</span></button>
+                            <button type="button" role="tab" data-ir="5" aria-selected="false"><span class="xc-meta">KAUST News · 16 jun 2019</span><span class="xc-t">WAYAKIT: el dulce aroma del éxito</span><span class="wk-pildora">Origen KAUST</span></button>
+                            <button type="button" role="tab" data-ir="6" aria-selected="false"><span class="xc-meta">Revista Contacto · Universidad de los Andes · 2018–2019 · pág. 41</span><span class="xc-t">Egresada de Los Andes y una ingeniera mexicana crean en KAUST un producto biotecnológico</span><span class="wk-pildora">TAQADAM</span></button>
+                          </div>
+                        </div>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-noche xd">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/banda-resultados.jpg" alt=""/>
+                      <div class="wk-in">
+                        <h2 class="wk-h2">¿Listo para probarlo en tu operación?</h2>
+                        <a class="wk-btn wk-btn-pri" href="/cotizar">Agenda una DEMO</a>
+                      </div>
+                    </section>
+                </div>
+            </t>
+        </template>
+
+        <record id="page_prensa_page" model="website.page">
+            <field name="url">/prensa</field>
+            <field name="view_id" ref="page_prensa"/>
+            <field name="is_published" eval="True"/>
+            <field name="website_meta_title">WAYAKIT B2B · Prensa</field>
+        </record>
+    </data>
+</odoo>
