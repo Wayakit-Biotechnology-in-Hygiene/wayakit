@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Loaded last and outside any noupdate block: runs on every install and upgrade.
+         Binds the module's pages and views to the "B2B MX" website (looked up by name),
+         then activates the header/footer view. -->
+    <function model="website" name="_wk_b2b_mx_bind"/>
+</odoo>

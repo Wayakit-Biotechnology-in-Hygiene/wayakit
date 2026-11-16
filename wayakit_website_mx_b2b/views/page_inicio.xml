@@ -1,0 +1,383 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from the approved design (paginas/<page>/ or rows/02-14). Copy is kept verbatim. -->
+<odoo>
+    <!-- noupdate: once installed the page belongs to the website editor; a module upgrade
+         must not overwrite what was edited in the UI. website_id is set by
+         website._wk_b2b_mx_bind (data/website_bind.xml), never here. -->
+    <data noupdate="1">
+        <template id="page_inicio" name="WAYAKIT B2B · Inicio">
+            <t t-call="website.layout">
+                <div id="wrap" class="oe_structure wk">
+                    <section class="wk-banda wk-noche f02">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/hero-noche.jpg" alt="" loading="eager"/>
+                      <div class="wk-in">
+                        <div class="f02-txt">
+                          <p class="wk-ceja">Investigación realizada en KAUST</p>
+                          <h1 class="wk-h1">Ciencia que funciona, precio que convence</h1>
+                          <p class="wk-lead">Biotecnología aplicada a la higiene: alta higiene, menor costo y operaciones sostenibles.</p>
+                          <div class="f02-cta">
+                            <p>¿No sabes por dónde empezar?</p>
+                            <div><a class="wk-btn wk-btn-pri" href="/cotizar">Agenda una DEMO →</a><a class="wk-btn wk-btn-osc" href="/#contacto">Contáctanos</a></div>
+                          </div>
+                        </div>
+                        <ul class="f02-datos">
+                          <li class="wk-vidrio-osc"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-escudo.png" alt=""/><div><b>Desinfección 99.999%</b><small>en 30 segundos</small></div></li>
+                          <li class="wk-vidrio-osc"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-sello.png" alt=""/><div><b>Registro sanitario COFEPRIS</b><small>203300518X0392</small></div></li>
+                          <li class="wk-vidrio-osc"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-bidon.png" alt=""/><div><b>Presentaciones</b><small>De 500 mL a 220 L. También en versión concentrada.</small></div></li>
+                        </ul>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-s2 f03">
+                      <div class="wk-in">
+                        <h2 class="wk-h2">¿Qué necesitas hoy?</h2>
+                        <div class="wk-g3">
+                          <a class="wk-vidrio f03-card" href="/#industrias"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-edificio.png" alt=""/><div><b>Equipar mi empresa →</b><small>Por industria, con demo y cotización.</small></div></a>
+                          <a class="wk-vidrio f03-card" href="/ciencia#registros"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-documento.png" alt=""/><div><b>Validar registros →</b><small>COFEPRIS, estándares y compatibilidad de materiales.</small></div></a>
+                          <a class="wk-vidrio f03-card" href="https://mx-shop.wayakit.com/"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-casa.png" alt=""/><div><b>Comprar para mi casa ↗</b><small>Hogar, Mascotas y Vehículos en la tienda en línea.</small></div></a>
+                        </div>
+                      </div>
+                    </section>
+                    <section class="wk-banda f04">
+                      <div class="wk-in">
+                        <p class="wk-ceja">Nuestros clientes nos respaldan</p>
+                        <div class="f04-cinta"><div class="f04-mover">
+                          <img src="/wayakit_website_mx_b2b/static/src/img/clientes.png" alt="Clientes: KLM, Delta Air Lines, National Car Rental, Petco, American Express, Avis, Air France, Bai, The Grand Lounge Elite, Swissport, SGS, Saudia, SPIC, White Space, Cruise Saudi, KAUST y Saudia Technic"/>
+                          <img src="/wayakit_website_mx_b2b/static/src/img/clientes.png" alt="" aria-hidden="true"/>
+                        </div></div>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-noche f05">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/banda-resultados.jpg" alt=""/>
+                      <div class="wk-in">
+                        <p class="wk-ceja">Resultados que reporta la prensa</p>
+                        <ul>
+                          <li><strong>−39%</strong><p>en costos para Saudi Ground Services (SGS)</p><a href="https://saudigazette.com.sa/article/635683/SAUDI-ARABIA/WAYAKIT-partners-with-SGS-to-provide-sustainable-aircraft-cleaning-solutions-across-Saudi-Arabia">Fuente: Saudi Gazette ↗</a></li>
+                          <li><strong>20,000 L</strong><p>de capacidad diaria en la planta piloto</p><a href="https://www.kaust.edu.sa/en/news/wayakit-inaugurates-pilot-production-facility">Fuente: KAUST News ↗</a></li>
+                          <li><strong>3 aeropuertos</strong><p>Jeddah, Dammam y Riad, con Swissport</p><a href="https://www.kaust.edu.sa/en/news/wayakit-and-swissport-partner-to-protect-travelers">Fuente: KAUST News ↗</a></li>
+                          <li><strong>93%</strong><p>de componentes biodegradables en el desinfectante insignia</p><a href="https://www.arabnews.com/node/2595953/saudi-arabia">Fuente: Arab News ↗</a></li>
+                        </ul>
+                      </div>
+                    </section>
+                    <section class="wk-banda f06" id="industrias">
+                      <div class="wk-in">
+                        <div class="wk-cabeza"><div>
+                          <p class="wk-ceja"><b>01</b>Industrias</p>
+                          <h2 class="wk-h2">Encuentra la solución para tu operación</h2>
+                          <p class="wk-lead">Elige tu industria: te mostramos dónde se usa, en qué presentaciones llega y qué registros la respaldan.</p>
+                        </div></div>
+                        <div class="f06-sel" data-tabs="">
+                          <div class="f06-tabs" role="tablist">
+                            <button role="tab" data-tab="avi" aria-selected="true"><img class="wk-ico-sm" src="/wayakit_website_mx_b2b/static/src/img/ico-avion.png" alt=""/>Aviación<span>→</span></button>
+                            <button role="tab" data-tab="tra" aria-selected="false"><img class="wk-ico-sm" src="/wayakit_website_mx_b2b/static/src/img/ico-camion.png" alt=""/>Transporte y flotillas<span>→</span></button>
+                            <button role="tab" data-tab="hos" aria-selected="false"><img class="wk-ico-sm" src="/wayakit_website_mx_b2b/static/src/img/ico-hospital.png" alt=""/>Hospitales<span>→</span></button>
+                            <button role="tab" data-tab="res" aria-selected="false"><img class="wk-ico-sm" src="/wayakit_website_mx_b2b/static/src/img/ico-restaurante.png" alt=""/>Restaurantes<span>→</span></button>
+                            <button role="tab" data-tab="med" aria-selected="false"><img class="wk-ico-sm" src="/wayakit_website_mx_b2b/static/src/img/ico-medida.png" alt=""/>A tu medida<span>→</span></button>
+                          </div>
+
+                          <div class="f06-panel" data-panel="avi" role="tabpanel">
+                            <img src="/wayakit_website_mx_b2b/static/src/img/esc-aviacion.jpg" alt="Cabina de pasajeros de un avión, limpia y luminosa" loading="eager"/>
+                            <div class="wk-vidrio f06-info">
+                              <span class="wk-pildora">Máxima desinfección antiviral certificada</span>
+                              <h3 class="wk-h3">Limpieza y desinfección rápida de superficies duras y blandas en aviones, helicópteros y otros vehículos aéreos.</h3>
+                              <h4>Dónde se usa</h4>
+                              <ul><li>Cabina, galera, baños y cabina de pilotos (con la supervisión del equipo autorizado).</li><li>Aplica directamente sobre la superficie y remueve el producto con una microfibra.</li></ul>
+                              <p class="f06-kpi">Reducción de tiempos en limpieza y desinfección, y por lo tanto disponibilidad de la aeronave en menor tiempo.</p>
+                              <div class="f06-ficha"><div><b>Presentaciones</b>Garrafón 5L · Garrafón de concentrado 5L · Bidón 20L · Bidón de concentrado 20L</div><div><b>Registros</b>COFEPRIS · EN1276, GSO 1948, NMX-BB-040 · OECD-406 · Compatibilidad Boeing y Boltaron · INVIMA</div></div>
+                              <a class="wk-link" href="/aviacion">Ver solución para aviación →</a>
+                            </div>
+                          </div>
+
+                          <div class="f06-panel" data-panel="tra" role="tabpanel" hidden="hidden">
+                            <img src="/wayakit_website_mx_b2b/static/src/img/esc-flotilla.jpg" alt="Flotilla de camionetas de reparto" loading="eager"/>
+                            <div class="wk-vidrio f06-info">
+                              <span class="wk-pildora">Reduce el tiempo de limpieza y aumenta tu productividad</span>
+                              <h3 class="wk-h3">Limpieza externa e interna de unidades de transporte 100% libre de agua.</h3>
+                              <h4>Dónde se usa</h4>
+                              <ul><li>Limpieza externa, interna y de motor para flotillas de transporte.</li><li>Limpieza externa, interna y de motor para autobuses de pasajeros.</li><li>Limpieza externa, interna y de motor para motocicletas y transportes de delivery.</li></ul>
+                              <p class="f06-kpi">Reducción de tiempos de limpieza al eliminar pasos de operación. Aumenta tu productividad.</p>
+                              <div class="f06-ficha"><div><b>Presentaciones</b>Botella 500mL · Botella 1L · Garrafón 5L · Bidón 20L · Tambo de 220L</div><div><b>Registros</b>COFEPRIS · NMX-BB-040-SCFI-1999 · OECD-406</div></div>
+                              <a class="wk-link" href="/transporte">Ver solución para transporte →</a>
+                            </div>
+                          </div>
+
+                          <div class="f06-panel" data-panel="hos" role="tabpanel" hidden="hidden">
+                            <img src="/wayakit_website_mx_b2b/static/src/img/esc-hospital.jpg" alt="Habitación de hospital limpia y luminosa" loading="eager"/>
+                            <div class="wk-vidrio f06-info">
+                              <span class="wk-pildora">Máxima limpieza y desinfección certificada</span>
+                              <h3 class="wk-h3">Limpieza y desinfección de zonas comunes, zona gris y equipos médicos.</h3>
+                              <h4>Dónde se usa</h4>
+                              <ul><li>Áreas comunes como salas de espera, pasillos y salas de descanso.</li><li>Mesas, mostradores, camas y sillas, siempre que no estén en áreas blancas.</li><li>Baños hospitalarios y habitaciones de pacientes.</li></ul>
+                              <p class="f06-kpi">Menor exposición a productos químicos agresivos: beneficia al personal médico y a los pacientes.</p>
+                              <div class="f06-ficha"><div><b>Presentaciones</b>Botella 1L con aspersor industrial · Garrafón 5L · Garrafón de concentrado 5L · Bidón 20L · Bidón de concentrado 20L</div><div><b>Registros</b>COFEPRIS · NMX-BB-040-SCFI-1999 · INVIMA · OECD-406</div></div>
+                              <a class="wk-link" href="/hospitales">Ver solución para hospitales →</a>
+                            </div>
+                          </div>
+
+                          <div class="f06-panel" data-panel="res" role="tabpanel" hidden="hidden">
+                            <img src="/wayakit_website_mx_b2b/static/src/img/esc-restaurante.jpg" alt="Cocina industrial de restaurante" loading="eager"/>
+                            <div class="wk-vidrio f06-info">
+                              <span class="wk-pildora">Máxima limpieza y desinfección certificada</span>
+                              <h3 class="wk-h3">Limpieza completa sin agua de cocinas, hornos, utensilios y estanterías.</h3>
+                              <h4>Dónde se usa</h4>
+                              <ul><li>Mesas, mostradores, pisos y utensilios de cocina.</li><li>Limpiar y desengrasar hornos, parrillas, freidoras y campanas extractoras.</li><li>Baños del restaurante: inodoros, lavamanos y pisos.</li></ul>
+                              <p class="f06-kpi">Cumplimiento de normativas y regulaciones: WAYAKIT cuenta con certificaciones en México.</p>
+                              <div class="f06-ficha"><div><b>Presentaciones</b>Botella 1L con aspersor industrial · Garrafón 5L · Garrafón de concentrado 5L · Bidón 20L · Bidón de concentrado 20L</div><div><b>Registros</b>COFEPRIS · NMX-BB-040-SCFI-1999 · INVIMA · OECD-406</div></div>
+                              <a class="wk-link" href="/restaurantes">Ver solución para restaurantes →</a>
+                            </div>
+                          </div>
+
+                          <div class="f06-panel" data-panel="med" role="tabpanel" hidden="hidden">
+                            <img src="/wayakit_website_mx_b2b/static/src/img/esc-medida.jpg" alt="Planta industrial limpia y luminosa" loading="eager"/>
+                            <div class="wk-vidrio f06-info">
+                              <span class="wk-pildora">Desarrollo de productos acorde a necesidades particulares</span>
+                              <h3 class="wk-h3">¿Tu industria no está aquí? Hacemos soluciones a tu medida.</h3>
+                              <h4>Dónde se usa</h4>
+                              <ul><li>Déjanos tus datos y te contactaremos, en WAYAKIT creamos el producto adecuado para tu negocio y sus necesidades.</li></ul>
+                              <p class="f06-kpi">Te acompañamos a desarrollar el proceso adecuado de limpieza acorde a tus instalaciones y brindamos capacitación a todo el personal involucrado.</p>
+                              <a class="wk-link" href="/cotizar#cotizacion">Cuéntanos tu operación →</a>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-s1 f07">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/fondo-claro.jpg" alt=""/>
+                      <div class="wk-in">
+                        <div class="wk-cabeza">
+                          <div><p class="wk-ceja"><b>02</b>En los medios</p><h2 class="wk-h2">WAYAKIT en la prensa</h2></div>
+                          <a class="wk-link" href="/prensa">Ver todas las notas →</a>
+                        </div>
+                        <div class="f07-grid" data-carrusel="">
+                          <div class="f07-escena" aria-live="polite">
+                            <article class="f07-diapo activa" data-diapo="0">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-sgs.jpg" alt="Personal de limpieza en la cabina de un avión" loading="eager"/>
+                              <div class="wk-vidrio">
+                                <span class="wk-pildora">Aviación · −39% costos</span>
+                                <h3 class="wk-h3">Alianza con Saudi Ground Services (SGS) para limpieza sostenible de aeronaves en Arabia Saudita</h3>
+                                <p class="f07-big"><strong>39%</strong>de reducción de costos en la operación de SGS</p>
+                                <p class="f07-meta">Saudi Gazette · 2023</p>
+                                <a class="wk-link" href="https://saudigazette.com.sa/article/635683/SAUDI-ARABIA/WAYAKIT-partners-with-SGS-to-provide-sustainable-aircraft-cleaning-solutions-across-Saudi-Arabia">Leer nota ↗</a>
+                              </div>
+                            </article>
+                            <article class="f07-diapo" data-diapo="1">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-esg.jpg" alt="Imagen de la nota de Arab News" loading="eager"/>
+                              <div class="wk-vidrio">
+                                <span class="wk-pildora">93% biodegradable</span>
+                                <h3 class="wk-h3">WAYAKIT, biotecnológica dirigida por mujeres, entre las empresas que redefinen el liderazgo ESG</h3>
+                                <p>Su desinfectante insignia elimina 99.999% de virus y bacterias en 30 segundos y tiene 93% de componentes biodegradables.</p>
+                                <p class="f07-meta">Arab News · 4 abr 2025</p>
+                                <a class="wk-link" href="https://www.arabnews.com/node/2595953/saudi-arabia">Leer nota ↗</a>
+                              </div>
+                            </article>
+                            <article class="f07-diapo" data-diapo="2">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-avion.jpg" alt="Limpieza de una superficie de avión con producto WAYAKIT" loading="eager"/>
+                              <div class="wk-vidrio">
+                                <span class="wk-pildora">30 segundos</span>
+                                <h3 class="wk-h3">Cómo limpiar y desinfectar un avión en 30 segundos</h3>
+                                <p>Cumple estándares de Boeing y Airbus para limpieza de interiores sin dañar plástico, cuero, vidrio ni acrílico.</p>
+                                <p class="f07-meta">A21 · 13 nov 2023</p>
+                                <a class="wk-link" href="https://a21.com.mx/aerolineas/2023/11/13/como-limpiar-y-sanitizar-al-maximo-un-avion-en-30-segundos/">Leer nota ↗</a>
+                              </div>
+                            </article>
+                            <article class="f07-diapo" data-diapo="3">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-aeropuerto.jpg" alt="Personal de Swissport desinfectando un autobús de aeropuerto" loading="eager"/>
+                              <div class="wk-vidrio">
+                                <span class="wk-pildora">3 aeropuertos</span>
+                                <h3 class="wk-h3">Alianza con Swissport para desinfectar aviones y autobuses en aeropuertos de Arabia Saudita</h3>
+                                <p>En los aeropuertos de Jeddah, Dammam y Riad.</p>
+                                <p class="f07-meta">KAUST News · 26 jul 2020</p>
+                                <a class="wk-link" href="https://www.kaust.edu.sa/en/news/wayakit-and-swissport-partner-to-protect-travelers">Leer nota ↗</a>
+                              </div>
+                            </article>
+                            <article class="f07-diapo" data-diapo="4">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-planta.jpg" alt="Inauguración de la planta piloto de WAYAKIT" loading="eager"/>
+                              <div class="wk-vidrio">
+                                <span class="wk-pildora">20,000 L/día</span>
+                                <h3 class="wk-h3">WAYAKIT inaugura su primera planta piloto de producción en Arabia Saudita</h3>
+                                <p>Capacidad de hasta 20,000 litros diarios de bioformulaciones.</p>
+                                <p class="f07-meta">KAUST News · 29 abr 2021</p>
+                                <a class="wk-link" href="https://www.kaust.edu.sa/en/news/wayakit-inaugurates-pilot-production-facility">Leer nota ↗</a>
+                              </div>
+                            </article>
+                            <article class="f07-diapo" data-diapo="5">
+                              <img src="/wayakit_website_mx_b2b/static/src/img/nota-premio.jpg" alt="Luisa Javier en el laboratorio de WAYAKIT" loading="eager"/>
+                              <div class="wk-vidrio">
+                                <span class="wk-pildora">Premio EXATEC 2026</span>
+                                <h3 class="wk-h3">Luisa Javier, cofundadora de WAYAKIT, recibe el Premio al Mérito EXATEC 2026</h3>
+                                <p>Más del 60% de la operación de WAYAKIT está a cargo de mujeres.</p>
+                                <p class="f07-meta">CONECTA · Tec de Monterrey · 20 feb 2026</p>
+                                <a class="wk-link" href="https://conecta.tec.mx/es/noticias/cuernavaca/emprendedores/premio-al-merito-es-para-egresada-de-cuernavaca-en-arabia-saudita">Leer nota ↗</a>
+                              </div>
+                            </article>
+                          </div>
+                          <div class="f07-lista" role="tablist" aria-label="Notas de prensa">
+                            <button type="button" role="tab" data-ir="0" aria-selected="true"><span class="f07-meta">Saudi Gazette · 2023</span><span class="f07-t">Alianza con Saudi Ground Services (SGS) para limpieza sostenible de aeronaves en Arabia Saudita</span><span class="wk-pildora">Aviación · −39% costos</span></button>
+                            <button type="button" role="tab" data-ir="1" aria-selected="false"><span class="f07-meta">Arab News · 4 abr 2025</span><span class="f07-t">WAYAKIT, biotecnológica dirigida por mujeres, entre las empresas que redefinen el liderazgo ESG</span><span class="wk-pildora">93% biodegradable</span></button>
+                            <button type="button" role="tab" data-ir="2" aria-selected="false"><span class="f07-meta">A21 · 13 nov 2023</span><span class="f07-t">Cómo limpiar y desinfectar un avión en 30 segundos</span><span class="wk-pildora">30 segundos</span></button>
+                            <button type="button" role="tab" data-ir="3" aria-selected="false"><span class="f07-meta">KAUST News · 26 jul 2020</span><span class="f07-t">Alianza con Swissport para desinfectar aviones y autobuses en aeropuertos de Arabia Saudita</span><span class="wk-pildora">3 aeropuertos</span></button>
+                            <button type="button" role="tab" data-ir="4" aria-selected="false"><span class="f07-meta">KAUST News · 29 abr 2021</span><span class="f07-t">WAYAKIT inaugura su primera planta piloto de producción en Arabia Saudita</span><span class="wk-pildora">20,000 L/día</span></button>
+                            <button type="button" role="tab" data-ir="5" aria-selected="false"><span class="f07-meta">CONECTA · Tec de Monterrey · 20 feb 2026</span><span class="f07-t">Luisa Javier, cofundadora de WAYAKIT, recibe el Premio al Mérito EXATEC 2026</span><span class="wk-pildora">Premio EXATEC 2026</span></button>
+                          </div>
+                        </div>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-s2 f08">
+                      <div class="wk-in">
+                        <div class="wk-cabeza"><div>
+                          <p class="wk-ceja"><b>03</b>Cómo trabajamos</p>
+                          <h2 class="wk-h2">No importa el tamaño de tu unidad, te acompañamos</h2>
+                          <p class="wk-lead">Desarrollamos el proceso adecuado de limpieza acorde a tus instalaciones y brindamos capacitación a todo el personal involucrado.</p>
+                        </div></div>
+                        <ol class="wk-g4" style="list-style:none;margin:0;padding:0">
+                          <li class="wk-vidrio"><span class="f08-num">01</span><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-chat.png" alt=""/><h3 class="wk-h3">Cuéntanos tu operación</h3><p>Déjanos tus datos y te contactaremos para conocer tu negocio y sus necesidades.</p></li>
+                          <li class="wk-vidrio"><span class="f08-num">02</span><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-medida.png" alt=""/><h3 class="wk-h3">Producto a tu medida</h3><p>Desarrollo de productos acorde a necesidades particulares: creamos el producto adecuado para tu negocio.</p></li>
+                          <li class="wk-vidrio"><span class="f08-num">03</span><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-personas.png" alt=""/><h3 class="wk-h3">Capacitación al personal</h3><p>Capacitamos a todo el personal involucrado en el proceso para la adecuada aplicación de tus productos.</p></li>
+                          <li class="wk-vidrio"><span class="f08-num">04</span><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-certificado.png" alt=""/><h3 class="wk-h3">Certifica tu negocio</h3><p>Obtén la certificación del Círculo Medioambiental según los litros de WAYAKIT que consumes al año.</p></li>
+                        </ol>
+                      </div>
+                    </section>
+                    <section class="wk-banda f09">
+                      <div class="wk-in">
+                        <div class="wk-cabeza">
+                          <div><p class="wk-ceja"><b>04</b>Registros y certificaciones</p><h2 class="wk-h2">Desinfección antiviral certificada</h2></div>
+                          <a class="wk-link" href="/ciencia#registros">Ver todos los registros →</a>
+                        </div>
+                        <ul class="wk-vidrio f09-tabla">
+                          <li><span class="f09-sello"><img src="/wayakit_website_mx_b2b/static/src/img/sello-cofepris.png" alt="COFEPRIS"/></span><b>Comisión Federal para la Protección contra Riesgos Sanitarios (COFEPRIS)</b><p>Registro No. 203300518X0392</p></li>
+                          <li><span class="f09-sello"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-matraz.png" alt=""/></span><b>Evaluación de actividad viricida y antimicrobiana</b><p>Estándar europeo: EN1276
+                    Regulación Estados Árabes del Golfo: GSO 1948
+                    Estándar mexicano: NMX-BB-040-SCFI-1999</p></li>
+                          <li><span class="f09-sello"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-piel.png" alt=""/></span><b>Irritabilidad y sensibilización dérmica despreciable</b><p>Referencia OECD-406</p></li>
+                          <li><span class="f09-sello"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-avion.png" alt=""/></span><b>Compatibilidad de materiales según estándares de aviación</b><p>Boeing: BSS7434, AMS1451C, AMS1452C, AMS1550B y AMS14553A
+                    Boltaron: 9851N y 9815E</p></li>
+                          <li><span class="f09-sello"><img src="/wayakit_website_mx_b2b/static/src/img/sello-invima.png" alt="INVIMA"/></span><b>Instituto Nacional de Vigilancia de Medicamentos y Alimentos (INVIMA)</b><p>Registro No. NSOH09568-21CO</p></li>
+                        </ul>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-s1 f10">
+                      <div class="wk-in">
+                        <div class="wk-cabeza">
+                          <div><p class="wk-ceja"><b>05</b>Productos</p><h2 class="wk-h2">Productos de limpieza (sin agua) para cada necesidad</h2></div>
+                          <a class="wk-link" href="/productos">Ver productos →</a>
+                        </div>
+                        <div class="f10-grid">
+                          <div class="wk-noche f10-emp" style="border-radius:var(--r-lg);box-shadow:var(--sombra-osc)">
+                            <p class="wk-ceja">Industria</p>
+                            <h3 class="wk-h3">Para tu empresa</h3>
+                            <p>Tenemos productos para cada industria. Compartimos el portafolio profesional bajo solicitud.</p>
+                            <p>Aviación, transporte y flotillas, hospitales, restaurantes y soluciones a tu medida.</p>
+                            <a class="wk-btn wk-btn-pri" href="/cotizar#cotizacion">Solicita una cotización</a>
+                          </div>
+                          <div class="f10-casa">
+                            <h3>Para tu casa</h3>
+                            <a class="wk-vidrio" href="https://mx-shop.wayakit.com/collections/biohome"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-casa.png" alt=""/><div><b>Casa</b><p>Productos biodegradables y de ahorro total de agua, para la efectiva limpieza integral del hogar.</p><small>Comprar en línea ↗</small></div></a>
+                            <a class="wk-vidrio" href="https://mx-shop.wayakit.com/collections/bio-tech-mascotas-wayakit"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-huella.png" alt=""/><div><b>Mascotas</b><p>Desinfección y baño en seco de mascotas, elimina olores y repele pulgas y garrapatas.</p><small>Comprar en línea ↗</small></div></a>
+                            <a class="wk-vidrio" href="https://mx-shop.wayakit.com/collections/biodrive"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-auto.png" alt=""/><div><b>Autos</b><p>Productos no corrosivos, para un eco-lavado en seco para todo tipo de vehículo.</p><small>Comprar en línea ↗</small></div></a>
+                          </div>
+                        </div>
+                      </div>
+                    </section>
+                    <section class="wk-banda f11">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/fondo-claro.jpg" alt=""/>
+                      <div class="wk-in">
+                        <div class="f11-foto"><img src="/wayakit_website_mx_b2b/static/src/img/fundadoras.png" alt="Fundadoras de WAYAKIT en el laboratorio de KAUST"/></div>
+                        <div class="f11-txt">
+                          <p class="wk-ceja"><b>06</b>Ciencia</p>
+                          <h2 class="wk-h2">La ciencia de la limpieza combinada con el poder de la naturaleza</h2>
+                          <p>Somos un grupo de investigadores y empresarios, liderados por mujeres latinoamericanas, especializados en el desarrollo de productos de limpieza y desinfección a través de biotecnología aplicada, en una de las universidades más reconocidas a nivel mundial, KAUST, ubicada en Arabia Saudita.</p>
+                          <ul class="f11-equipo">
+                            <li class="wk-vidrio"><b>Luisa Javier · Directora Ejecutiva</b><span>Doctorado en Biotecnología, KAUST</span></li>
+                            <li class="wk-vidrio"><b>Sandra Medina · Directora de Operaciones</b><span>Doctora en Ciencias Ambientales e Ingeniería, KAUST</span></li>
+                          </ul>
+                          <div class="f11-mujeres"><img src="/wayakit_website_mx_b2b/static/src/img/women-owned.png" alt="Logo Women Owned"/><p>Operada y controlada en más de un 60% por mujeres.</p></div>
+                          <a class="wk-link" href="/nosotros">Conoce a nuestro equipo →</a>
+                        </div>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-s2 f12">
+                      <div class="wk-in">
+                        <div class="wk-cabeza"><div>
+                          <p class="wk-ceja"><b>07</b>Sustentabilidad</p>
+                          <h2 class="wk-h2">Certifica tu negocio como uno sustentable</h2>
+                          <p class="wk-lead">Al tener una certificación medioambiental en tu negocio generas un impacto positivo a tus clientes y tienes la oportunidad de alcanzar nuevos mercados.</p>
+                        </div></div>
+                        <ul>
+                          <li class="wk-vidrio"><img src="/wayakit_website_mx_b2b/static/src/img/circulo-verde.png" alt=""/><b>Círculo Verde</b><span>20 a 239 L al año</span></li>
+                          <li class="wk-vidrio"><img src="/wayakit_website_mx_b2b/static/src/img/circulo-azul.png" alt=""/><b>Círculo Azul</b><span>240 a 999 L al año</span></li>
+                          <li class="wk-vidrio"><img src="/wayakit_website_mx_b2b/static/src/img/circulo-bronce.png" alt=""/><b>Círculo Bronce</b><span>1,000 a 9,999 L al año</span></li>
+                          <li class="wk-vidrio"><img src="/wayakit_website_mx_b2b/static/src/img/circulo-plata.png" alt=""/><b>Círculo Plata</b><span>10,000 a 49,999 L al año</span></li>
+                          <li class="wk-vidrio"><img src="/wayakit_website_mx_b2b/static/src/img/circulo-oro.png" alt=""/><b>Círculo Oro</b><span>50,000 a 199,999 L al año</span></li>
+                          <li class="wk-vidrio"><img src="/wayakit_website_mx_b2b/static/src/img/circulo-platinum.png" alt=""/><b>Círculo Platinum</b><span>Más de 200,000 L al año</span></li>
+                        </ul>
+                        <a class="wk-link" href="/sustentabilidad">Conoce cómo obtener tu certificado →</a>
+                      </div>
+                    </section>
+                    <section class="wk-banda f13">
+                      <div class="wk-in">
+                        <div class="f13-lado">
+                          <p class="wk-ceja"><b>08</b>Preguntas frecuentes</p>
+                          <h2 class="wk-h2">Lo que tu equipo de compras va a preguntar</h2>
+                          <p class="wk-lead">¿Dudas? Contacta directo con un miembro de la familia WAYAKIT.</p>
+                          <a class="wk-btn wk-btn-sec" href="https://wa.me/525519054912">¡Escríbenos por WhatsApp!</a>
+                        </div>
+                        <div class="f13-lista">
+                          <details open="open"><summary>¿Los productos necesitan agua?<span>+</span></summary><p>No. Todas las fórmulas de WAYAKIT pueden funcionar sin necesidad de usar agua, lo que reduce el consumo de dicho recurso aportando a su conservación.</p></details>
+                          <details><summary>¿En cuánto tiempo desinfectan?<span>+</span></summary><p>Las fórmulas de WAYAKIT toman solo 30 segundos en desinfectar en un 99.999% virus y bacterias más comunes.</p></details>
+                          <details><summary>¿Cuentan con registro sanitario?<span>+</span></summary><p>Sí. Registro COFEPRIS No. 203300518X0392 e INVIMA No. NSOH09568-21CO, además de evaluación de actividad viricida y antimicrobiana (EN1276, GSO 1948 y NMX-BB-040-SCFI-1999).</p></details>
+                          <details><summary>¿Qué presentaciones manejan para empresas?<span>+</span></summary><p>Garrafón de 5L, garrafón de concentrado 5L, bidón 20L, bidón de concentrado 20L y tambo de 220L, además de botellas de 500mL y 1L con aspersor.</p></details>
+                          <details><summary>¿Pueden desarrollar un producto para mi operación?<span>+</span></summary><p>Sí. Te acompañamos a desarrollar el proceso adecuado de limpieza acorde a tus instalaciones y brindamos capacitación a todo el personal involucrado en el proceso para la adecuada aplicación de tus productos.</p></details>
+                          <details><summary>¿Puedo comprar pocas piezas?<span>+</span></summary><p>Sí, en la tienda en línea de WAYAKIT encuentras las líneas Hogar, Mascotas y Vehículos.</p></details>
+                          <details><summary>¿Qué es la certificación del Círculo Medioambiental?<span>+</span></summary><p>Es el certificado ambiental que otorgamos a los negocios que usan nuestros productos, según los litros de WAYAKIT que consumen al año: de Círculo Verde (20 L) a Círculo Platinum (más de 200,000 L).</p></details>
+                        </div>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-noche f14" id="contacto">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/banda-noche.jpg" alt=""/>
+                      <div class="wk-in">
+                        <div class="f14-izq">
+                          <p class="wk-ceja"><b>09</b>Siguiente paso</p>
+                          <h2 class="wk-h2">Hacemos soluciones a tu medida</h2>
+                          <div class="f14-rutas">
+                            <a class="wk-vidrio-osc" href="/cotizar"><span>Estoy evaluando</span><b>Agenda una DEMO →</b></a>
+                            <a class="wk-vidrio-osc" href="https://mx-shop.wayakit.com/"><span>Necesito pocas piezas</span><b>Compra en la tienda en línea ↗</b></a>
+                          </div>
+                        </div>
+                        <div class="s_website_form wk-form">
+                        <form class="wk-vidrio-osc f14-form" data-form-demo="" action="/website/form/" method="post" enctype="multipart/form-data" data-model_name="crm.lead" data-success-mode="message" hide-change-model="true">
+                          <input type="hidden" name="name" value="B2B MX web — Cotización"/>
+                          <input type="hidden" name="Origen" value="Página de inicio"/>
+                          <h3 class="wk-h3">Solicita una cotización</h3>
+                          <p>Déjanos tus datos y te contactaremos. Los campos con * son obligatorios.</p>
+                          <div class="f14-campos">
+                            <label for="f14-empresa">Empresa *<input id="f14-empresa" name="partner_name" required="required"/></label>
+                            <label for="f14-nombre">Nombre *<input id="f14-nombre" name="contact_name" required="required"/></label>
+                            <label for="f14-correo">Correo electrónico *<input id="f14-correo" name="email_from" type="email" required="required"/></label>
+                            <label for="f14-tel">Teléfono<input id="f14-tel" name="phone" type="tel"/></label>
+                            <label for="f14-industria" class="f14-ancho">Industria *
+                              <select id="f14-industria" name="Industria" required="required">
+                                <option value="">Selecciona tu industria</option><option>Aviación</option><option>Transporte y flotillas</option><option>Hospitales</option><option>Restaurantes</option><option>Otra industria</option>
+                              </select></label>
+                            <label for="f14-msg" class="f14-ancho">Mensaje (opcional)<textarea id="f14-msg" name="description"/></label>
+                          </div>
+                          <label class="f14-acepto" for="f14-aviso"><input id="f14-aviso" type="checkbox" required="required" name="Aviso de Privacidad" value="Aceptado"/>Acepto el Aviso de Privacidad. * <a href="#">Leer aviso</a></label>
+                          <div class="f14-env">
+                            <button class="wk-btn wk-btn-pri" type="submit">Contáctenme →</button>
+                            <a class="wk-link" href="https://wa.me/525519054912">o escríbenos por WhatsApp</a>
+                          <span id="s_website_form_result"/></div>
+                        </form>
+                        <div class="s_website_form_end_message d-none"><div class="wk-vidrio-osc f14-form"><h3 class="wk-h3">¡Gracias por escribirnos!</h3><p class="f14-ok">Recibimos tus datos. Un miembro del equipo WAYAKIT te contactará muy pronto.</p></div></div>
+                        </div>
+                      </div>
+                    </section>
+                </div>
+            </t>
+        </template>
+
+        <record id="page_inicio_page" model="website.page">
+            <field name="url">/inicio</field>
+            <field name="view_id" ref="page_inicio"/>
+            <field name="is_published" eval="True"/>
+            <field name="website_meta_title">WAYAKIT B2B · Inicio</field>
+        </record>
+    </data>
+</odoo>

@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from the approved design (paginas/<page>/ or rows/02-14). Copy is kept verbatim. -->
+<odoo>
+    <!-- noupdate: once installed the page belongs to the website editor; a module upgrade
+         must not overwrite what was edited in the UI. website_id is set by
+         website._wk_b2b_mx_bind (data/website_bind.xml), never here. -->
+    <data noupdate="1">
+        <template id="page_ciencia" name="WAYAKIT B2B · Ciencia y registros">
+            <t t-call="website.layout">
+                <div id="wrap" class="oe_structure wk">
+                    <section class="wk-banda wk-noche xh c01">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/banda-noche.jpg" alt="" loading="eager"/>
+                      <div class="wk-in">
+                        <div class="c01-txt">
+                          <p class="wk-ceja">Formulado por científicas latinas</p>
+                          <h1 class="wk-h1">La ciencia de la limpieza combinada con el poder de la naturaleza</h1>
+                          <p class="wk-lead">Fórmulas biodegradables de ingredientes naturales potenciados con biotecnología.</p>
+                          <div><a class="wk-btn wk-btn-pri" href="/ciencia#tecnologia">Tecnología</a><a class="wk-btn wk-btn-osc" href="/ciencia#registros">Registros y certificaciones</a></div>
+                        </div>
+                        <div class="c01-foto"><img src="/wayakit_website_mx_b2b/static/src/img/fundadoras.png" alt="Fundadoras de WAYAKIT en el laboratorio de KAUST"/></div>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-s1 c02" id="tecnologia">
+                      <div class="wk-in">
+                        <div class="wk-cabeza"><div><p class="wk-ceja"><b>01</b>Tecnología</p><h2 class="wk-h2">Beneficios de usar WAYAKIT</h2></div></div>
+                        <ul class="wk-g3">
+                          <li class="wk-vidrio"><strong>+90%</strong><p>Por sus ingredientes naturales, todas las fórmulas de WAYAKIT tienen una biodegradabilidad de más del 90%. Reduciendo la contaminación de océanos y eliminando los riesgos a la salud de las personas.</p></li>
+                          <li class="wk-vidrio"><strong>Sin agua</strong><p>Todas las fórmulas de WAYAKIT pueden funcionar sin necesidad de usar agua, lo que reduce el consumo de dicho recurso aportando a su conservación.</p></li>
+                          <li class="wk-vidrio"><strong>30 s</strong><p>Las fórmulas de WAYAKIT toman solo 30 segundos en desinfectar en un 99.999% virus y bacterias más comunes. Libres de QUATS y de agentes tóxicos.</p></li>
+                        </ul>
+                        <ul class="c02-pil">
+                          <li><img class="wk-ico-sm" src="/wayakit_website_mx_b2b/static/src/img/ico-edificio.png" alt=""/><p>Investigación realizada en la Universidad KAUST, institución líder en alta tecnología.</p></li>
+                          <li><img class="wk-ico-sm" src="/wayakit_website_mx_b2b/static/src/img/ico-matraz.png" alt=""/><p>Compuestos naturales cuidadosamente seleccionados y potenciados con ciencia y tecnología de punta.</p></li>
+                          <li><img class="wk-ico-sm" src="/wayakit_website_mx_b2b/static/src/img/ico-personas.png" alt=""/><p>Cuidamos de ti, de tu entorno y del medio ambiente.</p></li>
+                        </ul>
+                        <a class="wk-link" href="/nosotros">Conoce a nuestro equipo →</a>
+                      </div>
+                    </section>
+                    <section class="wk-banda c03" id="registros">
+                      <div class="wk-in">
+                        <div class="wk-cabeza"><div><p class="wk-ceja"><b>02</b>Registros y certificaciones</p><h2 class="wk-h2">Desinfección antiviral certificada</h2></div></div>
+                        <ul class="wk-vidrio xr-tabla">
+                          <li><span class="xr-sello"><img src="/wayakit_website_mx_b2b/static/src/img/sello-cofepris.png" alt="COFEPRIS"/></span><b>Comisión Federal para la Protección contra Riesgos Sanitarios <span>(COFEPRIS)</span></b><dl><div><dt>Registro No.</dt> <dd>203300518X0392</dd></div></dl></li>
+                          <li><span class="xr-sello"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-matraz.png" alt=""/></span><b>Evaluación de actividad viricida y antimicrobiana</b><dl><div><dt>Estándar europeo</dt> <dd>EN1276</dd></div><div><dt>Regulación Estados Árabes del Golfo</dt> <dd>GSO 1948</dd></div><div><dt>Estándar mexicano</dt> <dd>NMX-BB-040-SCFI-1999</dd></div></dl></li>
+                          <li><span class="xr-sello"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-piel.png" alt=""/></span><b>Irritabilidad y sensibilización dérmica despreciable</b><dl><div><dt>Referencia</dt> <dd>OECD-406</dd></div></dl></li>
+                          <li><span class="xr-sello"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-avion.png" alt=""/></span><b>Compatibilidad de materiales según estándares de aviación</b><dl><div><dt>Boeing</dt> <dd>BSS7434, AMS1451C, AMS1452C, AMS1550B y AMS14553A</dd></div><div><dt>Boltaron</dt> <dd>9851N y 9815E</dd></div></dl></li>
+                          <li><span class="xr-sello"><img src="/wayakit_website_mx_b2b/static/src/img/sello-invima.png" alt="INVIMA"/></span><b>Instituto Nacional de Vigilancia de Medicamentos y Alimentos <span>(INVIMA)</span></b><dl><div><dt>Registro No.</dt> <dd>NSOH09568-21CO</dd></div></dl></li>
+                        </ul>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-noche xd">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/banda-resultados.jpg" alt=""/>
+                      <div class="wk-in">
+                        <h2 class="wk-h2">¿Listo para probarlo en tu operación?</h2>
+                        <a class="wk-btn wk-btn-pri" href="/cotizar">Agenda una DEMO</a>
+                      </div>
+                    </section>
+                </div>
+            </t>
+        </template>
+
+        <record id="page_ciencia_page" model="website.page">
+            <field name="url">/ciencia</field>
+            <field name="view_id" ref="page_ciencia"/>
+            <field name="is_published" eval="True"/>
+            <field name="website_meta_title">WAYAKIT B2B · Ciencia y registros</field>
+        </record>
+    </data>
+</odoo>

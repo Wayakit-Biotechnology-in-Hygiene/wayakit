@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from the approved design (paginas/<page>/ or rows/02-14). Copy is kept verbatim. -->
+<odoo>
+    <!-- noupdate: once installed the page belongs to the website editor; a module upgrade
+         must not overwrite what was edited in the UI. website_id is set by
+         website._wk_b2b_mx_bind (data/website_bind.xml), never here. -->
+    <data noupdate="1">
+        <template id="page_nosotros" name="WAYAKIT B2B · Nosotros">
+            <t t-call="website.layout">
+                <div id="wrap" class="oe_structure wk">
+                    <section class="wk-banda wk-noche xh n01">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/banda-noche.jpg" alt="" loading="eager"/>
+                      <div class="wk-in">
+                        <div class="n01-txt">
+                          <p class="wk-ceja">Nosotros</p>
+                          <h1 class="wk-h1">Empresa fundada y liderada por mujeres científicas latinoamericanas</h1>
+                          <p class="wk-lead">cuya misión es la preservación del medio ambiente a través de soluciones basadas en la biotecnología.</p>
+                          <div><a class="wk-btn wk-btn-pri" href="/cotizar">Agenda una DEMO</a><a class="wk-btn wk-btn-osc" href="/ciencia">Ciencia y registros</a></div>
+                        </div>
+                        <ul class="n01-fund">
+                          <li class="wk-vidrio-osc"><img src="/wayakit_website_mx_b2b/static/src/img/retrato-luisa.png" alt="Retrato de Luisa Javier"/><div><b>Luisa Javier</b><span>Directora Ejecutiva</span></div></li>
+                          <li class="wk-vidrio-osc"><img src="/wayakit_website_mx_b2b/static/src/img/retrato-sandra.png" alt="Retrato de Sandra Medina"/><div><b>Sandra Medina</b><span>Directora de Operaciones</span></div></li>
+                        </ul>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-s1 n02">
+                      <div class="wk-in">
+                        <div class="n02-foto"><img src="/wayakit_website_mx_b2b/static/src/img/fundadoras.png" alt="Investigadoras de WAYAKIT en el laboratorio"/></div>
+                        <div class="n02-txt">
+                          <p class="wk-ceja"><b>01</b>Origen</p>
+                          <h2 class="wk-h2">Formulado por científicas latinas</h2>
+                          <p>Somos un grupo de investigadores y empresarios, liderados por mujeres latinoamericanas, especializados en el desarrollo de productos de limpieza y desinfección a través de biotecnología aplicada, en una de las universidades más reconocidas a nivel mundial, KAUST, ubicada en Arabia Saudita.</p>
+                          <ul>
+                            <li><img class="wk-ico-sm" src="/wayakit_website_mx_b2b/static/src/img/ico-edificio.png" alt=""/><p>Investigación realizada en la Universidad KAUST, institución líder en alta tecnología.</p></li>
+                            <li><img class="wk-ico-sm" src="/wayakit_website_mx_b2b/static/src/img/ico-matraz.png" alt=""/><p>Compuestos naturales cuidadosamente seleccionados y potenciados con ciencia y tecnología de punta.</p></li>
+                            <li><img class="wk-ico-sm" src="/wayakit_website_mx_b2b/static/src/img/ico-personas.png" alt=""/><p>Cuidamos de ti, de tu entorno y del medio ambiente.</p></li>
+                          </ul>
+                        </div>
+                      </div>
+                    </section>
+                    <section class="wk-banda n03">
+                      <div class="wk-in">
+                        <div class="wk-cabeza"><div><p class="wk-ceja"><b>02</b>Fundadoras</p><h2 class="wk-h2">Conoce a nuestras fundadoras</h2></div></div>
+                        <ul>
+                          <li class="wk-vidrio"><img src="/wayakit_website_mx_b2b/static/src/img/retrato-luisa.png" alt="Retrato de Luisa Javier"/><div><p class="wk-ceja">Directora Ejecutiva</p><h3 class="wk-h3">Luisa Javier</h3><p>Científica ambiental con un doctorado en Biotecnología de la universidad de KAUST y experta en formulaciones de limpieza sostenibles y desalinización de agua.</p></div></li>
+                          <li class="wk-vidrio"><img src="/wayakit_website_mx_b2b/static/src/img/retrato-sandra.png" alt="Retrato de Sandra Medina"/><div><p class="wk-ceja">Directora de Operaciones</p><h3 class="wk-h3">Sandra Medina</h3><p>Doctora colombiana en Ciencias Ambientales e Ingeniería por la Universidad de KAUST, experta en ingeniería química y ambiental.</p></div></li>
+                        </ul>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-s2 n04">
+                      <div class="wk-in">
+                        <img class="n04-logo" src="/wayakit_website_mx_b2b/static/src/img/women-owned.png" alt="Logo Women Owned"/>
+                        <div class="n04-txt">
+                          <p class="wk-ceja"><b>03</b>Women Owned</p>
+                          <h2 class="wk-h2">Empresa liderada por mujeres</h2>
+                          <p>En todas nuestras etiquetas se encuentra el sello de <b>WOMEN OWNED INTERNATIONAL</b>, una certificación otorgada por el Consejo Nacional de Empresas de Mujeres en Washington (WBENC) y la institución global WeConnect.</p>
+                          <p>WAYAKIT es una empresa que es operada y controlada en más de un 60% por mujeres entre México, Colombia y Arabia Saudita.</p>
+                        </div>
+                      </div>
+                    </section>
+                    <section class="wk-banda n05">
+                      <div class="wk-in">
+                        <p class="wk-ceja" style="margin-bottom:18px"><b>04</b>Prensa</p>
+                        <a class="wk-vidrio n05-caja" href="/prensa"><img class="wk-ico" src="/wayakit_website_mx_b2b/static/src/img/ico-periodico.png" alt=""/><div><small>Medios de México e internacionales</small><b>WAYAKIT en la prensa</b></div><span>Ver todas las notas →</span></a>
+                      </div>
+                    </section>
+                    <section class="wk-banda wk-noche xd">
+                      <img class="wk-bg" src="/wayakit_website_mx_b2b/static/src/img/banda-resultados.jpg" alt=""/>
+                      <div class="wk-in">
+                        <h2 class="wk-h2">¿Listo para probarlo en tu operación?</h2>
+                        <a class="wk-btn wk-btn-pri" href="/cotizar">Agenda una DEMO</a>
+                      </div>
+                    </section>
+                </div>
+            </t>
+        </template>
+
+        <record id="page_nosotros_page" model="website.page">
+            <field name="url">/nosotros</field>
+            <field name="view_id" ref="page_nosotros"/>
+            <field name="is_published" eval="True"/>
+            <field name="website_meta_title">WAYAKIT B2B · Nosotros</field>
+        </record>
+    </data>
+</odoo>
