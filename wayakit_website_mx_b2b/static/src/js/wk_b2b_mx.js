@@ -4,7 +4,8 @@
    - [data-modos]: DEMO / quote toggle of the /cotizar form.
    - [data-carrusel]: press carousel, advances every 7 s, pauses on hover/focus.
    - .f01-nav: "Industrias" dropdown (hover + click on desktop, accordion on mobile) and hamburger.
-   Forms are not handled here: Odoo's s_website_form widget posts them to crm.lead. */
+   Forms are sent by Odoo's s_website_form widget (mail.mail); here only the DEMO/quote toggle
+   and a double-click guard. */
 
 import publicWidget from "@web/legacy/js/public/public_widget";
 
@@ -61,8 +62,8 @@ publicWidget.registry.WkB2bMx = publicWidget.Widget.extend({
             bs.forEach((b) => b.setAttribute("aria-pressed", b.getAttribute("data-modo") === modo ? "true" : "false"));
             box.querySelectorAll("[data-solo]").forEach((e) => {
                 e.hidden = e.getAttribute("data-solo") !== modo;
-                // The hidden "name" inputs carry the lead title of each mode: a disabled
-                // input is not submitted, so the lead gets the title of the visible mode.
+                // The hidden "subject" inputs carry the e-mail subject of each mode: a disabled
+                // input is not submitted, so the e-mail gets the subject of the visible mode.
                 if (e.tagName === "INPUT") {
                     e.disabled = e.hidden;
                 }

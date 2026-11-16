@@ -343,27 +343,29 @@
                           </div>
                         </div>
                         <div class="s_website_form wk-form">
-                        <form class="wk-vidrio-osc f14-form" data-form-demo="" action="/website/form/" method="post" enctype="multipart/form-data" data-model_name="crm.lead" data-success-mode="message" hide-change-model="true">
-                          <input type="hidden" name="name" value="B2B MX web — Cotización"/>
-                          <input type="hidden" name="Origen" value="Página de inicio"/>
+                        <form class="wk-vidrio-osc f14-form" data-form-demo="" action="/website/form/" method="post" enctype="multipart/form-data" data-model_name="mail.mail" data-success-mode="message" hide-change-model="true">
+                          <!-- email_to stays empty: recipients are set server-side from the system parameter wayakit_website_mx_b2b.form_email_to; the input only makes Odoo add the form signature. -->
+                          <input type="hidden" name="email_to" value=""/>
+                          <input type="hidden" name="subject" value="B2B MX web — Cotización"/>
                           <h3 class="wk-h3">Solicita una cotización</h3>
                           <p>Déjanos tus datos y te contactaremos. Los campos con * son obligatorios.</p>
                           <div class="f14-campos">
-                            <label for="f14-empresa">Empresa *<input id="f14-empresa" name="partner_name" required="required"/></label>
-                            <label for="f14-nombre">Nombre *<input id="f14-nombre" name="contact_name" required="required"/></label>
+                            <label for="f14-empresa">Empresa *<input id="f14-empresa" name="Empresa" required="required"/></label>
+                            <label for="f14-nombre">Nombre *<input id="f14-nombre" name="Nombre" required="required"/></label>
                             <label for="f14-correo">Correo electrónico *<input id="f14-correo" name="email_from" type="email" required="required"/></label>
-                            <label for="f14-tel">Teléfono<input id="f14-tel" name="phone" type="tel"/></label>
+                            <label for="f14-tel">Teléfono<input id="f14-tel" name="Teléfono" type="tel"/></label>
                             <label for="f14-industria" class="f14-ancho">Industria *
                               <select id="f14-industria" name="Industria" required="required">
                                 <option value="">Selecciona tu industria</option><option>Aviación</option><option>Transporte y flotillas</option><option>Hospitales</option><option>Restaurantes</option><option>Otra industria</option>
                               </select></label>
-                            <label for="f14-msg" class="f14-ancho">Mensaje (opcional)<textarea id="f14-msg" name="description"/></label>
+                            <label for="f14-msg" class="f14-ancho">Mensaje (opcional)<textarea id="f14-msg" name="Mensaje"/></label>
                           </div>
                           <label class="f14-acepto" for="f14-aviso"><input id="f14-aviso" type="checkbox" required="required" name="Aviso de Privacidad" value="Aceptado"/>Acepto el Aviso de Privacidad. * <a href="#">Leer aviso</a></label>
                           <div class="f14-env">
                             <button class="wk-btn wk-btn-pri" type="submit">Contáctenme →</button>
                             <a class="wk-link" href="https://wa.me/525519054912">o escríbenos por WhatsApp</a>
                           <span id="s_website_form_result"/></div>
+                          <input type="hidden" name="Origen" value="Página de inicio"/>
                         </form>
                         <div class="s_website_form_end_message d-none"><div class="wk-vidrio-osc f14-form"><h3 class="wk-h3">¡Gracias por escribirnos!</h3><p class="f14-ok">Recibimos tus datos. Un miembro del equipo WAYAKIT te contactará muy pronto.</p></div></div>
                         </div>

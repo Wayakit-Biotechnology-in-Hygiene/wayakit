@@ -90,21 +90,23 @@
                           <div class="i09-wa"><span>¿Prefieres hablar ahora?</span><a class="wk-btn wk-btn-osc" href="https://wa.me/525519054912">¡Escríbenos por WhatsApp!</a></div>
                         </div>
                         <div class="s_website_form wk-form">
-                        <form class="wk-vidrio-osc xf" action="/website/form/" method="post" enctype="multipart/form-data" data-model_name="crm.lead" data-success-mode="message" hide-change-model="true">
-                          <input type="hidden" name="name" value="B2B MX web — Cotización Aviación"/>
+                        <form class="wk-vidrio-osc xf" action="/website/form/" method="post" enctype="multipart/form-data" data-model_name="mail.mail" data-success-mode="message" hide-change-model="true">
+                          <!-- email_to stays empty: recipients are set server-side from the system parameter wayakit_website_mx_b2b.form_email_to; the input only makes Odoo add the form signature. -->
+                          <input type="hidden" name="email_to" value=""/>
+                          <input type="hidden" name="subject" value="B2B MX web — Cotización Aviación"/>
                           <input type="hidden" name="Industria" value="Aviación"/>
-                          <input type="hidden" name="Origen" value="Página Aviación"/>
                           <h3 class="wk-h3">Solicita una cotización</h3>
                           <p>Déjanos tus datos y te contactaremos. Los campos con * son obligatorios.</p>
                           <div class="xf-campos">
-                            <label for="i09-empresa">Empresa *<input id="i09-empresa" name="partner_name" required="required"/></label>
-                            <label for="i09-nombre">Nombre *<input id="i09-nombre" name="contact_name" required="required"/></label>
+                            <label for="i09-empresa">Empresa *<input id="i09-empresa" name="Empresa" required="required"/></label>
+                            <label for="i09-nombre">Nombre *<input id="i09-nombre" name="Nombre" required="required"/></label>
                             <label for="i09-correo">Correo electrónico *<input id="i09-correo" name="email_from" type="email" required="required"/></label>
-                            <label for="i09-tel">Teléfono<input id="i09-tel" name="phone" type="tel"/></label>
-                            <label for="i09-msg" class="xf-ancho">Mensaje (opcional)<textarea id="i09-msg" name="description"/></label>
+                            <label for="i09-tel">Teléfono<input id="i09-tel" name="Teléfono" type="tel"/></label>
+                            <label for="i09-msg" class="xf-ancho">Mensaje (opcional)<textarea id="i09-msg" name="Mensaje"/></label>
                           </div>
                           <label class="xf-acepto" for="i09-aviso"><input id="i09-aviso" type="checkbox" required="required" name="Aviso de Privacidad" value="Aceptado"/>Acepto el Aviso de Privacidad. * <a href="#">Leer aviso</a></label>
                           <div class="xf-env"><button class="wk-btn wk-btn-pri" type="submit">Contáctenme →</button><a class="wk-link" href="https://wa.me/525519054912">o escríbenos por WhatsApp</a><span id="s_website_form_result"/></div>
+                          <input type="hidden" name="Origen" value="Página Aviación"/>
                         </form>
                         <div class="s_website_form_end_message d-none"><div class="wk-vidrio-osc xf"><h3 class="wk-h3">¡Gracias por escribirnos!</h3><p>Recibimos tus datos. Un miembro del equipo WAYAKIT te contactará muy pronto.</p></div></div>
                         </div>

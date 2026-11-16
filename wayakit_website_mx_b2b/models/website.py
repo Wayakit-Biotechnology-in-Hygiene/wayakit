@@ -37,6 +37,18 @@ class Website(models.Model):
             module=MODULE, name=WEBSITE_NAME, count=len(websites),
         ))
 
+    def _wk_b2b_mx_is_this_website(self):
+        """True when self is the website our header/footer view is bound to.
+
+        Used on public requests (forms): unlike the name lookup of the bind it survives a
+        rename or a duplicated name, and it never raises. It matches the view key, not the
+        xmlid: when Odoo COWs website.layout for this website it replaces our view by a copy
+        without xmlid (same key) until the next upgrade, and the forms must keep working.
+        """
+        self.ensure_one()
+        return bool(self.env['ir.ui.view'].sudo().with_context(active_test=False).search_count(
+            [('key', '=', LAYOUT_XMLID), ('website_id', '=', self.id)], limit=1))
+
     @api.model
     def _wk_b2b_mx_bind(self):
         """Bind the pages and website views of this module to the "B2B MX" website.
@@ -111,15 +123,6 @@ class Website(models.Model):
             _logger.warning(
                 "%s: website %s already has other pages on %s; rename or unpublish them",
                 MODULE, website.id, ', '.join(sorted(set(clash.mapped('url')))),
-            )
-        # Only a warning, nothing is written (team settings are changed by hand in the UI).
-        # Form leads get the website's default sales team, and a lead's company follows its
-        # team: a team of another company would put Mexican prospects in that company's CRM.
-        team_company = website.crm_default_team_id.company_id
-        if team_company and team_company != website.company_id:
-            _logger.warning(
-                "%s: website %s default sales team belongs to %s, not to the website's company %s",
-                MODULE, website.id, team_company.name, website.company_id.name,
             )
 
         # "/" serves our home only when nobody chose another homepage for this website;
