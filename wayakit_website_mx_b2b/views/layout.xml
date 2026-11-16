@@ -66,7 +66,7 @@
                           <div><h3>Empresa</h3><ul><li><a href="/nosotros">Nosotros</a></li><li><a href="/ciencia">Ciencia y registros</a></li><li><a href="/prensa">Prensa</a></li><li><a href="/sustentabilidad">Sustentabilidad</a></li><li><a href="/cotizar">Agenda una DEMO</a></li></ul></div>
                           <div><h3>Contacto</h3><ul class="f15-contacto"><li><span>Escríbenos por WhatsApp</span><a href="https://wa.me/525519054912">55 1905 4912</a></li><li><span>Envíanos un correo</span><a href="mailto:contact@wayakit.com">contact@wayakit.com</a></li></ul></div>
                         </div>
-                        <div class="f15-base"><span>© WAYAKIT México</span><a href="#">Aviso de Privacidad</a></div>
+                        <div class="f15-base"><span>© WAYAKIT México</span><span class="f15-legal"><a href="https://wayakit.mx/pages/aviso-de-privacidad" target="_blank" rel="noopener">Aviso de Privacidad</a><a href="https://wayakit.mx/policies/terms-of-service" target="_blank" rel="noopener">Términos de servicio</a></span></div>
                       </div>
                     </div>
                 </footer>

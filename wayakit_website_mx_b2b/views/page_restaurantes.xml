@@ -98,7 +98,7 @@
                             <label for="i09-tel">Teléfono<input id="i09-tel" name="Teléfono" type="text" inputmode="tel" autocomplete="tel"/></label>
                             <label for="i09-msg" class="xf-ancho">Mensaje (opcional)<textarea id="i09-msg" name="Mensaje"/></label>
                           </div>
-                          <label class="xf-acepto" for="i09-aviso"><input id="i09-aviso" type="checkbox" required="required" name="Aviso de Privacidad" value="Aceptado"/>Acepto el Aviso de Privacidad. * <a href="#">Leer aviso</a></label>
+                          <label class="xf-acepto" for="i09-aviso"><input id="i09-aviso" type="checkbox" required="required" name="Aviso de Privacidad" value="Aceptado"/>Acepto el Aviso de Privacidad. * <a href="https://wayakit.mx/pages/aviso-de-privacidad" target="_blank" rel="noopener">Leer aviso</a></label>
                           <div class="xf-env"><button class="wk-btn wk-btn-pri" type="submit">Contáctenme →</button><a class="wk-link" href="https://wa.me/525519054912">o escríbenos por WhatsApp</a><span id="s_website_form_result"/></div>
                           <input type="hidden" name="Origen" value="Página Restaurantes"/>
                         </form>
