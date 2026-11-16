@@ -353,7 +353,7 @@
                             <label for="f14-empresa">Empresa *<input id="f14-empresa" name="Empresa" required="required"/></label>
                             <label for="f14-nombre">Nombre *<input id="f14-nombre" name="Nombre" required="required"/></label>
                             <label for="f14-correo">Correo electrónico *<input id="f14-correo" name="email_from" type="email" required="required"/></label>
-                            <label for="f14-tel">Teléfono<input id="f14-tel" name="Teléfono" type="tel"/></label>
+                            <label for="f14-tel">Teléfono<input id="f14-tel" name="Teléfono" type="text" inputmode="tel" autocomplete="tel"/></label>
                             <label for="f14-industria" class="f14-ancho">Industria *
                               <select id="f14-industria" name="Industria" required="required">
                                 <option value="">Selecciona tu industria</option><option>Aviación</option><option>Transporte y flotillas</option><option>Hospitales</option><option>Restaurantes</option><option>Otra industria</option>

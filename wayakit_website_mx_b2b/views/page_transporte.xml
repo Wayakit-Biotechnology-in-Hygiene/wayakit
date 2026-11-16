@@ -113,7 +113,7 @@
                             <label for="i09-empresa">Empresa *<input id="i09-empresa" name="Empresa" required="required"/></label>
                             <label for="i09-nombre">Nombre *<input id="i09-nombre" name="Nombre" required="required"/></label>
                             <label for="i09-correo">Correo electrónico *<input id="i09-correo" name="email_from" type="email" required="required"/></label>
-                            <label for="i09-tel">Teléfono<input id="i09-tel" name="Teléfono" type="tel"/></label>
+                            <label for="i09-tel">Teléfono<input id="i09-tel" name="Teléfono" type="text" inputmode="tel" autocomplete="tel"/></label>
                             <label for="i09-msg" class="xf-ancho">Mensaje (opcional)<textarea id="i09-msg" name="Mensaje"/></label>
                           </div>
                           <label class="xf-acepto" for="i09-aviso"><input id="i09-aviso" type="checkbox" required="required" name="Aviso de Privacidad" value="Aceptado"/>Acepto el Aviso de Privacidad. * <a href="#">Leer aviso</a></label>
