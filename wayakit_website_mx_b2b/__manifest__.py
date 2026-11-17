@@ -1,6 +1,6 @@
 {
     'name': 'Wayakit - B2B MX Website',
-    'version': '17.0.1.1.3',
+    'version': '17.0.1.1.4',
     'summary': 'Pages, header and footer of the "B2B MX" website (approved design), '
                'quote/DEMO forms sent by e-mail',
     'description': """
