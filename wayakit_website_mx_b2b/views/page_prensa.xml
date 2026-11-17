@@ -201,7 +201,7 @@
             <field name="url">/prensa</field>
             <field name="view_id" ref="page_prensa"/>
             <field name="is_published" eval="True"/>
-            <field name="website_meta_title">WAYAKIT B2B · Prensa</field>
+            <field name="website_meta_title">Prensa · WAYAKIT México</field>
         </record>
     </data>
 </odoo>

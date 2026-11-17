@@ -113,7 +113,7 @@
             <field name="url">/hospitales</field>
             <field name="view_id" ref="page_hospitales"/>
             <field name="is_published" eval="True"/>
-            <field name="website_meta_title">WAYAKIT B2B · Industria · Hospitales</field>
+            <field name="website_meta_title">Hospitales · WAYAKIT México</field>
         </record>
     </data>
 </odoo>

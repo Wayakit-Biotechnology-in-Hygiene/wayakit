@@ -63,7 +63,7 @@
             <field name="url">/ciencia</field>
             <field name="view_id" ref="page_ciencia"/>
             <field name="is_published" eval="True"/>
-            <field name="website_meta_title">WAYAKIT B2B · Ciencia y registros</field>
+            <field name="website_meta_title">Ciencia y registros · WAYAKIT México</field>
         </record>
     </data>
 </odoo>

@@ -114,7 +114,7 @@
             <field name="url">/restaurantes</field>
             <field name="view_id" ref="page_restaurantes"/>
             <field name="is_published" eval="True"/>
-            <field name="website_meta_title">WAYAKIT B2B · Industria · Restaurantes</field>
+            <field name="website_meta_title">Restaurantes · WAYAKIT México</field>
         </record>
     </data>
 </odoo>

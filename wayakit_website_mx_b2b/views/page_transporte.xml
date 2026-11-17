@@ -132,7 +132,7 @@
             <field name="url">/transporte</field>
             <field name="view_id" ref="page_transporte"/>
             <field name="is_published" eval="True"/>
-            <field name="website_meta_title">WAYAKIT B2B · Industria · Transporte y flotillas</field>
+            <field name="website_meta_title">Transporte y flotillas · WAYAKIT México</field>
         </record>
     </data>
 </odoo>

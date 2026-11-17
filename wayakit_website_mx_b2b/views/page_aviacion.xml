@@ -120,7 +120,7 @@
             <field name="url">/aviacion</field>
             <field name="view_id" ref="page_aviacion"/>
             <field name="is_published" eval="True"/>
-            <field name="website_meta_title">WAYAKIT B2B · Industria · Aviación</field>
+            <field name="website_meta_title">Aviación · WAYAKIT México</field>
         </record>
     </data>
 </odoo>

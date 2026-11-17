@@ -1,3 +1,4 @@
+import base64
 import logging
 
 from odoo import _, api, models, tools
@@ -9,6 +10,7 @@ MODULE = 'wayakit_website_mx_b2b'
 WEBSITE_NAME = 'B2B MX'
 HOME_URL = '/inicio'
 LAYOUT_XMLID = MODULE + '.layout_b2b_mx'
+FAVICON_PATH = MODULE + '/static/src/img/favicon-wayakit.png'
 
 
 class Website(models.Model):
@@ -48,6 +50,23 @@ class Website(models.Model):
         self.ensure_one()
         return bool(self.env['ir.ui.view'].sudo().with_context(active_test=False).search_count(
             [('key', '=', LAYOUT_XMLID), ('website_id', '=', self.id)], limit=1))
+
+    def _wk_b2b_mx_set_favicon(self):
+        """Put the WAYAKIT mark as favicon, only while self still has Odoo's default favicon.
+
+        A favicon chosen by hand is never replaced. website.write turns the PNG into the
+        256px ICO Odoo serves (centre crop to a square: the mark's 426x414 canvas only loses
+        transparent margin).
+        """
+        self.ensure_one()
+        current = self.with_context(bin_size=False).favicon or b''
+        if isinstance(current, str):
+            current = current.encode()
+        if current != self._default_favicon():
+            return False
+        with tools.file_open(FAVICON_PATH, 'rb') as f:
+            self.favicon = base64.b64encode(f.read())
+        return True
 
     @api.model
     def _wk_b2b_mx_bind(self):
@@ -129,6 +148,8 @@ class Website(models.Model):
         # the existing "/" page is left untouched.
         if first_bind and not recreated and not website.homepage_url:
             website.homepage_url = HOME_URL
+        if first_bind and not recreated:
+            website._wk_b2b_mx_set_favicon()
         _logger.info(
             "%s: bound %s views, %s pages, %s menus to website %s (first bind: %s, recreated: %s)",
             MODULE, len(views), len(pages), len(menus), website.id, first_bind, recreated,
