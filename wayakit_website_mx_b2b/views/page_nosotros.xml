@@ -79,7 +79,7 @@
             <field name="url">/nosotros</field>
             <field name="view_id" ref="page_nosotros"/>
             <field name="is_published" eval="True"/>
-            <field name="website_meta_title">WAYAKIT B2B · Nosotros</field>
+            <field name="website_meta_title">Nosotros · WAYAKIT México</field>
         </record>
     </data>
 </odoo>

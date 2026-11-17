@@ -379,7 +379,7 @@
             <field name="url">/inicio</field>
             <field name="view_id" ref="page_inicio"/>
             <field name="is_published" eval="True"/>
-            <field name="website_meta_title">WAYAKIT B2B · Inicio</field>
+            <field name="website_meta_title">WAYAKIT México · Limpieza y desinfección para empresas</field>
         </record>
     </data>
 </odoo>

@@ -58,7 +58,7 @@
             <field name="url">/cotizar</field>
             <field name="view_id" ref="page_cotizar"/>
             <field name="is_published" eval="True"/>
-            <field name="website_meta_title">WAYAKIT B2B · Cotizar y contacto</field>
+            <field name="website_meta_title">Cotizar y contacto · WAYAKIT México</field>
         </record>
     </data>
 </odoo>
