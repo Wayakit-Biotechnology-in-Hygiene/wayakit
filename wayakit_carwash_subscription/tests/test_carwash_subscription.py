@@ -400,3 +400,168 @@ class TestCarwashSubscription(TestSaleCommon):
         """N4: 'in' on the computed state must fail loudly instead of returning a wrong domain."""
         with self.assertRaises(NotImplementedError):
             self.Period.search([('state', 'in', ['active'])])
+
+    # ------------------------------------------------------------------ redemption: one wash per code
+    def _cw_card(self, washes, on='2026-01-01'):
+        """Included Full Wash card issued by the module (cw_period_id set) with `washes` points."""
+        plan = self.env['product.product'].create({
+            'name': 'Fake Plan %s Full' % washes,
+            'type': 'service',
+            'recurring_invoice': True,
+            'list_price': 100,
+            'taxes_id': [(5, 0, 0)],
+            'cw_is_subscription': True,
+            'cw_tier': 'regular',
+            'cw_entitlement_ids': [(0, 0, {'kind': 'included', 'program_id': self.prog_sedan_full.id,
+                                           'quantity': washes})],
+        })
+        period = self._cycle(self._subscribe(plan, on), on)
+        card = self._cards(period, 'included', self.prog_sedan_full)
+        self.assertEqual(len(card), 1)
+        self.assertEqual(card.points, washes)
+        self.assertTrue(card.cw_period_id)
+        return period, card
+
+    def _quotation(self):
+        """Plain (non-subscription) quotation with a multi-unit paid line, like a POS-less backend sale."""
+        paid = self.env['product.product'].create({'name': 'Fake Air Freshener', 'type': 'consu', 'list_price': 10})
+        return self.env['sale.order'].create({
+            'partner_id': self.partner.id,
+            'order_line': [(0, 0, {'product_id': paid.id, 'product_uom_qty': 3, 'tax_id': False})],
+        })
+
+    def _apply_code_backend(self, order, code, reward):
+        """Same path as the 'Coupon Code' button: code wizard -> reward wizard."""
+        action = self.env['sale.loyalty.coupon.wizard'].create(
+            {'order_id': order.id, 'coupon_code': code}).action_apply()
+        self.assertIn(reward.id, action['context']['default_reward_ids'])
+        self.env['sale.loyalty.reward.wizard'].with_context(active_id=order.id).create(
+            {'order_id': order.id, 'selected_reward_id': reward.id}).action_apply()
+
+    @staticmethod
+    def _reward_lines(order, coupon):
+        return order.order_line.filtered(lambda l: l.is_reward_line and l.coupon_id == coupon)
+
+    def test_17_cw_code_redeems_one_wash_backend(self):
+        """Bug 7.1: 8 Full Washes card applied on an order -> 1 wash, card 8 -> 7 (not 8 -> 0)."""
+        period, card = self._cw_card(8)
+        reward = self.prog_sedan_full.reward_ids
+        with freeze_time('2026-01-10'):
+            order = self._quotation()
+            self._apply_code_backend(order, card.code, reward)
+            line = self._reward_lines(order, card)
+            self.assertEqual(len(line), 1)
+            self.assertEqual(line.product_uom_qty, 1, 'one code application = one wash')
+            self.assertEqual(line.points_cost, 1)
+            self.assertEqual(line.reward_id, reward)
+            self.assertEqual(order._get_real_points_for_coupon(card), 7)
+
+            # the cap must survive Odoo's reward recomputation (called on every order change)
+            order._update_programs_and_rewards()
+            order.order_line.filtered(lambda l: not l.is_reward_line).product_uom_qty = 5
+            order._update_programs_and_rewards()
+            line = self._reward_lines(order, card)
+            self.assertEqual((len(line), line.product_uom_qty, line.points_cost), (1, 1, 1))
+
+            self.assertEqual(card.points, 8, 'points are only consumed on confirmation')
+            order.action_confirm()
+        line = self._reward_lines(order, card)
+        self.assertEqual((line.product_uom_qty, line.points_cost), (1, 1), 'confirm recomputes rewards too')
+        self.assertEqual(card.points, 7)
+        self.assertEqual(period.services_left, 7)
+
+        # the same code still works on the next visit: 7 -> 6
+        with freeze_time('2026-01-17'):
+            order2 = self._quotation()
+            self._apply_code_backend(order2, card.code, reward)
+            self.assertEqual(self._reward_lines(order2, card).product_uom_qty, 1)
+            order2.action_confirm()
+        self.assertEqual(card.points, 6)
+        self.assertEqual(period.services_left, 6)
+
+        # cancelling a confirmed redemption gives back exactly one wash
+        order2._action_cancel()
+        self.assertEqual(card.points, 7)
+
+    def test_18_cw_code_redeems_one_wash_website_path(self):
+        """website_sale_loyalty claims through the same method: _try_apply_code + _apply_program_reward
+        (pending coupon) or _auto_apply_rewards (cart)."""
+        _period, card = self._cw_card(8)
+        reward = self.prog_sedan_full.reward_ids
+        with freeze_time('2026-01-10'):
+            # _try_pending_coupon flow (code from the e-mail link)
+            order = self._quotation()
+            status = order._try_apply_code(card.code)
+            self.assertNotIn('error', status)
+            self.assertEqual(status[card], reward)
+            order._apply_program_reward(reward, card)
+            order._update_programs_and_rewards()
+            line = self._reward_lines(order, card)
+            self.assertEqual((len(line), line.product_uom_qty, line.points_cost), (1, 1, 1))
+
+            if hasattr(type(order), '_auto_apply_rewards'):
+                # cart flow: claimable rewards are auto-applied; must not re-claim the same reward
+                cart = self._quotation()
+                self.assertNotIn('error', cart._try_apply_code(card.code))
+                cart._auto_apply_rewards()
+                cart._update_programs_and_rewards()
+                cart._auto_apply_rewards()
+                line = self._reward_lines(cart, card)
+                self.assertEqual((len(line), line.product_uom_qty, line.points_cost), (1, 1, 1))
+
+    def test_19_cw_cap_follows_reward_configuration(self):
+        """Cap = one reward unit: qty = reward_product_qty, cost = required_points (not hardcoded 1)."""
+        _period, card = self._cw_card(8)
+        reward = self.prog_sedan_full.reward_ids
+        reward.write({'reward_product_qty': 2, 'required_points': 3})
+        with freeze_time('2026-01-10'):
+            order = self._quotation()
+            self._apply_code_backend(order, card.code, reward)
+            line = self._reward_lines(order, card)
+            self.assertEqual((len(line), line.product_uom_qty, line.points_cost), (1, 2, 3))
+            order.action_confirm()
+        self.assertEqual(card.points, 5)
+
+    def test_20_non_carwash_coupons_keep_core_behaviour(self):
+        """Scope: only cards issued by this module are capped. Other coupons claim everything."""
+        free = self.env['product.product'].create({'name': 'Fake Free Sponge', 'type': 'consu', 'list_price': 4})
+        other = self.env['loyalty.program'].create({
+            'name': 'Fake Other Coupons',
+            'program_type': 'coupons',
+            'trigger': 'with_code',
+            'applies_on': 'current',
+            'company_id': self.company.id,
+            'rule_ids': [(5, 0, 0)],
+            'reward_ids': [(5, 0, 0), (0, 0, {
+                'reward_type': 'product',
+                'reward_product_id': free.id,
+                'reward_product_qty': 3,
+                'required_points': 2,
+            })],
+        })
+        other_card = self.env['loyalty.card'].create(
+            {'program_id': other.id, 'partner_id': self.partner.id, 'points': 8})
+        # a card of a "CW Sub" program created by hand (no period) is NOT issued by this module
+        manual_cw = self.env['loyalty.card'].create(
+            {'program_id': self.prog_sedan_full.id, 'partner_id': self.partner.id, 'points': 8})
+        self.assertFalse(manual_cw.cw_period_id)
+
+        with freeze_time('2026-01-10'):
+            order = self._quotation()
+            self._apply_code_backend(order, other_card.code, other.reward_ids)
+            line = self._reward_lines(order, other_card)
+            # core: floor(8 / 2) = 4 claims -> qty 4 * 3 = 12, cost 8
+            self.assertEqual((len(line), line.product_uom_qty, line.points_cost), (1, 12, 8))
+            order._update_programs_and_rewards()
+            line = self._reward_lines(order, other_card)
+            self.assertEqual((line.product_uom_qty, line.points_cost), (12, 8))
+            order.action_confirm()
+        self.assertEqual(other_card.points, 0)
+
+        with freeze_time('2026-01-10'):
+            order2 = self._quotation()
+            self._apply_code_backend(order2, manual_cw.code, self.prog_sedan_full.reward_ids)
+            line = self._reward_lines(order2, manual_cw)
+            self.assertEqual((line.product_uom_qty, line.points_cost), (8, 8))
+            order2.action_confirm()
+        self.assertEqual(manual_cw.points, 0)

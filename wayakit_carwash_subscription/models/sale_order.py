@@ -23,3 +23,19 @@ class SaleOrder(models.Model):
         action['domain'] = [('order_id', '=', self.id)]
         action['context'] = {'default_order_id': self.id}
         return action
+
+    def _get_reward_values_product(self, reward, coupon, product=None, **kwargs):
+        """One wash per code application on Car Wash subscription coupons.
+
+        Core claims every multiple of required_points at once
+        (sale_loyalty/models/sale_order.py:145): a card with 8 washes gave one
+        line of 8 and spent the whole period. Cap it so the rest stays on the
+        card. Website cart and backend wizard both land here, and so does the
+        recompute in _update_programs_and_rewards, so the cap sticks.
+        """
+        vals_list = super()._get_reward_values_product(reward, coupon, product=product, **kwargs)
+        if coupon.cw_period_id and not reward.clear_wallet:
+            for vals in vals_list:
+                vals['product_uom_qty'] = reward.reward_product_qty
+                vals['points_cost'] = reward.required_points
+        return vals_list

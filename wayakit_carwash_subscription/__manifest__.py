@@ -1,6 +1,6 @@
 {
     'name': 'Wayakit - Car Wash Subscriptions (KSA)',
-    'version': '17.0.1.1.0',
+    'version': '17.0.1.1.1',
     'summary': 'Monthly Car Wash plans: included washes as coupons, streak rewards, monthly gift',
     'description': """
 Builds on Odoo Subscriptions + Loyalty:
