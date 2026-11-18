@@ -34,7 +34,8 @@ Para cada paso, marca la casilla y anota el resultado. Si algo falla, anota la e
   - *Ventas › Pedidos › Car Wash Periods*, con el filtro "Active" puesto por defecto.
   - La pestaña **Car Wash Subscription** en el formulario del producto.
   - *Acción › Issue Car Wash entitlements* en facturas (lista y formulario, solo para Sales Manager).
-- [ ] 1.5 Actualización a **17.0.1.1.2** (el módulo ahora depende de `website_sale_loyalty`). Antes de actualizar, en *Apps* revisa si **eCommerce Loyalty** (`website_sale_loyalty`) ya está instalado y anótalo. Luego *Apps* › Wayakit - Car Wash Subscriptions (KSA) › *Upgrade*. **Esperado:** termina sin error y el módulo queda en **17.0.1.1.2**. No se instala ningún módulo nuevo, porque `website_sale_loyalty` ya estaba instalado. Si el Upgrade lo instaló, anótalo: en producción también se instalará.
+- [x] 1.5 Actualización a **17.0.1.1.2** (el módulo ahora depende de `website_sale_loyalty`). Antes de actualizar, en *Apps* revisa si **eCommerce Loyalty** (`website_sale_loyalty`) ya está instalado y anótalo. Luego *Apps* › Wayakit - Car Wash Subscriptions (KSA) › *Upgrade*. **Esperado:** termina sin error y el módulo queda en **17.0.1.1.2**. No se instala ningún módulo nuevo, porque `website_sale_loyalty` ya estaba instalado. Si el Upgrade lo instaló, anótalo: en producción también se instalará.
+  - **Resultado 2026-11-18:** Staging quedó en 17.0.1.1.2 sin error; `website_sale_loyalty` ya estaba instalado y no se reinstaló.
 
 ## 2. Programas de cupones (script)
 
@@ -115,22 +116,30 @@ La racha se calcula con la **fecha de pago** (la que pones en *Register Payment*
 
 ## 7. Canje de cupones
 
-- [ ] 7.1 Backend: en un SO nuevo del cliente de prueba › botón **Coupon Code** › pega el código del cupón Full Wash. **Esperado:** se agrega la línea del servicio gratis (`FP-CWS-00101`) a 0. Confirma el SO. **Esperado:** el cupón baja de 8 a **7** y el *Included services left* del periodo baja igual.
+- [x] 7.1 Backend: en un SO nuevo del cliente de prueba › botón **Coupon Code** › pega el código del cupón Full Wash. **Esperado:** se agrega la línea del servicio gratis (`FP-CWS-00101`) a 0. Confirma el SO. **Esperado:** el cupón baja de 8 a **7** y el *Included services left* del periodo baja igual.
   - **Resultado 2026-11-18:** FALLA: al canjear el código, Odoo agrega 8 lavados gratis en una sola orden (qty 8, points_cost 8) y deja el cupón en 0. Es el estándar de Odoo 17 para free product: canjea todos los puntos. Requiere fix en código.
   - **Re-test con el fix (v17.0.1.1.2):** en *Apps* confirma que el módulo está en **17.0.1.1.2** (paso 1.5). Usa un cupón Full Wash de un periodo con **varios** lavados (no uno de 1 punto, porque ahí no se nota el bug). Repite 7.1. **Esperado:** la línea del servicio gratis tiene **cantidad 1**, no 8. Antes de confirmar, cambia la cantidad de otra línea del SO y guarda: la línea gratis sigue en 1. Confirma: el cupón baja **solo 1** y el *Included services left* del periodo baja 1.
-  - [ ] 7.1b En **otro** SO nuevo, aplica el **mismo** código. **Esperado:** se acepta de nuevo, otra vez cantidad 1, y al confirmar el cupón baja 1 más.
+  - **Resultado 2026-11-18:** Re-prueba en 17.0.1.1.2: cupón Full Wash de 8 → línea gratis cantidad 1, costo 1; sigue en 1 al cambiar otra línea a 5; al confirmar 8 → 7 y services_left 7. (Antes de este fix: 8 → 0).
+  - [x] 7.1b En **otro** SO nuevo, aplica el **mismo** código. **Esperado:** se acepta de nuevo, otra vez cantidad 1, y al confirmar el cupón baja 1 más.
+    - **Resultado 2026-11-18:** Otro SO con el mismo código: cantidad 1, 7 → 6.
   - [ ] 7.1c Control (otros cupones sin cambio): si hay en staging un cupón de otro programa (no "CW Sub – …") con recompensa de producto gratis y varios puntos, aplícalo en un SO. **Esperado:** se comporta como antes del fix (canjea todos sus puntos). Si no hay ninguno, marca este paso como *no corrido*; está cubierto por `test_20`.
-  - [ ] 7.1d Segundo lavado en el mismo SO desde el backend: en un SO nuevo, aplica el código Full Wash con **Coupon Code** (línea gratis cantidad 1). Luego, en el mismo SO, botón **Promotions**. Si es la única recompensa disponible, se agrega directo. Si se abre el asistente, elige la misma recompensa del cupón. **Esperado:** se agrega una **segunda** línea gratis de cantidad **1** (no 7 ni el resto del cupón). Anota los usos del cupón y confirma el SO. **Esperado:** el cupón baja **2**. Esto prueba que ocultar el botón Claim solo afecta al website.
+    - **Resultado 2026-11-18:** No corrido: en staging no hay cupones de otros programas con más de 1 punto. Lo cubre test_20.
+  - [x] 7.1d Segundo lavado en el mismo SO desde el backend: en un SO nuevo, aplica el código Full Wash con **Coupon Code** (línea gratis cantidad 1). Luego, en el mismo SO, botón **Promotions**. Si es la única recompensa disponible, se agrega directo. Si se abre el asistente, elige la misma recompensa del cupón. **Esperado:** se agrega una **segunda** línea gratis de cantidad **1** (no 7 ni el resto del cupón). Anota los usos del cupón y confirma el SO. **Esperado:** el cupón baja **2**. Esto prueba que ocultar el botón Claim solo afecta al website.
+    - **Resultado 2026-11-18:** Promotions abrió el asistente (había otras recompensas del cliente): elegida la de Full Wash → segunda línea de cantidad 1; al confirmar 5 → 3.
 - [ ] 7.2 Website, **sin pagar** (en staging no hay proveedor de pago): como **invitado** (sin iniciar sesión), agrega cualquier producto al carrito y aplica el código del **Streak reward** o del **Monthly reward**. Es transferible: funciona con cualquier cuenta o sin cuenta. **Esperado:** el carrito agrega la línea del servicio gratis con cantidad **1**. Anota los usos del cupón en el backend: no cambian, porque los puntos se descuentan solo cuando se confirma la orden. Deja el carrito sin pagar.
-  - [ ] 7.2b Website con un cupón **incluido** de varios lavados (p. ej. Full Wash con 4 u 8), como invitado y sin pagar: aplica el código en el carrito. **Esperado:**
+  - **Resultado 2026-11-18:** No corrido (código de Streak/Monthly como invitado); el mecanismo es el mismo que 7.2b.
+  - [x] 7.2b Website con un cupón **incluido** de varios lavados (p. ej. Full Wash con 4 u 8), como invitado y sin pagar: aplica el código en el carrito. **Esperado:**
     - El carrito muestra **1** servicio gratis, no 4 ni 8.
     - Después de aplicarlo, el carrito **no** muestra el recuadro/botón **"Claim"** de ese mismo cupón. Antes de v17.0.1.1.2 sí aparecía, y al pulsarlo salía "This program is already applied to this order.".
-  - [ ] 7.2c Negativo: en el mismo carrito de 7.2b, escribe **otra vez el mismo código**. **Esperado:** Odoo responde que ya está aplicado ("already applied"), no agrega una segunda línea gratis y la que había sigue en cantidad 1.
+    - **Resultado 2026-11-18:** Con la sesión de Luisa (no invitado), website KSA: línea "Free Product - Car Wash Sedan" cantidad 1 a 0.00 SR y sin aviso Claim. Cupón sin cambio (3) mientras no se paga; la línea se quitó después.
+  - [x] 7.2c Negativo: en el mismo carrito de 7.2b, escribe **otra vez el mismo código**. **Esperado:** Odoo responde que ya está aplicado ("already applied"), no agrega una segunda línea gratis y la que había sigue en cantidad 1.
+    - **Resultado 2026-11-18:** "This program is already applied to this order." y sin segunda línea.
   - [ ] 7.2d Cupón propio sin código, en el website: **solo si el cliente de prueba ya tiene acceso al portal**. No crees usuarios para esto; si no tiene acceso, marca el paso como *no corrido* (lo cubre `test_21`). Inicia sesión como ese cliente, que debe ser dueño de un cupón Full Wash con varios usos. Agrega un producto al carrito **sin** escribir ningún código. **Esperado:**
     - El carrito muestra el recuadro **Claim** de ese cupón.
     - Un clic agrega **1** lavado gratis.
     - Después del clic, el recuadro **Claim** de ese cupón desaparece.
     - No pagues.
+    - **Resultado 2026-11-18:** No corrido: el cliente de prueba no tiene portal y no se crean usuarios. Lo cubre test_21.
 - [x] 7.3 Cupón vencido: en *Discount & Loyalty* › programa › *Coupons*, cambia el **Expiration date** de un cupón de prueba a ayer. Aplica su código en un SO. **Esperado:** Odoo lo rechaza ("expired") y no agrega ninguna línea.
   - **Resultado 2026-11-18:** "This coupon is expired."
 - [x] 7.4 Un cupón con 0 usos tampoco se puede aplicar.
