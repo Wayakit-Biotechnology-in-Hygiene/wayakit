@@ -39,3 +39,17 @@ class SaleOrder(models.Model):
                 vals['product_uom_qty'] = reward.reward_product_qty
                 vals['points_cost'] = reward.required_points
         return vals_list
+
+    def _get_claimable_and_showable_rewards(self):
+        """Hide the cart "Claim" box of a Car Wash coupon already on the order.
+
+        The leftover points keep it claimable, but the box posts the coupon
+        code back to /shop/pricelist, which answers "already applied". The
+        backend Promotions button reads _get_claimable_rewards, left as core,
+        so sales can still add a second wash there.
+        """
+        res = super()._get_claimable_and_showable_rewards()
+        applied = self.order_line.filtered('is_reward_line').coupon_id
+        for coupon in [c for c in res if c.cw_period_id and c in applied]:
+            del res[coupon]
+        return res

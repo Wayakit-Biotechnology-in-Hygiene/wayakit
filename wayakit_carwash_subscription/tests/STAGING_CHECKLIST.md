@@ -8,14 +8,14 @@ Para cada paso, marca la casilla y anota el resultado. Si algo falla, anota la e
 > - **El conector Odoo MCP apunta a PRODUCCIÓN**, no a staging. Todas las verificaciones de esta lista son **manuales en la UI de staging**.
 > - En staging, odoo.sh **no envía correos reales**: aparecen en la pestaña *Mails* del build (o en *Ajustes › Técnico › Correos*, modo desarrollador).
 > - Usa solo un **cliente de prueba** (p. ej. "CW Test Customer", correo `cw.test@example.com`). No uses clientes reales.
-> - La neutralización de staging desactiva los proveedores de pago. Para la compra web, activa un proveedor en **modo Test** (p. ej. *Demo*, módulo `payment_demo`). No uses credenciales reales.
+> - **En staging no se instala ni se activa ningún proveedor de pago, y no se hacen compras web** (decisión de Mafer, 2026-11-18). La emisión al pagar se prueba con el pago manual del backend (sección 5). En el website solo se prueba el carrito, sin pagar (7.2).
 
 ---
 
 ## 0. Precondiciones (README, "Pendientes fuera del código")
 
-- [x] 0.1 **Sales › Configuración › Ajustes › Automatic Invoice** activado. Sin la factura pagada no se emite nada, así que el paso 4 fallaría sin error visible.
-- [x] 0.2 Proveedor de pago en modo Test que soporte **tokenización** ("Guardar método de pago"). Si el proveedor real no la soporta, la renovación no se cobra sola y el cliente paga desde el portal. Anota cuál de los dos casos aplica.
+- [x] 0.1 **Sales › Configuración › Ajustes › Automatic Invoice** activado. Sin la factura pagada no se emite nada, así que la sección 5 fallaría sin error visible.
+- [x] 0.2 **Tokenización** del proveedor de pago real ("Guardar método de pago"). Es un dato, no una prueba de staging. Si no la soporta, la renovación no se cobra sola y el cliente paga desde el portal.
   - **Resultado 2026-11-18:** MyFatoorah (proveedor activo del KSA Website en prod) NO soporta tokenización: las renovaciones no se cobran solas; el cliente paga desde el portal. Stripe sí la soporta.
 - [x] 0.3 Producto **Desinfectante 100 mL** (no existe en KSA). Si todavía no se creó en prod, crea uno temporal en staging solo para probar.
   - **Resultado 2026-11-18:** No existe en staging ni en prod; se creó uno temporal TEST-DESINF-100 solo en staging.
@@ -34,6 +34,7 @@ Para cada paso, marca la casilla y anota el resultado. Si algo falla, anota la e
   - *Ventas › Pedidos › Car Wash Periods*, con el filtro "Active" puesto por defecto.
   - La pestaña **Car Wash Subscription** en el formulario del producto.
   - *Acción › Issue Car Wash entitlements* en facturas (lista y formulario, solo para Sales Manager).
+- [ ] 1.5 Actualización a **17.0.1.1.2** (el módulo ahora depende de `website_sale_loyalty`). Antes de actualizar, en *Apps* revisa si **eCommerce Loyalty** (`website_sale_loyalty`) ya está instalado y anótalo. Luego *Apps* › Wayakit - Car Wash Subscriptions (KSA) › *Upgrade*. **Esperado:** termina sin error y el módulo queda en **17.0.1.1.2**. No se instala ningún módulo nuevo, porque `website_sale_loyalty` ya estaba instalado. Si el Upgrade lo instaló, anótalo: en producción también se instalará.
 
 ## 2. Programas de cupones (script)
 
@@ -67,18 +68,9 @@ Para cada paso, marca la casilla y anota el resultado. Si algo falla, anota la e
 - [x] 3.3 En Premium SUV agrega una línea `streak_reward` › Guardar. **Esperado:** ValidationError *"Premium Care cannot have streak rewards (it already gets a monthly reward)."* Descarta los cambios.
 - [x] 3.4 Variante del caso: en un producto Regular con `streak_reward`, cambia el Tier a Premium › Guardar. **Esperado:** el mismo ValidationError.
 
-## 4. Compra web pagada en línea (camino web de `_invoice_paid_hook`)
+## 4. Compra web pagada en línea: no se prueba en staging
 
-- [ ] 4.1 Con una sesión de portal del cliente de prueba, compra **Regular Sedan 4 Full** (plan Monthly, cantidad 1). Paga con el proveedor Test y marca "guardar método de pago" si aparece.
-- [ ] 4.2 En el backend, en el SO: estado de suscripción *In Progress*, factura **Paid / In Payment**.
-- [ ] 4.3 Smart button **Car Wash (1)** en el SO › abre el periodo. Revisa:
-  - Inicio y fin = fechas de servicio de la línea de factura (mes calendario). Payment date = fecha del pago. **Streak 1**.
-  - Cupón `Included` de Sedan Full Wash con **Uses left 4**, que expira en la fecha **fin del periodo**.
-  - **No** hay cupón de Streak reward.
-  - Regalo Desinfectante ×1, sin entregar.
-- [ ] 4.4 En el chatter del SO aparece el resumen **"Car Wash period … → … (streak 1)"**, con programa, código, usos y vencimiento, más la línea "Gift: …". **Autor del mensaje: OdooBot**, no el usuario público del website ni el cliente.
-- [ ] 4.5 Correo del cupón: aparece en *Mails* de odoo.sh (o en *Ajustes › Técnico › Correos*), dirigido al cliente de prueba y con el código. **No** debe haber nota ⚠️ de correo fallido en el periodo.
-- [ ] 4.6 La factura **no** tiene nota "⚠️ Car Wash: entitlements were NOT issued…".
+En staging no hay proveedor de pago ni compras web (ver "Antes de empezar"). Para el módulo, el pago web y el *Register Payment* del backend llegan al mismo `_invoice_paid_hook` en cuanto la factura queda pagada. Por eso este camino lo cubre la **sección 5** (SO de suscripción en el backend › factura › *Register Payment*), y los detalles del periodo se revisan en 5.2c. Que el resumen del chatter tenga como autor a OdooBot cuando el usuario actual es el público del website lo cubren los tests automáticos, no staging.
 
 ## 5. Backend: pago manual de una factura recurrente (cantidad 2)
 
@@ -90,6 +82,12 @@ Para cada paso, marca la casilla y anota el resultado. Si algo falla, anota la e
   - Streak 1.
   - Resumen en el chatter del SO.
   - **Resultado 2026-11-18:** Cupón Full Wash 8, regalo ×2, streak 1, resumen en el chatter y correo del cupón generado.
+- [ ] 5.2c Detalle del periodo de 5.1 (antes se revisaba en la compra web, sección 4). **Esperado:**
+  - Inicio y fin = fechas de servicio de la línea de factura (mes calendario). Payment date = la fecha de *Register Payment*.
+  - El cupón `Included` Full Wash vence en la fecha **fin del periodo**.
+  - **No** hay cupón de Streak reward (streak 1).
+  - El resumen **"Car Wash period … → … (streak 1)"** del chatter del SO trae programa, código, usos, vencimiento y la línea "Gift: …", con **OdooBot** como autor.
+  - **No** hay nota ⚠️ de correo fallido en el periodo, ni nota "⚠️ Car Wash: entitlements were NOT issued…" en la factura.
 - [x] 5.2b Cantidad facturada ≠ cantidad del pedido: en la misma suscripción › *Create Invoice* › **antes de confirmar**, cambia la cantidad de la línea de factura de 2 a **1** › Confirmar › Register Payment. **Esperado:** Full Wash **4** y regalo **1**. Se usa lo facturado, no los 2 del SO. Si esto rompe la secuencia de la racha del paso 6, usa otra suscripción.
   - **Resultado 2026-11-18:** Otra suscripción: Full Wash 4, regalo 1.
 - [x] 5.3 Repite con **Premium SUV cantidad 2** en otra suscripción. **Esperado:**
@@ -119,11 +117,20 @@ La racha se calcula con la **fecha de pago** (la que pones en *Register Payment*
 
 - [ ] 7.1 Backend: en un SO nuevo del cliente de prueba › botón **Coupon Code** › pega el código del cupón Full Wash. **Esperado:** se agrega la línea del servicio gratis (`FP-CWS-00101`) a 0. Confirma el SO. **Esperado:** el cupón baja de 8 a **7** y el *Included services left* del periodo baja igual.
   - **Resultado 2026-11-18:** FALLA: al canjear el código, Odoo agrega 8 lavados gratis en una sola orden (qty 8, points_cost 8) y deja el cupón en 0. Es el estándar de Odoo 17 para free product: canjea todos los puntos. Requiere fix en código.
-  - **Re-test con el fix (v17.0.1.1.1):** en *Apps* confirma que el módulo está en **17.0.1.1.1** (si no, *Upgrade*). Usa un cupón Full Wash de un periodo con **varios** lavados (no uno de 1 punto, porque ahí no se nota el bug). Repite 7.1. **Esperado:** la línea del servicio gratis tiene **cantidad 1**, no 8. Antes de confirmar, cambia la cantidad de otra línea del SO y guarda: la línea gratis sigue en 1. Confirma: el cupón baja **solo 1** y el *Included services left* del periodo baja 1.
+  - **Re-test con el fix (v17.0.1.1.2):** en *Apps* confirma que el módulo está en **17.0.1.1.2** (paso 1.5). Usa un cupón Full Wash de un periodo con **varios** lavados (no uno de 1 punto, porque ahí no se nota el bug). Repite 7.1. **Esperado:** la línea del servicio gratis tiene **cantidad 1**, no 8. Antes de confirmar, cambia la cantidad de otra línea del SO y guarda: la línea gratis sigue en 1. Confirma: el cupón baja **solo 1** y el *Included services left* del periodo baja 1.
   - [ ] 7.1b En **otro** SO nuevo, aplica el **mismo** código. **Esperado:** se acepta de nuevo, otra vez cantidad 1, y al confirmar el cupón baja 1 más.
   - [ ] 7.1c Control (otros cupones sin cambio): si hay en staging un cupón de otro programa (no "CW Sub – …") con recompensa de producto gratis y varios puntos, aplícalo en un SO. **Esperado:** se comporta como antes del fix (canjea todos sus puntos). Si no hay ninguno, marca este paso como *no corrido*; está cubierto por `test_20`.
-- [ ] 7.2 Website: en el carrito, aplica el código del **Streak reward** o del **Monthly reward**, ya sea con otra cuenta o como invitado (es transferible). **Esperado:** se aplica la recompensa y, al pagar, los usos bajan en 1.
-  - [ ] 7.2b Website con un cupón **incluido** de varios lavados (p. ej. Full Wash con 4 u 8): aplica el código en el carrito. **Esperado:** el carrito muestra **1** servicio gratis (no 4 u 8). Al pagar, el cupón baja 1.
+  - [ ] 7.1d Segundo lavado en el mismo SO desde el backend: en un SO nuevo, aplica el código Full Wash con **Coupon Code** (línea gratis cantidad 1). Luego, en el mismo SO, botón **Promotions**. Si es la única recompensa disponible, se agrega directo. Si se abre el asistente, elige la misma recompensa del cupón. **Esperado:** se agrega una **segunda** línea gratis de cantidad **1** (no 7 ni el resto del cupón). Anota los usos del cupón y confirma el SO. **Esperado:** el cupón baja **2**. Esto prueba que ocultar el botón Claim solo afecta al website.
+- [ ] 7.2 Website, **sin pagar** (en staging no hay proveedor de pago): como **invitado** (sin iniciar sesión), agrega cualquier producto al carrito y aplica el código del **Streak reward** o del **Monthly reward**. Es transferible: funciona con cualquier cuenta o sin cuenta. **Esperado:** el carrito agrega la línea del servicio gratis con cantidad **1**. Anota los usos del cupón en el backend: no cambian, porque los puntos se descuentan solo cuando se confirma la orden. Deja el carrito sin pagar.
+  - [ ] 7.2b Website con un cupón **incluido** de varios lavados (p. ej. Full Wash con 4 u 8), como invitado y sin pagar: aplica el código en el carrito. **Esperado:**
+    - El carrito muestra **1** servicio gratis, no 4 ni 8.
+    - Después de aplicarlo, el carrito **no** muestra el recuadro/botón **"Claim"** de ese mismo cupón. Antes de v17.0.1.1.2 sí aparecía, y al pulsarlo salía "This program is already applied to this order.".
+  - [ ] 7.2c Negativo: en el mismo carrito de 7.2b, escribe **otra vez el mismo código**. **Esperado:** Odoo responde que ya está aplicado ("already applied"), no agrega una segunda línea gratis y la que había sigue en cantidad 1.
+  - [ ] 7.2d Cupón propio sin código, en el website: **solo si el cliente de prueba ya tiene acceso al portal**. No crees usuarios para esto; si no tiene acceso, marca el paso como *no corrido* (lo cubre `test_21`). Inicia sesión como ese cliente, que debe ser dueño de un cupón Full Wash con varios usos. Agrega un producto al carrito **sin** escribir ningún código. **Esperado:**
+    - El carrito muestra el recuadro **Claim** de ese cupón.
+    - Un clic agrega **1** lavado gratis.
+    - Después del clic, el recuadro **Claim** de ese cupón desaparece.
+    - No pagues.
 - [x] 7.3 Cupón vencido: en *Discount & Loyalty* › programa › *Coupons*, cambia el **Expiration date** de un cupón de prueba a ayer. Aplica su código en un SO. **Esperado:** Odoo lo rechaza ("expired") y no agrega ninguna línea.
   - **Resultado 2026-11-18:** "This coupon is expired."
 - [x] 7.4 Un cupón con 0 usos tampoco se puede aplicar.
@@ -131,7 +138,7 @@ La racha se calcula con la **fecha de pago** (la que pones en *Register Payment*
 
 ## 8. Regalo pendiente
 
-- [x] 8.1 *Ventas › Pedidos › Car Wash Periods* › filtro **Gift pending**. **Esperado:** aparecen los periodos de los pasos 4–6 que tienen regalo. El Premium SUV no tiene regalo, salvo que se lo hayas configurado.
+- [x] 8.1 *Ventas › Pedidos › Car Wash Periods* › filtro **Gift pending**. **Esperado:** aparecen los periodos de los pasos 5–6 que tienen regalo. El Premium SUV no tiene regalo, salvo que se lo hayas configurado.
 - [x] 8.2 Abre uno › **Mark gift delivered**. **Esperado:**
   - El botón desaparece.
   - Se llenan *Delivered date* y *Delivered by* (tu usuario).
@@ -141,7 +148,7 @@ La racha se calcula con la **fecha de pago** (la que pones en *Register Payment*
 
 ## 9. Reintento idempotente
 
-- [x] 9.1 Abre una factura **pagada** de los pasos 4–6 › *Acción › Issue Car Wash entitlements*, **dos veces**. **Esperado:** no se crean periodos, cupones ni correos nuevos. El smart button Car Wash del SO mantiene el mismo conteo.
+- [x] 9.1 Abre una factura **pagada** de los pasos 5–6 › *Acción › Issue Car Wash entitlements*, **dos veces**. **Esperado:** no se crean periodos, cupones ni correos nuevos. El smart button Car Wash del SO mantiene el mismo conteo.
   - **Resultado 2026-11-18:** Periodos, cupones y correos sin cambios.
 - [x] 9.2 Recuperación real:
   1. Desmarca *Car Wash Subscription* en un producto de prueba.

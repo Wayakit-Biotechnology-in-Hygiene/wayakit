@@ -565,3 +565,72 @@ class TestCarwashSubscription(TestSaleCommon):
             self.assertEqual((line.product_uom_qty, line.points_cost), (8, 8))
             order2.action_confirm()
         self.assertEqual(manual_cw.points, 0)
+
+    def test_21_cart_hides_claim_box_for_applied_cw_coupon(self):
+        """Website cart 'Claim' box (_get_claimable_and_showable_rewards): a CW card already applied
+        to the order is not offered again; non-CW coupons and the backend keep core behaviour."""
+        period, card = self._cw_card(8)
+        cw_reward = self.prog_sedan_full.reward_ids
+        free = self.env['product.product'].create({'name': 'Fake Free Cloth', 'type': 'consu', 'list_price': 5})
+        other = self.env['loyalty.program'].create({
+            'name': 'Fake Other Coupons Two Rewards',
+            'program_type': 'coupons',
+            'trigger': 'with_code',
+            'applies_on': 'current',
+            'company_id': self.company.id,
+            'rule_ids': [(5, 0, 0)],
+            'reward_ids': [(5, 0, 0),
+                           (0, 0, {'reward_type': 'discount', 'discount': 10, 'discount_mode': 'percent',
+                                   'discount_applicability': 'order', 'required_points': 1}),
+                           (0, 0, {'reward_type': 'product', 'reward_product_id': free.id,
+                                   'reward_product_qty': 1, 'required_points': 1})],
+        })
+        other_discount = other.reward_ids.filtered(lambda r: r.reward_type == 'discount')
+        other_product = other.reward_ids - other_discount
+        other_card = self.env['loyalty.card'].create(
+            {'program_id': other.id, 'partner_id': self.partner.id, 'points': 8})
+
+        with freeze_time('2026-01-10'):
+            order = self._quotation()
+            website = self.env.ref('website.default_website', raise_if_not_found=False)
+            if website:
+                order.website_id = website
+            # before applying: the customer's own CW card is offered in the cart
+            showable = order._get_claimable_and_showable_rewards()
+            self.assertIn(card, showable)
+            self.assertEqual(showable[card], cw_reward)
+            self.assertIn(other_card, showable)
+
+            # customer types the code in the cart (same calls as website_sale_loyalty)
+            self.assertNotIn('error', order._try_apply_code(card.code))
+            order._apply_program_reward(cw_reward, card)
+            order._update_programs_and_rewards()
+            self.assertEqual(self._reward_lines(order, card).product_uom_qty, 1)
+            self.assertEqual(order._get_real_points_for_coupon(card), 7)
+
+            showable = order._get_claimable_and_showable_rewards()
+            self.assertNotIn(card, showable, 'applied CW coupon must not show the Claim box again')
+
+            # non-CW coupon with points left after one reward: still offered (core)
+            self.assertNotIn('error', order._try_apply_code(other_card.code))
+            order._apply_program_reward(other_discount, other_card)
+            order._update_programs_and_rewards()
+            self.assertEqual(order._get_real_points_for_coupon(other_card), 7)
+            showable = order._get_claimable_and_showable_rewards()
+            self.assertIn(other_card, showable, 'non-CW coupon keeps the core Claim box')
+            self.assertIn(other_product, showable[other_card])
+            self.assertNotIn(card, showable)
+
+            # backend (Promotions button) still lists the applied CW card: second wash on purpose
+            claimable = order._get_claimable_rewards()
+            self.assertIn(card, claimable)
+            self.assertEqual(claimable[card], cw_reward)
+            order._apply_program_reward(cw_reward, card)
+            order._update_programs_and_rewards()
+            lines = self._reward_lines(order, card)
+            self.assertEqual(lines.mapped('product_uom_qty'), [1, 1])
+            self.assertEqual(sum(lines.mapped('points_cost')), 2)
+            self.assertNotIn(card, order._get_claimable_and_showable_rewards())
+            order.action_confirm()
+        self.assertEqual(card.points, 6)
+        self.assertEqual(period.services_left, 6)
