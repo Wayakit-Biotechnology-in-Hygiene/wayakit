@@ -165,6 +165,11 @@ class TestCarwashSubscription(TestSaleCommon):
         mails = self.env['mail.mail'].search([('model', '=', 'loyalty.card'), ('res_id', 'in', period.card_ids.ids)])
         self.assertEqual(len(mails), len(period.card_ids))
         self.assertIn(self.partner, mails.recipient_ids)
+        # 1.2.1: coupons issued by a paid period e-mail without Odoo's layout
+        for mail in mails:
+            self.assertNotIn('Powered by', str(mail.body_html))
+            self.assertNotIn('Your Loyalty Coupon', str(mail.body_html))
+            self.assertNotIn('CW Sub', str(mail.body_html))
 
         period.action_mark_gift_delivered()
         self.assertTrue(period.gift_delivered)

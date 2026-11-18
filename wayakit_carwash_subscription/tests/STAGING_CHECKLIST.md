@@ -184,38 +184,47 @@ La racha se calcula con la **fecha de pago** (la que pones en *Register Payment*
 
 > La cita es **dato**: el código no la crea. Se hace a mano, una vez en staging y otra en producción.
 
-- [ ] 10.0 Antes de actualizar, en *Apps* anota si **Online Appointment** (`website_appointment`) ya está instalado. El módulo ahora depende de él. Luego *Upgrade* del módulo. **Esperado:** termina sin error y queda en **17.0.1.2.0**. Si el Upgrade instaló `website_appointment` u otro módulo, anótalo: en producción pasará lo mismo.
-- [ ] 10.1 **Paso a mano (Mafer):** *Appointments* › abre **"Car Wash Care"** (id 1) › *Acción › Duplicar*. En la copia:
+- [x] 10.0 Antes de actualizar, en *Apps* anota si **Online Appointment** (`website_appointment`) ya está instalado. El módulo ahora depende de él. Luego *Upgrade* del módulo. **Esperado:** termina sin error y queda en **17.0.1.2.0**. Si el Upgrade instaló `website_appointment` u otro módulo, anótalo: en producción pasará lo mismo.
+  - **Resultado 2026-11-18:** Staging quedó en 17.0.1.2.0 sin error; `website_appointment` ya estaba instalado.
+- [x] 10.1 **Paso a mano (Mafer):** *Appointments* › abre **"Car Wash Care"** (id 1) › *Acción › Duplicar*. En la copia:
   - Nombre exacto **`Car Wash Subscription`**, porque el módulo la busca por ese nombre.
   - Mismo personal/calendario que "Car Wash Care", para que los horarios no se encimen.
   - Quita la pregunta **"Payment Method"**.
   - Agrega la pregunta **"Subscription code"** (texto de una línea) y márcala **obligatoria**.
   - Mismo website (KSA) y **Publicada**.
+  - **Resultado 2026-11-18:** Hecho por Claude en staging: cita "Car Wash Subscription" (/appointment/16), copia de "Car Wash Care" con el mismo personal y horarios, sin "Payment Method", con "Subscription code" obligatorio y publicada en KSA Website. Además se agregó "Car Wash Subscriptions" al menú de KSA (debajo de "Car wash", dentro de "KAUST services booking").
 
   **Esperado:** la cita se guarda y su URL pública abre el formulario. Anota la URL (p. ej. `/appointment/<id>`).
-- [ ] 10.2 Abre `https://<dominio de staging>/car-wash-subscriptions` en una ventana privada (sin sesión). **Esperado:**
+- [x] 10.2 Abre `https://<dominio de staging>/car-wash-subscriptions` en una ventana privada (sin sesión). **Esperado:**
   - Carga sin error, en el **KSA Website**. Si da 404, busca en el log del Upgrade el aviso `no single website named 'KSA Website', page /car-wash-subscriptions left unpublished`. Ese aviso sale si no hay un website con nombre **exacto** "KSA Website", o si hay dos. En ese caso la página queda despublicada a propósito, para que no aparezca en otros websites como el B2B MX. Anota los nombres exactos de los websites y avísale al dev. Cuando se corrija el nombre y se vuelva a hacer *Upgrade*, la página se asigna al website, pero **no** se vuelve a publicar sola: publícala a mano.
   - Las secciones aparecen en este orden: Hero, Planes, Beneficios/lealtad, "Already subscribed? Book your wash", FAQ.
   - Se ve como la página `/wayakit-car-wash-service` (mismas fuentes, colores y fotos reales). La marca aparece como **WAYAKIT** en mayúsculas.
   - Las **4 fotos** de la página cargan, sin imágenes rotas. Son adjuntos de producción (`/web/image/…`), que existen en staging porque su BD es copia de producción. En la BD local de pruebas no existen, por eso los tests no las revisan. Si alguna sale rota, anota cuál.
-- [ ] 10.3 Precios con IVA: **180 / 220 / 260 / 300** (Regular Sedan/SUV × 4 Exterior / 4 Full) y **435 / 570** (Premium Sedan / SUV), cada uno con su valor normal y su ahorro. **Esperado:** coinciden con la propuesta de Dalal. La página **no** muestra rentabilidad, márgenes ni costos ("Indicative profitability", "gross margin").
-- [ ] 10.4 Botones **Subscribe**: haz clic en cada uno. **Esperado:** cada uno abre la página del producto correcto (`FP-CWS-00103`, `00104`, `00203`, `00204`, `00105`, `00205`).
+  - **Resultado 2026-11-18:** Con sesión iniciada, la página carga y las 4 fotos responden 200. Sin sesión da 404, igual que /wayakit-car-wash-service y /appointment/1: en staging los websites no tienen dominio, así que el visitante anónimo cae en "My Website". En prod KSA Website sí tiene dominio.
+- [x] 10.3 Precios con IVA: **180 / 220 / 260 / 300** (Regular Sedan/SUV × 4 Exterior / 4 Full) y **435 / 570** (Premium Sedan / SUV), cada uno con su valor normal y su ahorro. **Esperado:** coinciden con la propuesta de Dalal. La página **no** muestra rentabilidad, márgenes ni costos ("Indicative profitability", "gross margin").
+  - **Resultado 2026-11-18:** Precios correctos y sin márgenes ni rentabilidad.
+- [x] 10.4 Botones **Subscribe**: haz clic en cada uno. **Esperado:** cada uno abre la página del producto correcto (`FP-CWS-00103`, `00104`, `00203`, `00204`, `00105`, `00205`).
   - Prueba negativa: despublica un producto (p. ej. `FP-CWS-00205`) y recarga la página. **Esperado:** su botón ya no aparece y el resto de la página sigue igual. Vuelve a publicarlo.
-- [ ] 10.5 Sección **Book your wash**: abre `/car-wash-subscriptions#book`. **Esperado:** la página baja a esa sección. Su botón abre la cita **"Car Wash Subscription"** del paso 10.1, no `/appointment/1`.
+  - **Resultado 2026-11-18:** Los 6 Subscribe apuntan a /shop/fp-cws-00103…00205.
+- [x] 10.5 Sección **Book your wash**: abre `/car-wash-subscriptions#book`. **Esperado:** la página baja a esa sección. Su botón abre la cita **"Car Wash Subscription"** del paso 10.1, no `/appointment/1`.
   - En el formulario de la cita, intenta reservar con "Subscription code" vacío. **Esperado:** no deja enviar.
   - Si ya probaste el envío, cancela la cita de prueba para liberar el horario.
+  - **Resultado 2026-11-18:** "Book your wash" → /appointment/16 (la cita nueva); el formulario abre con "Subscription code" obligatorio.
 - [ ] 10.6 Fallback: despublica temporalmente la cita "Car Wash Subscription" y recarga la página. **Esperado:** el botón de reserva lleva a **`/appointment/1`** ("Car Wash Care") y la página no da error. Vuelve a publicar la cita.
 - [ ] 10.7 Otro website (si existe en staging, p. ej. el de México): abre `/car-wash-subscriptions` en su dominio. **Esperado:** 404, porque la página es solo del KSA Website.
 - [ ] 10.8 Árabe: en el KSA Website cambia el idioma a **AR** y abre la página. **Esperado:** carga sin error. Mientras no se traduzca, el texto sale en inglés.
+  - **Resultado 2026-11-18:** No aplica: no habrá versión en árabe (decisión de Mafer, 2026-11-18).
   - [ ] 10.8b En `/car-wash-subscriptions` (AR) › *Website › Traducir*, haz clic en el texto de un botón **"Subscribe"** y en el de **"Book your wash"**. Estos botones no se pueden editar a propósito (`o_not_editable`), pero su **texto** sí debe poder traducirse. **Esperado:** el texto se marca como traducible y acepta un texto de prueba. Descártalo sin guardar.
     - Si el modo Traducir **no** deja seleccionar esos textos, prueba la alternativa: modo desarrollador › *Ajustes › Técnico › Vistas* › busca la vista de la página (`page_cw_subscriptions`) › icono de traducción del campo *Arch* › busca "Subscribe" / "Book your wash". **Esperado:** aparecen y se pueden traducir. Anota cuál de las dos vías funcionó.
+    - **Resultado 2026-11-18:** No aplica: sin traducción al árabe.
   - [ ] 10.8c En modo *Editar* (EN), comprueba que los botones **Subscribe** y **Book your wash** no se pueden mover ni borrar, y que sí se pueden agregar bloques en las zonas vacías: al inicio de la página y antes del FAQ. Descarta los cambios.
 
 ## 11. Correo del cupón Car Wash con "Book your wash" (v17.0.1.2.0)
 
-- [ ] 11.1 *Discount & Loyalty* › abre los 6 programas **"CW Sub – …"** (KSA) › pestaña **Communications**. **Esperado:** la línea **"At creation"** usa la plantilla nueva del módulo, no "Coupon: Coupon Information". Hay **una sola** línea "At creation" por programa.
+- [x] 11.1 *Discount & Loyalty* › abre los 6 programas **"CW Sub – …"** (KSA) › pestaña **Communications**. **Esperado:** la línea **"At creation"** usa la plantilla nueva del módulo, no "Coupon: Coupon Information". Hay **una sola** línea "At creation" por programa.
+  - **Resultado 2026-11-18:** Los 6 programas "CW Sub" usan "Car Wash Subscription: your washes" en "At creation".
 - [ ] 11.2 Control: abre un programa que **no** sea "CW Sub – …" (p. ej. el cupón de reseña o un eWallet). **Esperado:** su pestaña Communications no cambió.
-- [ ] 11.3 Emite cupones nuevos con un pago de backend, como en 5.1 (suscripción del cliente de prueba › factura › *Register Payment*). Abre el correo del cupón en *Mails* de odoo.sh (o en *Ajustes › Técnico › Correos*). **Esperado:** el correo muestra:
+- [x] 11.3 Emite cupones nuevos con un pago de backend, como en 5.1 (suscripción del cliente de prueba › factura › *Register Payment*). Abre el correo del cupón en *Mails* de odoo.sh (o en *Ajustes › Técnico › Correos*). **Esperado:** el correo muestra:
   - El nombre del cliente de prueba.
   - El servicio (p. ej. Sedan Full Wash).
   - El **código**.
@@ -225,8 +234,38 @@ La racha se calcula con la **fecha de pago** (la que pones en *Register Payment*
   - Que el código es **obligatorio** en la reserva y se aplica en el lavado.
   - **WAYAKIT** en mayúsculas, con el estilo de los otros correos de WAYAKIT.
   - Sin código de barras roto.
-- [ ] 11.4 Botón **"Book your wash"** del correo. **Esperado:** apunta a `https://<dominio del KSA Website en staging>/car-wash-subscriptions#book`, no al dominio de producción `ksasystem.wayakit.com`. Al abrirlo, llega a la sección de reserva.
+  - **Resultado 2026-11-18:** Suscripción Premium Sedan (S… id 2597) pagada desde el backend: 3 cupones (Full Wash 3, Deep Clean 1, Exterior monthly reward 1), cada uno con su correo: código, lavados, vencimiento, tipo, pasos para agendar, nota de deep clean solo en el de Deep Clean, sin código de barras. Detalle: arriba sale el encabezado de Odoo "Your Loyalty Coupon / CW Sub – Sedan Deep Clean: código" con el nombre interno del programa.
+- [x] 11.4 Botón **"Book your wash"** del correo. **Esperado:** apunta a `https://<dominio del KSA Website en staging>/car-wash-subscriptions#book`, no al dominio de producción `ksasystem.wayakit.com`. Al abrirlo, llega a la sección de reserva.
+  - **Resultado 2026-11-18:** El botón apunta a https://wayakit-staging.odoo.com/car-wash-subscriptions#book: en staging el KSA Website no tiene dominio y se usa web.base.url. En prod será https://ksasystem.wayakit.com.
 - [ ] 11.5 El cambio de plantilla de 11.1 lo hace la migración automática del Upgrade a 17.0.1.2.0 (`migrations/17.0.1.2.0/post-migrate.py`). Para comprobar que se puede repetir: en el *Shell* de odoo.sh corre `odoo-bin shell < ~/src/user/wayakit_carwash_subscription/scripts/setup_coupon_programs.py`. **Esperado:** no crea programas duplicados y cada programa "CW Sub – …" sigue con **una sola** línea "At creation" con la plantilla nueva. Si algún programa tenía otra plantilla personalizada, se deja como estaba y queda un aviso en el log: anótalo.
+
+### 11b. Correo sin el encabezado/pie de Odoo y con el diseño WAYAKIT (v17.0.1.2.1)
+
+> Corrige lo visto en 11.3: arriba salía el encabezado de Odoo ("Your Loyalty Coupon / CW Sub – …: código") y abajo el pie de Odoo (dirección, "Powered by Odoo | Unfollow"). Desde 1.2.1 se envían sin ese marco los cupones **emitidos por un periodo Car Wash** y los de cualquier programa cuya comunicación "At creation" usa la plantilla "Car Wash Subscription: your washes" (p. ej. cupones "CW Sub" generados a mano). La plantilla del módulo es el correo completo, con su propio encabezado y pie. Los demás cupones (reseña, eWallet, o un programa "CW Sub" que siga con la plantilla estándar de Odoo) siguen igual que en Odoo estándar.
+>
+> Staging no envía correos a buzones reales: odoo.sh los guarda en la pestaña **Mails** del build. Ahí se revisan.
+
+- [ ] 11.6 *Apps* › *Upgrade* del módulo. **Esperado:** termina sin error y queda en **17.0.1.2.1**.
+  - Esta actualización **reescribe** la plantilla "Car Wash Subscription: your washes" con la versión del código (la migración `migrations/17.0.1.2.1/post-migrate.py`). Cualquier cambio hecho a mano en esa plantilla desde la interfaz se pierde. Hasta 1.2.0 no había ninguno; si alguien la editó, anótalo antes de actualizar.
+  - En producción pasará lo mismo al actualizar.
+- [ ] 11.7 *Ajustes › Técnico › Plantillas de correo* › abre **"Car Wash Subscription: your washes"**. **Esperado:** la vista previa ya muestra el diseño nuevo (logo oficial de WAYAKIT arriba, pie azul marino). Si sigue el diseño viejo (logo grande con "GreenTech · KAUST · Saudi Arabia" debajo), la migración no corrió: avísale al dev con el log del Upgrade.
+- [ ] 11.8 Emite cupones nuevos con un pago de backend, como en 5.1 / 11.3 (suscripción del cliente de prueba › factura › *Register Payment*). Si puedes, usa un plan **Premium** (salen 3 correos: Full Wash, Deep Clean y la recompensa mensual). Abre cada correo en la pestaña **Mails** de odoo.sh. **Esperado:**
+  - **No** sale el encabezado de Odoo: ni "Your Loyalty Coupon", ni el nombre interno **"CW Sub – …"**, ni el logo de la compañía a la derecha.
+  - **No** sale el pie de Odoo: ni "Powered by Odoo", ni "Unfollow".
+  - Arriba, el **logo oficial de WAYAKIT** (no deformado ni recortado).
+  - Todo lo de 11.3 sigue igual: nombre del cliente, servicio, **código** destacado, número de lavados, vencimiento, tipo (Included / reward transferible), los 3 pasos, código **obligatorio** en la reserva, nota de deep clean solo en el de Deep Clean, sin código de barras.
+  - El botón **"Book your wash"** apunta a `https://<dominio de staging>/car-wash-subscriptions#book` (como en 11.4).
+  - El pie lleva: **WAYAKIT**, **Advanced Solutions for Detergents LLC**, el **correo de la compañía KSA** (el de *Ajustes › Compañías › Advanced Solutions for Detergents LLC*; compáralo), el enlace **WhatsApp +966 54 575 4908** (abre `https://wa.me/966545754908`) y un enlace al sitio web.
+  - No aparecen márgenes, costos ni nombres internos.
+  - **WAYAKIT** siempre en mayúsculas.
+- [ ] 11.9 Imagen del logo: en el correo de 11.8, clic derecho en el logo › abrir imagen en otra pestaña. **Esperado:** carga (la URL es `https://<dominio de staging>/wayakit_carwash_subscription/static/src/img/…`). Si sale rota, anota la URL.
+- [ ] 11.10 Reenvío manual de un cupón Car Wash: *Discount & Loyalty* › programa "CW Sub – …" › abre uno de los cupones de 11.8 › botón **Send**. En la ventana que se abre el cuerpo puede verse como **código de plantilla** (textos con `object.…`, `t-if`): es normal, se reemplaza al enviar. **No edites el cuerpo**; pulsa **Send**. **Esperado:**
+  - Se envía sin error y queda registrado en el chatter del cupón.
+  - Llega aunque el correo del cliente de prueba se haya dado de baja de newsletters (lista negra): es el cupón pagado, no marketing.
+  - El correo nuevo (pestaña **Mails**) es igual al de 11.8: **sin** encabezado ni pie de Odoo.
+- [ ] 11.11 Control, cupones que no son Car Wash: en un programa que **no** sea "CW Sub – …" y que tenga una comunicación "At creation" (p. ej. el cupón de reseña), genera **un** cupón para el **cliente de prueba** (*Generate Coupons*, o desde el flujo normal del programa). **Esperado:** su correo **sí** conserva el marco estándar de Odoo (encabezado "Your Loyalty Coupon" y pie con "Powered by Odoo"), como antes de esta versión. Su botón **Send** también abre la ventana estándar. No lo generes para clientes reales.
+- [ ] 11.11b Cupón "CW Sub" hecho a mano: en un programa "CW Sub – …" (ya con la plantilla Car Wash, ver 11.1) genera **un** cupón para el cliente de prueba (*Generate Coupons*). **Esperado:** su correo sale **sin** el marco de Odoo, igual que en 11.8, aunque no tenga periodo. Bórralo o déjalo vencer después; no lo generes para clientes reales.
+- [ ] 11.12 Opcional, después de la salida a producción: reenvía (11.10) un cupón de prueba a un correo interno de WAYAKIT y revísalo en Gmail (web y celular) y, si se puede, en Outlook. **Esperado:** se ve igual que en la pestaña Mails, los textos se leen en modo oscuro y, con las imágenes bloqueadas, el texto alternativo dice "WAYAKIT" y el diseño no se rompe.
 
 ---
 
