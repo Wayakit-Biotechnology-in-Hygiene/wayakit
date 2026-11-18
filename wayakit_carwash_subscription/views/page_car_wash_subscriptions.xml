@@ -1,0 +1,314 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- noupdate: once installed the page belongs to the website editor (and to Odoo's
+         translation tool for Arabic); an upgrade must not overwrite those edits. Pushing new
+         content from git later needs a migration. website_id is set by
+         website._cw_bind_page (data/website_bind.xml), never here.
+         Look and photos follow the live /wayakit-car-wash-service page; the photos are
+         that page's prod attachments, so they only render on prod and its staging copies. -->
+    <data noupdate="1">
+        <template id="page_cw_subscriptions" name="Car Wash Subscriptions">
+            <t t-call="website.layout">
+                <!-- Live links: product pages and the booking appointment can change or be
+                     unpublished at any time, so they are looked up on every render. Their
+                     buttons are o_not_editable: the editor saves an edited node as rendered
+                     HTML, which would freeze the URL and drop the t-if. Because of them #wrap
+                     is not a drop zone; the empty oe_structure blocks below are. -->
+                <t t-set="cw_urls" t-value="website._cw_plan_urls()"/>
+                <t t-set="cw_booking_url" t-value="website._cw_booking_url()"/>
+                <div id="wrap" class="o_cws">
+
+                    <!-- 1. Hero -->
+                    <section class="s_cover oe_img_bg o_bg_img_center bg-black-50 pt96 pb96" data-snippet="s_cover" style="background-image: url('/web/image/15967-98697a63/Untitled%20design%20%286%29.webp'); background-position: 50% 0;">
+                        <div class="o_we_bg_filter bg-black-50"/>
+                        <div class="container">
+                            <div class="row align-items-end">
+                                <div class="col-lg-7 text-white text-start">
+                                    <span class="cws-pill">Monthly plans</span>
+                                    <h1 class="mt-3">WAYAKIT Car Wash Subscriptions</h1>
+                                    <p class="lead">Regular Care or Premium Care: the same WAYAKIT mobile car wash, every month, for less.</p>
+                                    <p class="small" style="opacity: 0.85;">95% Less Water | 100% Home Convenience | Biotech-based products</p>
+                                    <p class="mt-4">
+                                        <a href="#plans" class="btn btn-cws btn-lg me-2">See the plans</a>
+                                        <a href="#book" class="btn btn-outline-light btn-lg">Already subscribed? Book your wash</a>
+                                    </p>
+                                </div>
+                                <div class="col-lg-5 mt-4 mt-lg-0">
+                                    <div class="cws-offer">
+                                        <p class="cws-offer-big">Save at least <span style="color: #47C2AF;">SAR 5</span> on every wash</p>
+                                        <p class="cws-offer-sub">Plus a 100 mL WAYAKIT disinfectant gift with every monthly subscription.</p>
+                                        <p class="cws-offer-note">All prices include 15% VAT</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <div class="oe_structure" id="oe_structure_cw_top"/>
+
+                    <!-- 2. Plans -->
+                    <section id="plans" class="s_text_block pt80 pb48" data-snippet="s_text_block">
+                        <div class="container">
+                            <div class="row">
+                                <div class="col-lg-5">
+                                    <h2 class="cws-h">Choose your plan</h2>
+                                </div>
+                                <div class="col-lg-7 align-self-end">
+                                    <p class="cws-muted">Prices are per month and include 15% VAT. Retail value is what the same washes cost booked one by one.</p>
+                                </div>
+                            </div>
+                            <div class="row mt-5 align-items-start">
+                                <div class="col-lg-4">
+                                    <h3 class="cws-h">Regular Care</h3>
+                                    <p>Four washes a month, exterior or full. You save SAR 5 on every wash.</p>
+                                    <p class="cws-muted small">After every 3 consecutive paid months, 1 free exterior wash.</p>
+                                </div>
+                                <div class="col-lg-8">
+                                    <div class="table-responsive">
+                                        <table class="table cws-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>Plan</th>
+                                                    <th>Retail value</th>
+                                                    <th>Per month</th>
+                                                    <th>You save</th>
+                                                    <th><span class="visually-hidden">Subscribe</span></th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <tr>
+                                                    <td>Sedan · 4 exterior washes</td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-retail">200</span></td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-price">180</span></td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-price">20</span></td>
+                                                    <td><a t-if="cw_urls.get('FP-CWS-00103')" t-att-href="cw_urls['FP-CWS-00103']" class="btn btn-sm btn-cws o_not_editable">Subscribe</a></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Sedan · 4 full washes</td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-retail">240</span></td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-price">220</span></td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-price">20</span></td>
+                                                    <td><a t-if="cw_urls.get('FP-CWS-00104')" t-att-href="cw_urls['FP-CWS-00104']" class="btn btn-sm btn-cws o_not_editable">Subscribe</a></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>SUV · 4 exterior washes</td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-retail">280</span></td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-price">260</span></td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-price">20</span></td>
+                                                    <td><a t-if="cw_urls.get('FP-CWS-00203')" t-att-href="cw_urls['FP-CWS-00203']" class="btn btn-sm btn-cws o_not_editable">Subscribe</a></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>SUV · 4 full washes</td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-retail">320</span></td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-price">300</span></td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-price">20</span></td>
+                                                    <td><a t-if="cw_urls.get('FP-CWS-00204')" t-att-href="cw_urls['FP-CWS-00204']" class="btn btn-sm btn-cws o_not_editable">Subscribe</a></td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="row mt-5 align-items-start">
+                                <div class="col-lg-4">
+                                    <img src="/web/image/15971-339bb515/Untitled%20design%20%287%29.webp" class="cws-img mb-3" style="height: 220px;" alt="Deep cleaning a car carpet with WAYAKIT" loading="lazy"/>
+                                    <h3 class="cws-h">Premium Care</h3>
+                                    <p>Complete monthly care: 3 full washes, 1 deep clean and 1 free exterior wash every month.</p>
+                                </div>
+                                <div class="col-lg-8">
+                                    <div class="table-responsive">
+                                        <table class="table cws-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>Vehicle</th>
+                                                    <th>Every month</th>
+                                                    <th>Retail value</th>
+                                                    <th>Per month</th>
+                                                    <th>You save</th>
+                                                    <th><span class="visually-hidden">Subscribe</span></th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <tr>
+                                                    <td>Sedan</td>
+                                                    <td class="cws-wrap">3 full washes + 1 deep clean + 1 free exterior wash</td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-retail">490</span></td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-price">435</span></td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-price">55</span></td>
+                                                    <td><a t-if="cw_urls.get('FP-CWS-00105')" t-att-href="cw_urls['FP-CWS-00105']" class="btn btn-sm btn-cws o_not_editable">Subscribe</a></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>SUV</td>
+                                                    <td class="cws-wrap">3 full washes + 1 deep clean + 1 free exterior wash</td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-retail">640</span></td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-price">570</span></td>
+                                                    <td><span class="cws-sar">SAR</span> <span class="cws-price">70</span></td>
+                                                    <td><a t-if="cw_urls.get('FP-CWS-00205')" t-att-href="cw_urls['FP-CWS-00205']" class="btn btn-sm btn-cws o_not_editable">Subscribe</a></td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                            <p class="cws-muted small mt-4 mb-0">Full wash = exterior + interior cleaning. Deep cleaning must be booked in advance.</p>
+                        </div>
+                    </section>
+
+                    <!-- 3. What each plan includes -->
+                    <section class="s_text_block o_cc o_cc2 pt64 pb64" data-snippet="s_text_block">
+                        <div class="container">
+                            <h2 class="cws-h text-center mb-4">What each plan includes</h2>
+                            <div class="table-responsive">
+                                <table class="table cws-table mx-auto" style="max-width: 820px;">
+                                    <thead>
+                                        <tr>
+                                            <th>Benefit</th>
+                                            <th>Regular Care</th>
+                                            <th>Premium Care</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr>
+                                            <td>Routine washes</td>
+                                            <td class="cws-wrap">4 a month</td>
+                                            <td class="cws-wrap">3 full washes a month</td>
+                                        </tr>
+                                        <tr>
+                                            <td>Deep cleaning</td>
+                                            <td class="cws-wrap"><span class="cws-na">Not included</span></td>
+                                            <td class="cws-wrap">1 a month</td>
+                                        </tr>
+                                        <tr>
+                                            <td>Free exterior wash</td>
+                                            <td class="cws-wrap">After every 3 consecutive paid months</td>
+                                            <td class="cws-wrap">Every month</td>
+                                        </tr>
+                                        <tr>
+                                            <td>Disinfectant gift</td>
+                                            <td class="cws-wrap">100 mL (value SAR 5) every month</td>
+                                            <td class="cws-wrap">100 mL (value SAR 5) every month</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- 4. How the rewards work -->
+                    <section class="s_text_image o_cc o_cc3 pt96 pb72" data-snippet="s_text_image">
+                        <div class="container">
+                            <div class="row align-items-center">
+                                <div class="col-lg-4 mb-4 mb-lg-0">
+                                    <img src="/web/image/15980-fde28e4d/IMG_3955.webp" class="cws-img" style="max-height: 520px;" alt="WAYAKIT team member cleaning an SUV roof" loading="lazy"/>
+                                </div>
+                                <div class="col-lg-7 offset-lg-1">
+                                    <h3><strong>How the rewards work</strong></h3>
+                                    <ol>
+                                        <li><strong>Regular Care: 3 months in a row</strong> – Pay 3 consecutive months and get 1 free exterior wash, then 1 more every 3 consecutive paid months. Renew within 7 days of the end of your month to keep your streak.</li>
+                                        <li><strong>Premium Care: every month</strong> – 1 free exterior wash with each paid month. Premium plans don't also earn the Regular Care reward.</li>
+                                        <li><strong>Use it or gift it</strong> – Free exterior washes are valid for 30 days and can be given to someone else: whoever has the code can use it.</li>
+                                        <li><strong>No rollover</strong> – Included washes are for that subscription month; washes you don't use don't carry over.</li>
+                                    </ol>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- 5. Booking (anchor of the coupon e-mail's "Book your wash" button) -->
+                    <section id="book" class="s_text_image pt80 pb80" data-snippet="s_text_image">
+                        <div class="container">
+                            <div class="row align-items-center">
+                                <div class="col-lg-6">
+                                    <p class="text-uppercase small fw-bold cws-muted mb-2">For subscribers</p>
+                                    <h2 class="cws-h">Already subscribed? Book your wash</h2>
+                                    <p>Book every wash with the Car Wash Subscription form. Have your subscription code ready: it is in the e-mail we send you each month, and the form needs it.</p>
+                                    <ol>
+                                        <li>Choose a time slot and set up your home location – we come to you.</li>
+                                        <li>Enter the code for the service you are booking: exterior, full wash, deep clean or free exterior wash.</li>
+                                        <li>On the day, our team applies the code to your wash: one wash each time.</li>
+                                    </ol>
+                                    <p class="mt-4"><a t-att-href="cw_booking_url" class="btn btn-cws btn-lg o_not_editable">Book your wash</a></p>
+                                    <p class="cws-muted small mb-0">Deep cleaning must be booked in advance.</p>
+                                </div>
+                                <div class="col-lg-5 offset-lg-1 mt-4 mt-lg-0">
+                                    <img src="/web/image/15974-a27a3ef9/Untitled%20design%20%288%29.webp" class="cws-img" style="height: 360px;" alt="WAYAKIT team member cleaning a car interior" loading="lazy"/>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <div class="oe_structure" id="oe_structure_cw_before_faq"/>
+
+                    <!-- 6. FAQ (same structure as the live car wash page: title block + accordion, all closed) -->
+                    <section class="s_text_block pt40 pb0" data-snippet="s_text_block">
+                        <div class="container">
+                            <h3 class="cws-h">FAQs</h3>
+                        </div>
+                    </section>
+                    <section class="s_faq_collapse pt0 pb32 bg-white-25" data-snippet="s_faq_collapse">
+                        <div class="container">
+                            <div id="cw_faq" class="accordion" role="tablist">
+                                <div class="card bg-white" data-name="Item" role="presentation">
+                                    <a href="#" data-bs-target="#cw_faq_1" role="tab" aria-controls="cw_faq_1" data-bs-toggle="collapse" aria-expanded="false" class="collapsed card-header">How do I pay each month?</a>
+                                    <div id="cw_faq_1" class="collapse" data-bs-parent="#cw_faq" role="tabpanel">
+                                        <div class="card-body">
+                                            <p class="card-text">Your subscription renews every month. You receive the invoice by e-mail with a payment link; once it is paid, we e-mail you the codes for that month's washes.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="card bg-white" data-name="Item" role="presentation">
+                                    <a href="#" data-bs-target="#cw_faq_2" role="tab" aria-controls="cw_faq_2" data-bs-toggle="collapse" aria-expanded="false" class="collapsed card-header">What happens if I pay late?</a>
+                                    <div id="cw_faq_2" class="collapse" data-bs-parent="#cw_faq" role="tabpanel">
+                                        <div class="card-body">
+                                            <p class="card-text">Your washes for the new month are issued once the invoice is paid. For Regular Care, pay within 7 days of the end of your previous month to keep your streak towards the free exterior wash; after that, the count starts again.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="card bg-white" data-name="Item" role="presentation">
+                                    <a href="#" data-bs-target="#cw_faq_3" role="tab" aria-controls="cw_faq_3" data-bs-toggle="collapse" aria-expanded="false" class="collapsed card-header">How do I use my code?</a>
+                                    <div id="cw_faq_3" class="collapse" data-bs-parent="#cw_faq" role="tabpanel">
+                                        <div class="card-body">
+                                            <p class="card-text">Enter it in the Car Wash Subscription booking form: the form needs it. On the day of the wash, our team applies the code; each use covers one wash. If you have codes for different services, use the one for the service you booked.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="card bg-white" data-name="Item" role="presentation">
+                                    <a href="#" data-bs-target="#cw_faq_4" role="tab" aria-controls="cw_faq_4" data-bs-toggle="collapse" aria-expanded="false" class="collapsed card-header">Do unused washes carry over?</a>
+                                    <div id="cw_faq_4" class="collapse" data-bs-parent="#cw_faq" role="tabpanel">
+                                        <div class="card-body">
+                                            <p class="card-text">No. Included washes are valid for their subscription month only. Free exterior washes are valid for 30 days.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="card bg-white" data-name="Item" role="presentation">
+                                    <a href="#" data-bs-target="#cw_faq_5" role="tab" aria-controls="cw_faq_5" data-bs-toggle="collapse" aria-expanded="false" class="collapsed card-header">Can I give my free wash to someone else?</a>
+                                    <div id="cw_faq_5" class="collapse" data-bs-parent="#cw_faq" role="tabpanel">
+                                        <div class="card-body">
+                                            <p class="card-text">Yes. Free exterior washes from your rewards can be gifted: share the code and they can book with it.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- 7. Closing line -->
+                    <section class="s_text_block pt0 pb48" data-snippet="s_text_block">
+                        <div class="container">
+                            <p class="text-center cws-muted">Prefer a single wash? See prices and terms on the <a href="/wayakit-car-wash-service">WAYAKIT Car Wash Services</a> page.</p>
+                        </div>
+                    </section>
+
+                </div>
+            </t>
+        </template>
+
+        <record id="page_cw_subscriptions_page" model="website.page">
+            <field name="url">/car-wash-subscriptions</field>
+            <field name="view_id" ref="page_cw_subscriptions"/>
+            <field name="is_published" eval="True"/>
+            <field name="website_meta_title">WAYAKIT Car Wash Subscriptions | Regular Care and Premium Care</field>
+            <field name="website_meta_description">Monthly WAYAKIT car wash plans: save at least SAR 5 on every wash and get a 100 mL disinfectant gift every month. Prices include 15% VAT.</field>
+        </record>
+    </data>
+</odoo>

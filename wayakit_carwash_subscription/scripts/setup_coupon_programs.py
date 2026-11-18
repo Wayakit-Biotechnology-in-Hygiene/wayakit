@@ -4,7 +4,8 @@ Run on staging first, from the odoo.sh shell:
     odoo-bin shell -d <db> < wayakit_carwash_subscription/scripts/setup_coupon_programs.py
 
 Each program = "coupons" type, reward = the free service. Coupons are created by the module
-(one per period), so no rules are needed. Coupon email is sent on creation.
+(one per period), so no rules are needed. Coupon email (the module's Car Wash template) is
+sent on creation; existing programs still on the generic "Coupon Information" one are switched.
 """
 COMPANY_ID = 1  # Advanced Solutions for Detergents LLC (KSA)
 
@@ -18,7 +19,7 @@ SERVICES = {
 }
 
 Program = env['loyalty.program'].with_company(COMPANY_ID)
-mail_tmpl = env.ref('loyalty.mail_template_loyalty_card', raise_if_not_found=False)
+mail_tmpl = env.ref('wayakit_carwash_subscription.mail_template_cw_coupon', raise_if_not_found=False)
 
 for name, code in SERVICES.items():
     product = env['product.product'].search(
@@ -49,4 +50,5 @@ for name, code in SERVICES.items():
     prog = Program.create(vals)
     print('+ created:', name, '->', prog.id)
 
+print('= e-mail template switched on', Program._cw_use_coupon_template(), 'existing programs')
 env.cr.commit()

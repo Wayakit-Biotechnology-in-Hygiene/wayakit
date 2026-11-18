@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- noupdate: once installed the template is edited in the UI (Settings > Technical >
+         Email Templates); an upgrade must not overwrite those edits. -->
+    <data noupdate="1">
+        <!-- Sent by loyalty.card.create() through the "At creation" line of the six
+             "CW Sub – …" programs (switched by loyalty.program._cw_use_coupon_template).
+             Same brand skeleton as wayakit_customization's review coupon e-mail. No barcode:
+             the core coupon PDF is not attached. font-family sits on every text element
+             because Outlook does not inherit it from the wrapper. -->
+        <record id="mail_template_cw_coupon" model="mail.template">
+            <field name="name">Car Wash Subscription: your washes</field>
+            <field name="model_id" ref="loyalty.model_loyalty_card"/>
+            <field name="subject">Your WAYAKIT Car Wash code: {{ object.code }}</field>
+            <field name="email_from">{{ (object.program_id.company_id or object.env.company).email_formatted }}</field>
+            <field name="partner_to">{{ object._get_mail_partner().id }}</field>
+            <field name="lang">{{ object._get_mail_partner().lang }}</field>
+            <field name="description">Car Wash subscription coupon: code, washes, expiry and booking link</field>
+            <field name="auto_delete" eval="True"/>
+            <field name="body_html" type="html">
+                <div style="display:none;max-height:0;overflow:hidden;font-size:1px;line-height:1px;color:#ffffff;opacity:0;">
+                    Your WAYAKIT car wash code and how to book it.
+                </div>
+
+                <div style="max-width:600px;margin:0 auto;font-family:'Roboto','Segoe UI',Arial,sans-serif;background:#ffffff;">
+                    <t t-set="cw_base" t-value="object._cw_base_url()"/>
+                    <t t-set="cw_product" t-value="object.program_id.reward_ids[:1].reward_product_id"/>
+                    <t t-set="cw_service" t-value="cw_product.name or object.program_id.name"/>
+                    <t t-set="cw_points" t-value="int(object.points)"/>
+                    <t t-set="cw_reward" t-value="object.cw_kind in ('monthly_reward', 'streak_reward')"/>
+                    <t t-set="cw_deep" t-value="cw_product.default_code in ('FP-CWS-00102', 'FP-CWS-00202')"/>
+                    <t t-set="cw_first_name" t-value="(object._get_mail_partner().name or '').split()[:1]"/>
+
+                    <!-- header -->
+                    <div style="padding:28px 32px 24px;text-align:center;border-bottom:1px solid #D7EAF2;">
+                        <!-- Explicit height (140 × 309/420) keeps the logo's shape while images are blocked. -->
+                        <img t-att-src="cw_base + '/wayakit_carwash_subscription/static/src/img/wayakit_logo.png'"
+                             width="140" height="103" alt="WAYAKIT — Biotechnology in Hygiene"
+                             style="display:block;margin:0 auto 14px;width:140px;height:103px;"/>
+                        <p style="font-family:'Poppins','Segoe UI',Arial,sans-serif;color:#3A9BD4;font-size:9px;font-weight:600;letter-spacing:2.5px;margin:0;text-transform:uppercase;">GreenTech · KAUST · Saudi Arabia</p>
+                    </div>
+
+                    <!-- hero: title and code -->
+                    <div style="padding:36px 40px 24px;text-align:center;">
+                        <h1 style="font-family:'Poppins','Segoe UI',Arial,sans-serif;color:#26386F;font-size:24px;font-weight:600;margin:0 0 20px;line-height:1.3;">
+                            <t t-if="object.cw_kind == 'included'">Your car washes for this month</t>
+                            <t t-elif="object.cw_kind == 'monthly_reward'">Your free exterior wash this month</t>
+                            <t t-elif="object.cw_kind == 'streak_reward'">3 months in a row: a free exterior wash on us</t>
+                            <t t-else="">Your WAYAKIT car wash code</t>
+                        </h1>
+                        <div style="display:inline-block;border:1.5px dashed #12B8D8;border-radius:12px;padding:16px 28px;background-color:#EAFAFC;">
+                            <p style="font-family:'Poppins','Segoe UI',Arial,sans-serif;font-size:10px;font-weight:600;color:#0E8FA8;text-transform:uppercase;letter-spacing:1.5px;margin:0 0 8px;">Your code</p>
+                            <p style="font-family:'Poppins','Segoe UI',Arial,sans-serif;font-size:24px;font-weight:700;letter-spacing:2px;color:#26386F;margin:0 0 8px;">
+                                <t t-out="object.code">0440000000000</t>
+                            </p>
+                            <p style="font-family:'Roboto','Segoe UI',Arial,sans-serif;font-size:12px;color:#5D7183;margin:0;line-height:1.7;">
+                                <strong style="color:#26386F;"><t t-out="cw_points">4</t></strong>
+                                <t t-if="cw_points == 1">wash</t><t t-else="">washes</t>
+                                · <t t-out="cw_service">Full Wash</t>
+                                <t t-if="object.expiration_date">
+                                    <br/>Valid until <t t-out="format_date(object.expiration_date)">31/12/2026</t>
+                                </t>
+                                <br/>
+                                <t t-if="object.cw_kind == 'monthly_reward'">Monthly reward · transferable</t>
+                                <t t-elif="object.cw_kind == 'streak_reward'">Loyalty reward · transferable</t>
+                                <t t-else="">Included in your monthly plan</t>
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- body copy -->
+                    <div style="padding:0 32px 24px;">
+                        <p style="font-family:'Roboto','Segoe UI',Arial,sans-serif;font-size:15px;color:#17324D;margin:0 0 16px;">
+                            Dear <t t-out="cw_first_name and cw_first_name[0] or 'Valued Customer'">Customer</t>,
+                        </p>
+                        <p style="font-family:'Roboto','Segoe UI',Arial,sans-serif;font-size:14px;color:#5D7183;line-height:1.8;margin:0 0 24px;">
+                            <t t-if="object.cw_kind == 'monthly_reward'">Your Premium Care plan includes a free exterior wash every month. Use it, or gift it to someone.</t>
+                            <t t-elif="object.cw_kind == 'streak_reward'">Thank you for 3 consecutive months of Regular Care. Here is your free exterior wash: use it, or gift it to someone.</t>
+                            <t t-else="">Here is your code for the washes included in your subscription this month: <strong style="font-weight:600;color:#26386F;"><t t-out="cw_service">Full Wash</t></strong>.</t>
+                        </p>
+
+                        <!-- how to book -->
+                        <p style="font-family:'Poppins','Segoe UI',Arial,sans-serif;font-size:14px;font-weight:600;color:#26386F;margin:0 0 12px;">How to book</p>
+                        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                                <tr>
+                                    <td width="34" valign="top" style="padding:0 0 10px;">
+                                        <div style="width:22px;height:22px;line-height:22px;border-radius:50%;background-color:#EAFAFC;color:#0E8FA8;font-family:'Poppins','Segoe UI',Arial,sans-serif;font-size:12px;font-weight:700;text-align:center;">1</div>
+                                    </td>
+                                    <td valign="top" style="padding:0 0 10px;font-family:'Roboto','Segoe UI',Arial,sans-serif;font-size:14px;color:#5D7183;line-height:1.6;">Tap <strong style="color:#26386F;">Book your wash</strong> and choose a time slot and your home location – we come to you.</td>
+                                </tr>
+                                <tr>
+                                    <td width="34" valign="top" style="padding:0 0 10px;">
+                                        <div style="width:22px;height:22px;line-height:22px;border-radius:50%;background-color:#EAFAFC;color:#0E8FA8;font-family:'Poppins','Segoe UI',Arial,sans-serif;font-size:12px;font-weight:700;text-align:center;">2</div>
+                                    </td>
+                                    <td valign="top" style="padding:0 0 10px;font-family:'Roboto','Segoe UI',Arial,sans-serif;font-size:14px;color:#5D7183;line-height:1.6;">Type this code in the <strong style="color:#26386F;">Subscription code</strong> field. The booking form needs it.</td>
+                                </tr>
+                                <tr>
+                                    <td width="34" valign="top" style="padding:0 0 10px;">
+                                        <div style="width:22px;height:22px;line-height:22px;border-radius:50%;background-color:#EAFAFC;color:#0E8FA8;font-family:'Poppins','Segoe UI',Arial,sans-serif;font-size:12px;font-weight:700;text-align:center;">3</div>
+                                    </td>
+                                    <td valign="top" style="padding:0 0 10px;font-family:'Roboto','Segoe UI',Arial,sans-serif;font-size:14px;color:#5D7183;line-height:1.6;">On the day, our team applies the code to your wash: one wash each time.</td>
+                                </tr>
+                        </table>
+                        <p t-if="cw_deep" style="font-family:'Roboto','Segoe UI',Arial,sans-serif;font-size:12px;color:#5D7183;margin:4px 0 0;">Deep cleaning must be booked in advance.</p>
+                        <p style="font-family:'Roboto','Segoe UI',Arial,sans-serif;font-size:12px;color:#5D7183;margin:4px 0 20px;">
+                            <t t-if="cw_reward">Gifting it? Share the code: whoever has it can book with it before it expires.</t>
+                            <t t-else="">Washes you don't use before the expiry date don't carry over.</t>
+                        </p>
+
+                        <div style="text-align:center;margin:0 0 8px;">
+                            <a t-att-href="object._cw_booking_url()"
+                               style="display:inline-block;font-family:'Poppins','Segoe UI',Arial,sans-serif;background-color:#005A88;background-image:linear-gradient(135deg,#005A88 0%,#3A9BD4 100%);color:#ffffff;font-size:13px;font-weight:600;padding:13px 34px;border-radius:999px;text-decoration:none;border:1px solid #005A88;box-shadow:0 6px 16px rgba(0,90,136,0.22);margin:4px 0;">
+                                Book your wash →</a>
+                        </div>
+                    </div>
+
+                    <!-- signoff -->
+                    <div style="padding:8px 32px 24px;">
+                        <p style="font-family:'Roboto','Segoe UI',Arial,sans-serif;font-size:13px;color:#5D7183;line-height:1.7;margin:0 0 16px;">
+                            Questions? Reach us on
+                            <a href="https://wa.me/966545754908" style="font-family:'Roboto','Segoe UI',Arial,sans-serif;color:#005A88;">WhatsApp</a>
+                            or at <a href="mailto:info@wayakit.com" style="font-family:'Roboto','Segoe UI',Arial,sans-serif;color:#005A88;">info@wayakit.com</a>.
+                        </p>
+                        <p style="font-family:'Roboto','Segoe UI',Arial,sans-serif;font-size:14px;color:#5D7183;line-height:1.8;margin:0;">
+                            With appreciation,<br/><br/>
+                            <strong style="font-weight:600;color:#26386F;">The WAYAKIT Team</strong><br/>
+                            <span style="font-size:12px;color:#5D7183;">Advanced Cleaning Solutions · Thuwal, Saudi Arabia</span>
+                        </p>
+                    </div>
+
+                    <!-- footer -->
+                    <div style="background-color:#0A2540;padding:24px 32px;text-align:center;">
+                        <p style="font-family:'Poppins','Segoe UI',Arial,sans-serif;color:#3A9BD4;font-size:13px;font-weight:600;letter-spacing:3px;margin:0 0 6px;">WAYAKIT</p>
+                        <p style="font-family:'Roboto','Segoe UI',Arial,sans-serif;color:#5D7183;font-size:11px;margin:0 0 14px;">
+                            Biotechnology in sustainable cleaning · Women-led · KAUST-developed
+                        </p>
+                        <p style="margin:0 0 14px;">
+                            <a t-att-href="cw_base + '/car-wash-subscriptions'" style="font-family:'Roboto','Segoe UI',Arial,sans-serif;color:#A7D3E0;font-size:11px;text-decoration:none;margin:0 8px;">Car Wash</a>
+                            <a t-att-href="cw_base + '/shop'" style="font-family:'Roboto','Segoe UI',Arial,sans-serif;color:#A7D3E0;font-size:11px;text-decoration:none;margin:0 8px;">Online Store</a>
+                            <a href="https://wa.me/966545754908" style="font-family:'Roboto','Segoe UI',Arial,sans-serif;color:#A7D3E0;font-size:11px;text-decoration:none;margin:0 8px;">WhatsApp</a>
+                        </p>
+                        <p style="font-family:'Roboto','Segoe UI',Arial,sans-serif;color:#6B7C74;font-size:10px;margin:0;">
+                            © WAYAKIT · Advanced Solutions for Detergents LLC · Thuwal, Saudi Arabia
+                        </p>
+                    </div>
+                </div>
+            </field>
+        </record>
+
+        <!-- Fresh installs only (noupdate): point programs that already exist to the template.
+             Upgrades from <= 17.0.1.1.2 do it in migrations/17.0.1.2.0/post-migrate.py. -->
+        <function model="loyalty.program" name="_cw_use_coupon_template"/>
+    </data>
+</odoo>

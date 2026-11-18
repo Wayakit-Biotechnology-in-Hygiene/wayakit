@@ -1,0 +1,24 @@
+/* /car-wash-subscriptions only: every rule is scoped under #wrap.o_cws because the file
+   ships in the global frontend bundle. Values copied from the live /wayakit-car-wash-service
+   page. text-align: start (never left/right) keeps the Arabic version right-to-left. */
+.o_cws .cws-h{color:#1F477C;font-weight:700}
+.o_cws .cws-pill{display:inline-block;background:#47C2AF;color:#fff;font-size:13px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;padding:6px 16px;border-radius:999px}
+.o_cws .cws-offer{background:rgba(255,255,255,.95);border-radius:20px;box-shadow:0 10px 30px rgba(0,0,0,.25);padding:20px 28px}
+.o_cws .cws-offer-big{margin:0;color:#1F477C;font-size:30px;font-weight:800;line-height:1.2}
+.o_cws .cws-offer-sub{margin:8px 0 0;color:#2B3440;font-size:15px}
+.o_cws .cws-offer-note{margin:10px 0 0;color:#7A8594;font-size:13px;font-weight:600;letter-spacing:.05em;text-transform:uppercase}
+.o_cws .cws-table{border-collapse:separate;border-spacing:0;border:1px solid #E3E8EF;border-radius:14px;overflow:hidden;box-shadow:0 6px 24px rgba(31,71,124,.08);background:#fff;margin:0}
+.o_cws .cws-table th{background:#1F477C;color:#fff;padding:16px 20px;font-size:13px;letter-spacing:.08em;text-transform:uppercase;border:none;text-align:center;vertical-align:middle}
+.o_cws .cws-table td{padding:14px 20px;border:none;border-bottom:1px solid #EDF1F6;color:#2B3440;font-size:15px;text-align:center;vertical-align:middle;white-space:nowrap}
+.o_cws .cws-table tbody tr:nth-child(even) td{background:#F5F8FC}
+.o_cws .cws-table tbody tr:last-child td{border-bottom:none}
+.o_cws .cws-table th:first-child,.o_cws .cws-table td:first-child{text-align:start;font-weight:600;white-space:normal}
+.o_cws .cws-table td.cws-wrap{white-space:normal;font-size:14px}
+.o_cws .cws-sar{color:#7A8594;font-size:12px;font-weight:600;letter-spacing:.05em}
+.o_cws .cws-price{color:#1F477C;font-size:17px;font-weight:700}
+.o_cws .cws-retail{color:#7A8594;font-size:15px}
+.o_cws .cws-na{color:#A0A9B5;font-size:14px}
+.o_cws .btn-cws{background:#1F477C;border:1px solid #1F477C;color:#fff;border-radius:999px;padding:6px 18px}
+.o_cws .btn-cws:hover{background:#284D71;border-color:#284D71;color:#fff}
+.o_cws .cws-img{border-radius:20px;width:100%;object-fit:cover}
+.o_cws .cws-muted{color:#7A8594}

@@ -1,6 +1,6 @@
 {
     'name': 'Wayakit - Car Wash Subscriptions (KSA)',
-    'version': '17.0.1.1.2',
+    'version': '17.0.1.2.0',
     'summary': 'Monthly Car Wash plans: included washes as coupons, streak rewards, monthly gift',
     'description': """
 Builds on Odoo Subscriptions + Loyalty:
@@ -9,11 +9,13 @@ Builds on Odoo Subscriptions + Loyalty:
 - Rewards (Premium monthly exterior, Regular 3-consecutive-months exterior) are coupons
   valid N days, transferable (anyone with the code can redeem).
 - Monthly gift (e.g. disinfectant 100 mL) is recorded per period.
+- KSA website page /car-wash-subscriptions (plans, loyalty, booking) and a Car Wash coupon
+  e-mail with a "Book your wash" link.
 """,
     'author': 'Wayakit',
     'category': 'Sales/Subscriptions',
     'license': 'LGPL-3',
-    'depends': ['sale_subscription', 'sale_loyalty', 'website_sale_loyalty'],
+    'depends': ['sale_subscription', 'sale_loyalty', 'website_sale_loyalty', 'website_appointment'],
     'data': [
         'security/ir.model.access.csv',
         'security/carwash_security.xml',
@@ -21,7 +23,16 @@ Builds on Odoo Subscriptions + Loyalty:
         'views/carwash_period_views.xml',
         'views/sale_order_views.xml',
         'views/actions.xml',
+        'views/page_car_wash_subscriptions.xml',
+        'data/mail_template_data.xml',
+        # Last: binds the page above to the KSA website.
+        'data/website_bind.xml',
     ],
+    'assets': {
+        'web.assets_frontend': [
+            'wayakit_carwash_subscription/static/src/css/cws_page.css',
+        ],
+    },
     'installable': True,
     'application': False,
 }

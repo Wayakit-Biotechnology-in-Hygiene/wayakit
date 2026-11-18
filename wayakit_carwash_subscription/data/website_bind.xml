@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Loaded after the page and outside any noupdate block: runs on every install and
+         upgrade, binding /car-wash-subscriptions to the "KSA Website" (looked up by name). -->
+    <function model="website" name="_cw_bind_page"/>
+</odoo>

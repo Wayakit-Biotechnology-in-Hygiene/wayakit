@@ -31,7 +31,24 @@ Si solo falla el **correo** del cupón, los cupones sí se emiten y queda una no
    - Si se usan variantes, usar "Only for variant" para separar los programas de Sedan y SUV.
 6. Publicarlos en el website.
 
-> El correo del cupón sale del plan de comunicación "At creation" del programa. Al crear un programa *Coupons* por código (como hace el script) Odoo **no** lo agrega solo, porque eso pasa por un onchange de la UI. El script lo agrega; si creas programas a mano, revisa la pestaña Communications.
+> El correo del cupón (plantilla `mail_template_cw_coupon`) sale del plan de comunicación "At creation" del programa. Al crear un programa *Coupons* por código (como hace el script) Odoo **no** lo agrega solo, porque eso pasa por un onchange de la UI. El script lo agrega; si creas programas a mano, revisa la pestaña Communications.
+
+## Página y correo (v17.0.1.2.0)
+- **Página** `/car-wash-subscriptions`, solo en la web **"KSA Website"** (se busca por nombre exacto, nunca por id; la amarra `website._cw_bind_page` en cada instalación/actualización). Si al instalar no hay exactamente una web con ese nombre, la página queda **sin publicar** y sale un warning en el log. Es `noupdate`: después de instalarla se edita y se traduce al árabe en el editor del website (*Website › Translate*), y un `-u` no pisa esos cambios. Para mandar contenido nuevo desde git hace falta una migración.
+  - Botones **Subscribe**: van al `website_url` de los productos `FP-CWS-00103/00104/00203/00204/00105/00205` (compañía 1). Si el producto no existe, no está publicado o está en otra web, el botón no se muestra.
+  - **Book your wash** (`#book`): va a la cita publicada que se llame exactamente **"Car Wash Subscription"** (web KSA o sin web). Si no existe, va a `/appointment/1` (Car Wash Care).
+  - Los botones Subscribe y Book your wash son "vivos" y están bloqueados en el editor (`o_not_editable`): si se editaran, Odoo guardaría el link fijo y dejaría de ocultarlos. El resto del texto sí se edita. Para agregar bloques nuevos están las dos zonas vacías (después del hero y antes del FAQ).
+  - Las fotos son adjuntos de prod de la página `/wayakit-car-wash-service` (`/web/image/<id>-…`): si se borran de la biblioteca de medios, aquí se rompen. En una BD de prueba no existen.
+  - El texto de la página y del correo dice "3 meses seguidos" fijo. Si cambia `cw_streak_periods` de un producto, hay que cambiar ese texto a mano.
+  - Si se renombra la web KSA después de instalar, la página se queda donde está; el nombre solo se usa para la primera vez.
+- **Correo del cupón**: plantilla `mail_template_cw_coupon` (`noupdate`, se puede editar en *Ajustes › Técnico › Plantillas de correo*). Muestra nombre, servicio, código, lavadas, vencimiento y tipo (las recompensas son transferibles), y lleva el botón **Book your wash** → `<dominio de la web KSA>/car-wash-subscriptions#book`. En staging la web no tiene dominio, así que el link apunta a staging. No lleva código de barras.
+  - Los programas "CW Sub – …" de la compañía 1 que todavía usan el correo genérico "Coupon: Coupon Information" se cambian al nuevo solos: en una instalación nueva, al instalar; al actualizar desde ≤ 1.1.2, en `migrations/17.0.1.2.0/post-migrate.py`. Si alguien eligió a mano otra plantilla, se respeta. El script `setup_coupon_programs.py` usa la nueva plantilla y hace el mismo cambio.
+
+**A mano (Mafer, en la UI, primero en staging y después en prod):**
+1. Crear la cita **"Car Wash Subscription"**: duplicar "Car Wash Care" (id 1) con el mismo personal y calendario, para que los horarios no se encimen. Quitar la pregunta "Payment Method", agregar la pregunta obligatoria "Subscription code", renombrarla exactamente `Car Wash Subscription` y publicarla en la web KSA.
+2. Publicar los 6 productos de suscripción en la web KSA. Mientras no estén publicados, la página no muestra sus botones Subscribe.
+3. Revisar la página en el editor y traducirla al árabe.
+4. Opcional: agregar `/car-wash-subscriptions` al menú de la web KSA (el módulo no crea menú).
 
 ## Tests
 `tests/test_carwash_subscription.py`: compra Regular Sedan, 3 periodos seguidos → exterior, pago dentro de los 7 días de gracia, pago con más de 7 días de atraso → la racha reinicia, Premium SUV → exterior mensual sin racha, cupones incluidos vencen al final del periodo, re-emisión idempotente, falla del hook o del correo sin bloquear el pago.
@@ -55,4 +72,4 @@ odoo-bin -c ../odoo.conf -d <db_de_prueba> -i wayakit_carwash_subscription --tes
 - Crear el producto **Desinfectante 100 mL**, que no existe en KSA.
 - Confirmar que el proveedor de pago del website soporta **tokenización**. Si no la soporta, la renovación no se cobra sola y el cliente paga desde el portal.
 - Activar *Sales › Automatic Invoice*, porque sin factura pagada no se emite nada.
-- Deep clean: el correo del cupón debe incluir el link de la cita "Car Wash Care".
+- Deep clean: el link de reserva en el correo del cupón ya está desde la 1.2.0 (botón "Book your wash" → cita "Car Wash Subscription").
